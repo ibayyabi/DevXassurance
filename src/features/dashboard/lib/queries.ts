@@ -13,11 +13,13 @@ export type HealthCardMetric = {
   status: HealthStatus;
   evidenceCoverage: number | null;
   statusText: string;
+  sourceSummary: string | null;
   snapshotDate: string | null;
 };
 
 export type HealthTrendPoint = {
   date: string;
+  label: string;
   score: number;
   status: Exclude<HealthStatus, "insufficient_evidence">;
   evidenceCoverage: number | null;
@@ -57,6 +59,7 @@ type HealthSnapshotRow = {
   status: HealthStatus;
   evidence_coverage: number | null;
   status_text: string;
+  source_summary: string | null;
   snapshot_date: string;
 };
 
@@ -96,7 +99,7 @@ export async function getDashboardOverview(projectId: string) {
     await Promise.all([
       supabase
         .from("dashboard_health_snapshots")
-        .select("dimension, score, status, evidence_coverage, status_text, snapshot_date")
+        .select("dimension, score, status, evidence_coverage, status_text, source_summary, snapshot_date")
         .eq("project_id", projectId)
         .order("snapshot_date", { ascending: false }),
       supabase
@@ -160,19 +163,11 @@ export async function getDashboardOverview(projectId: string) {
             status: "insufficient_evidence",
             evidenceCoverage: null,
             statusText: "Insufficient evidence",
+            sourceSummary: null,
             snapshotDate: null,
           } satisfies HealthCardMetric);
     }),
-    trend: snapshots
-      .filter((row) => row.dimension === "overall" && row.score !== null)
-      .sort((a, b) => a.snapshot_date.localeCompare(b.snapshot_date))
-      .map((row) => ({
-        date: row.snapshot_date,
-        score: row.score ?? 0,
-        status:
-          row.status === "insufficient_evidence" ? "red" : row.status,
-        evidenceCoverage: row.evidence_coverage,
-      })) as HealthTrendPoint[],
+    trend: buildTrendPoints(snapshots),
     alerts: ((alertData ?? []) as unknown as AlertRow[]).map((row) => ({
       id: row.id,
       severity: row.severity,
@@ -201,13 +196,55 @@ export async function getDashboardOverview(projectId: string) {
   };
 }
 
+function buildTrendPoints(snapshots: HealthSnapshotRow[]): HealthTrendPoint[] {
+  const latestByMonth = new Map<string, HealthSnapshotRow>();
+
+  for (const row of snapshots
+    .filter((snapshot) => snapshot.dimension === "overall" && snapshot.score !== null)
+    .sort((a, b) => a.snapshot_date.localeCompare(b.snapshot_date))) {
+    latestByMonth.set(row.snapshot_date.slice(0, 7), row);
+  }
+
+  return [...latestByMonth.values()]
+    .slice(-12)
+    .map((row) => ({
+      date: row.snapshot_date,
+      label: formatMonthLabel(row.snapshot_date),
+      score: normalizeScoreForStatus(row.score, row.status) ?? 0,
+      status: row.status === "insufficient_evidence" ? "red" : row.status,
+      evidenceCoverage: row.evidence_coverage,
+    }));
+}
+
+function formatMonthLabel(value: string) {
+  return new Intl.DateTimeFormat("en", {
+    month: "short",
+    year: "numeric",
+  }).format(new Date(`${value}T00:00:00`));
+}
+
 function mapHealthCard(row: HealthSnapshotRow): HealthCardMetric {
   return {
     dimension: row.dimension,
-    score: row.score,
+    score: normalizeScoreForStatus(row.score, row.status),
     status: row.status,
     evidenceCoverage: row.evidence_coverage,
     statusText: row.status_text,
+    sourceSummary: row.source_summary,
     snapshotDate: row.snapshot_date,
   };
+}
+
+function normalizeScoreForStatus(score: number | null, status: HealthStatus) {
+  if (status === "insufficient_evidence") return null;
+
+  if (status === "green") {
+    return Math.max(80, Math.min(100, Math.round(score ?? 88)));
+  }
+
+  if (status === "amber") {
+    return Math.max(50, Math.min(79, Math.round(score ?? 68)));
+  }
+
+  return Math.max(0, Math.min(49, Math.round(score ?? 42)));
 }

@@ -1,0 +1,5 @@
+risk_id,title,category,status,probability,impact,owner,mitigation,document_date
+R-301,Customer master migration reconciliation failure,risk,open,high,high,,No approved mitigation; recovery owner missing,2026-02-20
+R-302,Release 2 critical path blocked,schedule,open,high,high,Sarah Khan,Escalate to steering committee and re-baseline delivery,2026-02-20
+R-303,Cutover readiness evidence missing,audit_readiness,open,high,high,,Collect migration test evidence and obtain sign-off,2026-02-20
+

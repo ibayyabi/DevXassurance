@@ -21,31 +21,41 @@ export async function POST(
 ) {
   const { projectId } = await params;
   const formData = await request.formData();
-  const title = String(formData.get("title") ?? "").trim();
+  const requestedTitle = String(formData.get("title") ?? "").trim();
   const documentDate = String(formData.get("documentDate") ?? "").trim();
   const documentType = String(formData.get("documentType") ?? "");
-  const file = formData.get("file");
+  const files = formData
+    .getAll("file")
+    .filter((file): file is File => file instanceof File && file.size > 0);
+  const fileLastModifiedValues = formData.getAll("fileLastModified").map(String);
+  const effectiveDocumentType = isDocumentType(documentType)
+    ? documentType
+    : "progress_report";
 
-  if (!projectId || !title || !isDocumentType(documentType)) {
+  if (!projectId) {
     return NextResponse.json(
-      { ok: false, message: "Add a title and supported document type." },
+      { ok: false, message: "Project is required for evidence upload." },
       { status: 400 },
     );
   }
 
-  if (!(file instanceof File) || file.size === 0) {
+  if (files.length === 0) {
     return NextResponse.json(
-      { ok: false, message: "Choose an evidence file to upload." },
+      { ok: false, message: "Choose at least one evidence file to upload." },
       { status: 400 },
     );
   }
 
-  if (!isSupportedEvidenceFile(file)) {
+  const unsupportedFiles = files.filter((file) => !isSupportedEvidenceFile(file));
+
+  if (unsupportedFiles.length > 0) {
     return NextResponse.json(
       {
         ok: false,
         message:
-          "Supported evidence files: PDF, DOCX, XLSX, CSV, TXT, PowerPoint, PNG, JPG, or WebP.",
+          `Unsupported file type: ${unsupportedFiles
+            .map((file) => file.name)
+            .join(", ")}. Supported evidence files: PDF, DOCX, XLSX, CSV, TXT, PowerPoint, PNG, JPG, or WebP.`,
       },
       { status: 400 },
     );
@@ -64,6 +74,88 @@ export async function POST(
     );
   }
 
+  const results = await Promise.all(
+    files.map((file, index) =>
+      uploadEvidenceFile({
+        projectId,
+        uploaderId: user.id,
+        file,
+        title:
+          files.length === 1
+            ? requestedTitle || titleFromFileName(file.name)
+            : titleFromFileName(file.name),
+        documentDate:
+          documentDate ||
+          timestampIsoDate(fileLastModifiedValues[index]) ||
+          fileLastModifiedIsoDate(file) ||
+          todayIsoDate(),
+        documentType: effectiveDocumentType,
+        supabase,
+      }),
+    ),
+  );
+
+  const failed = results.filter((result) => !result.ok);
+  const uploaded = results.filter((result) => result.ok);
+
+  if (uploaded.length === 0) {
+    return NextResponse.json(
+      {
+        ok: false,
+        message:
+          failed[0]?.message ??
+          "No files were uploaded. Check the files and try again.",
+      },
+      { status: 500 },
+    );
+  }
+
+  const queuedCount = uploaded.filter((result) => result.queued).length;
+  const reviewCount = uploaded.length - queuedCount;
+  const failureNote =
+    failed.length > 0 ? ` ${failed.length} file(s) need retry.` : "";
+
+  return NextResponse.json({
+    ok: true,
+    message:
+      `${uploaded.length} file(s) uploaded. ${queuedCount} queued for processing, ${reviewCount} stored for review.` +
+      failureNote,
+  });
+}
+
+function isDocumentType(value: string): value is DocumentType {
+  return documentTypes.includes(value as DocumentType);
+}
+
+type UploadEvidenceFileInput = {
+  projectId: string;
+  uploaderId: string;
+  file: File;
+  title: string;
+  documentDate: string;
+  documentType: DocumentType;
+  supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"];
+};
+
+type UploadEvidenceFileResult =
+  | {
+      ok: true;
+      queued: boolean;
+    }
+  | {
+      ok: false;
+      message: string;
+    };
+
+async function uploadEvidenceFile({
+  projectId,
+  uploaderId,
+  file,
+  title,
+  documentDate,
+  documentType,
+  supabase,
+}: UploadEvidenceFileInput): Promise<UploadEvidenceFileResult> {
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "-").toLowerCase();
   const storagePath = `${projectId}/${crypto.randomUUID()}-${safeName}`;
   const mimeType = normalizedMimeType(file);
@@ -77,24 +169,21 @@ export async function POST(
     });
 
   if (uploadError) {
-    return NextResponse.json(
-      { ok: false, message: defaultFailure },
-      { status: 500 },
-    );
+    return { ok: false, message: defaultFailure };
   }
 
   const { data: documentRecord, error: documentError } = await supabase
     .from("documents")
     .insert({
       project_id: projectId,
-      uploader_id: user.id,
+      uploader_id: uploaderId,
       document_type: documentType,
       title,
       file_name: file.name,
       file_size: file.size,
       mime_type: mimeType,
       storage_path: storagePath,
-      document_date: documentDate || null,
+      document_date: documentDate,
       processing_status: canProcessAutomatically ? "uploaded" : "needs_review",
       processing_error: canProcessAutomatically
         ? null
@@ -106,18 +195,11 @@ export async function POST(
   if (documentError || !documentRecord) {
     await supabase.storage.from("project-evidence").remove([storagePath]);
 
-    return NextResponse.json(
-      { ok: false, message: defaultFailure },
-      { status: 500 },
-    );
+    return { ok: false, message: defaultFailure };
   }
 
   if (!canProcessAutomatically) {
-    return NextResponse.json({
-      ok: true,
-      message:
-        "Evidence file uploaded and stored. Automated extraction supports PDF, TXT, CSV, DOCX, and XLSX files.",
-    });
+    return { ok: true, queued: false };
   }
 
   const { error: jobError } = await supabase.from("ai_jobs").insert({
@@ -138,10 +220,7 @@ export async function POST(
       })
       .eq("id", documentRecord.id);
 
-    return NextResponse.json({
-      ok: true,
-      message: "Document uploaded. Processing needs manual review.",
-    });
+    return { ok: true, queued: false };
   }
 
   await supabase
@@ -149,12 +228,51 @@ export async function POST(
     .update({ processing_status: "queued" })
     .eq("id", documentRecord.id);
 
-  return NextResponse.json({
-    ok: true,
-    message: "Document uploaded and queued for processing.",
-  });
+  return { ok: true, queued: true };
 }
 
-function isDocumentType(value: string): value is DocumentType {
-  return documentTypes.includes(value as DocumentType);
+function titleFromFileName(fileName: string) {
+  return fileName.replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ").trim() || fileName;
+}
+
+function todayIsoDate() {
+  const parts = new Intl.DateTimeFormat("en", {
+    day: "2-digit",
+    month: "2-digit",
+    timeZone: process.env.TZ ?? "Asia/Jakarta",
+    year: "numeric",
+  }).formatToParts(new Date());
+  const valueByType = Object.fromEntries(
+    parts.map((part) => [part.type, part.value]),
+  );
+
+  return `${valueByType.year}-${valueByType.month}-${valueByType.day}`;
+}
+
+function fileLastModifiedIsoDate(file: File) {
+  return timestampIsoDate(file.lastModified);
+}
+
+function timestampIsoDate(value: unknown) {
+  const lastModified = Number(value);
+
+  if (!Number.isFinite(lastModified) || lastModified <= 0) {
+    return null;
+  }
+
+  return formatIsoDate(new Date(lastModified));
+}
+
+function formatIsoDate(date: Date) {
+  const parts = new Intl.DateTimeFormat("en", {
+    day: "2-digit",
+    month: "2-digit",
+    timeZone: process.env.TZ ?? "Asia/Jakarta",
+    year: "numeric",
+  }).formatToParts(date);
+  const valueByType = Object.fromEntries(
+    parts.map((part) => [part.type, part.value]),
+  );
+
+  return `${valueByType.year}-${valueByType.month}-${valueByType.day}`;
 }

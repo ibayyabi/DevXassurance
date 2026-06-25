@@ -1,15 +1,13 @@
 import Link from "next/link";
 import { ArrowRight, Clock3, ShieldCheck } from "lucide-react";
 
-import { roleLabels } from "@/features/projects/lib/roles";
+import { DeleteProjectButton } from "@/features/projects/components/delete-project-button";
+import { canManageProject, roleLabels } from "@/features/projects/lib/roles";
 import type { AssignedProject } from "@/features/projects/lib/queries";
 
 export function ProjectCard({ project }: { project: AssignedProject }) {
   return (
-    <Link
-      href={`/app/projects/${project.projectId}/dashboard`}
-      className="group block rounded-lg border border-slate-200 bg-white p-5 shadow-sm transition hover:border-blue-300 hover:shadow-md"
-    >
+    <article className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm transition hover:border-blue-300 hover:shadow-md">
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-sm font-medium text-slate-500">
@@ -19,7 +17,13 @@ export function ProjectCard({ project }: { project: AssignedProject }) {
             {project.projectName}
           </h2>
         </div>
-        <ArrowRight className="h-5 w-5 text-slate-400 transition group-hover:translate-x-0.5 group-hover:text-blue-700" />
+        <Link
+          href={`/app/projects/${project.projectId}/dashboard`}
+          className="inline-flex h-9 items-center gap-2 rounded-md bg-blue-700 px-3 text-sm font-medium text-white transition hover:bg-blue-800"
+        >
+          Open
+          <ArrowRight className="h-4 w-4" />
+        </Link>
       </div>
       <div className="mt-5 grid gap-3 sm:grid-cols-2">
         <div className="rounded-md bg-slate-50 p-3">
@@ -46,6 +50,14 @@ export function ProjectCard({ project }: { project: AssignedProject }) {
           Upload project documents to establish the first assurance baseline.
         </p>
       )}
-    </Link>
+      {canManageProject(project.role) && (
+        <div className="mt-4 flex justify-end border-t border-slate-100 pt-4">
+          <DeleteProjectButton
+            projectId={project.projectId}
+            projectName={project.projectName}
+          />
+        </div>
+      )}
+    </article>
   );
 }

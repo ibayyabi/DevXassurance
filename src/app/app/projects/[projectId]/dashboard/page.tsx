@@ -37,14 +37,18 @@ async function DashboardContent({
             {membership.projectName}
           </h2>
           <p className="mt-2 text-sm text-slate-600">
-            Health scores, alerts, and actions are shown only when backed by
-            project evidence.
+            Health scores come from processed evidence and model-generated
+            project assurance snapshots.
           </p>
         </div>
         <form action={refreshDashboardFromEvidence} className="flex gap-2">
           <input type="hidden" name="projectId" value={projectId} />
-          <Button type="submit" variant="outline">
-            Refresh from evidence
+          <Button
+            type="submit"
+            variant="outline"
+            className="border-blue-200 bg-white text-blue-800 hover:bg-blue-50 hover:text-blue-900"
+          >
+            Refresh model snapshots
           </Button>
         </form>
       </div>

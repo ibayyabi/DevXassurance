@@ -33,6 +33,14 @@ export function UploadDocumentForm({ projectId }: { projectId: string }) {
 
     const form = event.currentTarget;
     const formData = new FormData(form);
+    const fileInput = form.elements.namedItem("file");
+
+    if (fileInput instanceof HTMLInputElement) {
+      formData.delete("fileLastModified");
+      for (const file of Array.from(fileInput.files ?? [])) {
+        formData.append("fileLastModified", String(file.lastModified));
+      }
+    }
 
     setPending(true);
     setState({ ok: false, message: "" });
@@ -84,37 +92,43 @@ export function UploadDocumentForm({ projectId }: { projectId: string }) {
         <div className="min-w-0">
           <h2 className="font-semibold text-slate-950">Upload Documents</h2>
           <p className="mt-1 text-sm leading-6 text-slate-600">
-            Add project evidence to the library. PDF, TXT, CSV, DOCX, and XLSX
-            files are queued for document intelligence processing; PPT and
-            image files are stored as reference evidence.
+            Add one or more project evidence files. Metadata is optional:
+            filenames become document titles, the file modified date becomes
+            document date, and type defaults to Progress Report when not
+            selected.
           </p>
         </div>
       </div>
 
       <div className="mt-4 grid gap-3">
         <div className="grid gap-2">
-          <Label htmlFor="title">Document title</Label>
+          <Label htmlFor="title">Document title optional</Label>
           <Input
             id="title"
             name="title"
             placeholder="Progress Report - May 2024"
-            required
           />
+          <p className="text-xs leading-5 text-slate-500">
+            Used for a single-file upload. Multi-file uploads use each filename.
+          </p>
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="grid min-w-0 gap-2">
-            <Label htmlFor="documentDate">Document date</Label>
+            <Label htmlFor="documentDate">Document date optional</Label>
             <Input id="documentDate" name="documentDate" type="date" />
+            <p className="text-xs leading-5 text-slate-500">
+              Defaults to each file&apos;s modified date.
+            </p>
           </div>
           <div className="grid min-w-0 gap-2">
-            <Label htmlFor="documentType">Primary type</Label>
+            <Label htmlFor="documentType">Primary type optional</Label>
             <select
               id="documentType"
               name="documentType"
-              required
               className="h-9 min-w-0 rounded-md border border-slate-200 bg-white px-3 text-sm shadow-sm"
-              defaultValue="progress_report"
+              defaultValue=""
             >
+              <option value="">Default: Progress Report</option>
               {documentTypes.map((type) => (
                 <option key={type} value={type}>
                   {documentTypeLabels[type]}
@@ -124,13 +138,15 @@ export function UploadDocumentForm({ projectId }: { projectId: string }) {
           </div>
         </div>
         <div className="grid gap-2">
-          <Label htmlFor="file">Evidence file</Label>
+          <Label htmlFor="file">Evidence files</Label>
           <Input
             id="file"
             name="file"
             type="file"
             accept={evidenceFileAccept}
+            multiple
             required
+            className="bg-white file:mr-3 file:rounded-md file:border file:border-blue-200 file:bg-blue-50 file:px-3 file:py-1.5 file:text-blue-800 hover:file:bg-blue-100"
           />
           <p className="text-xs leading-5 text-slate-500">
             Extracts PDF, TXT, CSV, DOCX, and XLSX. PPT, PNG, JPG, and WebP are
@@ -154,7 +170,7 @@ export function UploadDocumentForm({ projectId }: { projectId: string }) {
       <Button
         type="submit"
         disabled={pending}
-        className="mt-4 bg-blue-700 hover:bg-blue-800"
+        className="mt-4 bg-blue-700 text-white hover:bg-blue-800"
       >
         {pending ? "Uploading..." : "Upload Evidence"}
       </Button>

@@ -28,24 +28,34 @@ export async function uploadDocument(
   formData: FormData,
 ): Promise<ActionState> {
   const projectId = String(formData.get("projectId") ?? "");
-  const title = String(formData.get("title") ?? "").trim();
+  const requestedTitle = String(formData.get("title") ?? "").trim();
   const documentDate = String(formData.get("documentDate") ?? "").trim();
   const documentType = String(formData.get("documentType") ?? "");
-  const file = formData.get("file");
+  const files = formData
+    .getAll("file")
+    .filter((file): file is File => file instanceof File && file.size > 0);
+  const fileLastModifiedValues = formData.getAll("fileLastModified").map(String);
+  const effectiveDocumentType = isDocumentType(documentType)
+    ? documentType
+    : "progress_report";
 
-  if (!projectId || !title || !isDocumentType(documentType)) {
-    return { ok: false, message: "Add a title and supported document type." };
+  if (!projectId) {
+    return { ok: false, message: "Project is required for evidence upload." };
   }
 
-  if (!(file instanceof File) || file.size === 0) {
-    return { ok: false, message: "Choose an evidence file to upload." };
+  if (files.length === 0) {
+    return { ok: false, message: "Choose at least one evidence file to upload." };
   }
 
-  if (!isSupportedEvidenceFile(file)) {
+  const unsupportedFiles = files.filter((file) => !isSupportedEvidenceFile(file));
+
+  if (unsupportedFiles.length > 0) {
     return {
       ok: false,
       message:
-        "Supported evidence files: PDF, DOCX, XLSX, CSV, TXT, PowerPoint, PNG, JPG, or WebP.",
+        `Unsupported file type: ${unsupportedFiles
+          .map((file) => file.name)
+          .join(", ")}. Supported evidence files: PDF, DOCX, XLSX, CSV, TXT, PowerPoint, PNG, JPG, or WebP.`,
     };
   }
 
@@ -58,6 +68,83 @@ export async function uploadDocument(
     };
   }
 
+  const results = await Promise.all(
+    files.map((file, index) =>
+      uploadEvidenceFile({
+        projectId,
+        uploaderId: user.id,
+        file,
+        title:
+          files.length === 1
+            ? requestedTitle || titleFromFileName(file.name)
+            : titleFromFileName(file.name),
+        documentDate:
+          documentDate ||
+          timestampIsoDate(fileLastModifiedValues[index]) ||
+          fileLastModifiedIsoDate(file) ||
+          todayIsoDate(),
+        documentType: effectiveDocumentType,
+        supabase,
+      }),
+    ),
+  );
+
+  revalidatePath(`/app/projects/${projectId}/documents`);
+
+  const uploaded = results.filter((result) => result.ok);
+  const failed = results.filter((result) => !result.ok);
+
+  if (uploaded.length === 0) {
+    return {
+      ok: false,
+      message:
+        failed[0]?.message ??
+        "No files were uploaded. Check the files and try again.",
+    };
+  }
+
+  const queuedCount = uploaded.filter((result) => result.queued).length;
+  const reviewCount = uploaded.length - queuedCount;
+  const failureNote =
+    failed.length > 0 ? ` ${failed.length} file(s) need retry.` : "";
+
+  return {
+    ok: true,
+    message:
+      `${uploaded.length} file(s) uploaded. ${queuedCount} queued for processing, ${reviewCount} stored for review.` +
+      failureNote,
+  };
+}
+
+type UploadEvidenceFileInput = {
+  projectId: string;
+  uploaderId: string;
+  file: File;
+  title: string;
+  documentDate: string;
+  documentType: DocumentType;
+  supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"];
+};
+
+type UploadEvidenceFileResult =
+  | {
+      ok: true;
+      queued: boolean;
+    }
+  | {
+      ok: false;
+      message: string;
+    };
+
+async function uploadEvidenceFile({
+  projectId,
+  uploaderId,
+  file,
+  title,
+  documentDate,
+  documentType,
+  supabase,
+}: UploadEvidenceFileInput): Promise<UploadEvidenceFileResult> {
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "-").toLowerCase();
   const storagePath = `${projectId}/${crypto.randomUUID()}-${safeName}`;
   const mimeType = normalizedMimeType(file);
@@ -78,14 +165,14 @@ export async function uploadDocument(
     .from("documents")
     .insert({
       project_id: projectId,
-      uploader_id: user.id,
+      uploader_id: uploaderId,
       document_type: documentType,
       title,
       file_name: file.name,
       file_size: file.size,
       mime_type: mimeType,
       storage_path: storagePath,
-      document_date: documentDate || null,
+      document_date: documentDate,
       processing_status: canProcessAutomatically ? "uploaded" : "needs_review",
       processing_error: canProcessAutomatically
         ? null
@@ -96,17 +183,12 @@ export async function uploadDocument(
 
   if (documentError || !documentRecord) {
     await supabase.storage.from("project-evidence").remove([storagePath]);
+
     return { ok: false, message: defaultFailure };
   }
 
   if (!canProcessAutomatically) {
-    revalidatePath(`/app/projects/${projectId}/documents`);
-
-    return {
-      ok: true,
-      message:
-        "Evidence file uploaded and stored. Automated extraction supports PDF, TXT, CSV, DOCX, and XLSX files.",
-    };
+    return { ok: true, queued: false };
   }
 
   const { error: jobError } = await supabase.from("ai_jobs").insert({
@@ -122,24 +204,66 @@ export async function uploadDocument(
       .from("documents")
       .update({
         processing_status: "needs_review",
-        processing_error: "Document uploaded but processing could not be queued.",
+        processing_error:
+          "Document uploaded but processing could not be queued.",
       })
       .eq("id", documentRecord.id);
-  } else {
-    await supabase
-      .from("documents")
-      .update({ processing_status: "queued" })
-      .eq("id", documentRecord.id);
+
+    return { ok: true, queued: false };
   }
 
-  revalidatePath(`/app/projects/${projectId}/documents`);
+  await supabase
+    .from("documents")
+    .update({ processing_status: "queued" })
+    .eq("id", documentRecord.id);
 
-  return {
-    ok: true,
-    message: jobError
-      ? "Document uploaded. Processing needs manual review."
-      : "Document uploaded and queued for processing.",
-  };
+  return { ok: true, queued: true };
+}
+
+function titleFromFileName(fileName: string) {
+  return fileName.replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ").trim() || fileName;
+}
+
+function todayIsoDate() {
+  const parts = new Intl.DateTimeFormat("en", {
+    day: "2-digit",
+    month: "2-digit",
+    timeZone: process.env.TZ ?? "Asia/Jakarta",
+    year: "numeric",
+  }).formatToParts(new Date());
+  const valueByType = Object.fromEntries(
+    parts.map((part) => [part.type, part.value]),
+  );
+
+  return `${valueByType.year}-${valueByType.month}-${valueByType.day}`;
+}
+
+function fileLastModifiedIsoDate(file: File) {
+  return timestampIsoDate(file.lastModified);
+}
+
+function timestampIsoDate(value: unknown) {
+  const lastModified = Number(value);
+
+  if (!Number.isFinite(lastModified) || lastModified <= 0) {
+    return null;
+  }
+
+  return formatIsoDate(new Date(lastModified));
+}
+
+function formatIsoDate(date: Date) {
+  const parts = new Intl.DateTimeFormat("en", {
+    day: "2-digit",
+    month: "2-digit",
+    timeZone: process.env.TZ ?? "Asia/Jakarta",
+    year: "numeric",
+  }).formatToParts(date);
+  const valueByType = Object.fromEntries(
+    parts.map((part) => [part.type, part.value]),
+  );
+
+  return `${valueByType.year}-${valueByType.month}-${valueByType.day}`;
 }
 
 export async function updateDocumentClassification(

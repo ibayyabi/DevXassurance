@@ -1,0 +1,13 @@
+Project: Alpha Infrastructure Program
+Document date: 2026-01-18
+Document type: Progress Report
+
+Overall health: AMBER.
+Schedule status: AMBER. Design Package 3 is behind by 8 days after late review comments. The team can recover if decisions are closed by January 25, 2026.
+Cost status: GREEN. Actual cost remains within budget, but forecast pressure is starting to appear.
+Risk status: AMBER. Vendor response time is a moderate risk and needs weekly monitoring.
+Governance status: GREEN. Steering committee decisions are recorded.
+Audit readiness status: AMBER. Two evidence items are incomplete for the design review trail.
+
+Recommended action: Replan Design Package 3 and assign owners for missing audit evidence.
+

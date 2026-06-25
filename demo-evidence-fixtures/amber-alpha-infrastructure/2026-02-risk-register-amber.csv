@@ -1,0 +1,5 @@
+risk_id,title,category,status,probability,impact,owner,mitigation,document_date
+R-201,Vendor comments delay Design Package 3,schedule,open,medium,high,James Lee,Daily vendor checkpoint and escalation path,2026-02-17
+R-202,Integration test capacity,risk,open,medium,medium,Priya Nair,Reserve two additional test analysts,2026-02-17
+R-203,Missing approval evidence,governance,open,medium,medium,Sarah Khan,Collect design review approvals before release gate,2026-02-17
+

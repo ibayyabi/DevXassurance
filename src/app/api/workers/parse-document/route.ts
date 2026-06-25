@@ -12,6 +12,7 @@ type WorkerRequest = {
   title?: string | null;
   file_name?: string | null;
   document_type?: string | null;
+  document_date?: string | null;
 };
 
 export async function POST(request: NextRequest) {
@@ -70,6 +71,7 @@ export async function POST(request: NextRequest) {
     documentId,
     title: payload.title,
     documentType: payload.document_type,
+    documentDate: payload.document_date,
     fileName,
     fileBuffer: await data.arrayBuffer(),
   });
@@ -117,6 +119,7 @@ export async function POST(request: NextRequest) {
           status: "insufficient_evidence",
           evidence_coverage: 0.1,
           status_text: "Insufficient extractable evidence.",
+          snapshot_date: payload.document_date ?? todayIsoDate(),
           source_summary: result.errorMessage,
         },
       ],
@@ -177,4 +180,18 @@ export async function POST(request: NextRequest) {
     anomalies: result.anomalies,
     parser_metadata: result.parserMetadata,
   });
+}
+
+function todayIsoDate() {
+  const parts = new Intl.DateTimeFormat("en", {
+    day: "2-digit",
+    month: "2-digit",
+    timeZone: process.env.TZ ?? "Asia/Jakarta",
+    year: "numeric",
+  }).formatToParts(new Date());
+  const valueByType = Object.fromEntries(
+    parts.map((part) => [part.type, part.value]),
+  );
+
+  return `${valueByType.year}-${valueByType.month}-${valueByType.day}`;
 }

@@ -2,7 +2,6 @@
 
 import {
   FileText,
-  MoreVertical,
   ShieldCheck,
   Sparkles,
   TriangleAlert,
@@ -30,12 +29,6 @@ import type {
   ExtractedFact,
 } from "@/features/documents/lib/queries";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 
 export function DocumentIntelligence({
@@ -168,7 +161,9 @@ function DocumentLibrary({
                     <FileText className="h-5 w-5" />
                   </div>
                   <div className="min-w-0">
-                    <h3 className="truncate font-medium">{document.title}</h3>
+                    <h3 className="break-words font-semibold text-slate-950">
+                      {document.title}
+                    </h3>
                     <p className="mt-1 text-xs text-slate-500">
                       {fileKindLabel(document.mimeType, document.fileName)} •{" "}
                       {formatBytes(document.fileSize)} •{" "}
@@ -176,32 +171,26 @@ function DocumentLibrary({
                     </p>
                   </div>
                 </div>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      type="button"
-                      className="rounded-md p-1 text-slate-500 hover:bg-slate-100"
-                      aria-label={`Actions for ${document.title}`}
-                    >
-                      <MoreVertical className="h-4 w-4" />
-                    </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-44">
-                    <DropdownMenuItem asChild className="text-red-700">
-                      <form action={deleteDocument}>
-                        <input type="hidden" name="projectId" value={projectId} />
-                        <input type="hidden" name="documentId" value={document.id} />
-                        <button
-                          type="submit"
-                          className="flex w-full items-center gap-2"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                          Remove document
-                        </button>
-                      </form>
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                <form
+                  action={deleteDocument}
+                  onSubmit={(event) => {
+                    if (!window.confirm(`Remove "${document.title}" from this project?`)) {
+                      event.preventDefault();
+                    }
+                  }}
+                >
+                  <input type="hidden" name="projectId" value={projectId} />
+                  <input type="hidden" name="documentId" value={document.id} />
+                  <Button
+                    type="submit"
+                    size="sm"
+                    variant="outline"
+                    className="border-red-200 bg-white text-red-700 hover:bg-red-50 hover:text-red-800"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Remove
+                  </Button>
+                </form>
               </div>
 
               <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -307,7 +296,12 @@ function ExtractedInformationPanel({
                           defaultValue={fact.editedValue ?? ""}
                           className="h-8"
                         />
-                        <Button type="submit" size="sm" variant="outline">
+                        <Button
+                          type="submit"
+                          size="sm"
+                          variant="outline"
+                          className="border-blue-200 bg-white text-blue-800 hover:bg-blue-50 hover:text-blue-900"
+                        >
                           Save
                         </Button>
                       </form>
@@ -406,7 +400,7 @@ function SummaryPanel({
               ))
             )}
           </div>
-          <Button type="submit" className="bg-blue-700 hover:bg-blue-800">
+          <Button type="submit" className="bg-blue-700 text-white hover:bg-blue-800">
             Generate Summary
           </Button>
         </form>

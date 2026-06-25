@@ -65,6 +65,10 @@ test("documents page includes upload, library, extraction, summary, and source p
   assert.match(actions, /isSupportedEvidenceFile/);
   assert.match(read("src/features/documents/lib/file-types.ts"), /application\/pdf/);
   assert.match(actions, /Automated extraction supports PDF, TXT, CSV, DOCX, and XLSX files/);
+  assert.match(upload, /Document title optional/);
+  assert.match(upload, /Document date optional/);
+  assert.match(upload, /Primary type optional/);
+  assert.match(upload, /multiple/);
   assert.match(actions, /parse_document/);
   assert.match(actions, /runOllamaChat/);
 });
@@ -86,6 +90,28 @@ test("evidence upload queues extractable files and stores reference-only files f
   assert.match(uploadRoute, /isProcessableEvidenceFile/);
   assert.match(uploadRoute, /needs_review/);
   assert.match(uploadRoute, /parse_document/);
+});
+
+test("upload defaults metadata and supports multiple files in one request", () => {
+  const uploadRoute = read("src/app/api/projects/[projectId]/documents/upload/route.ts");
+  const actions = read("src/features/documents/actions/document-actions.ts");
+  const form = read("src/features/documents/components/upload-document-form.tsx");
+
+  assert.match(form, /Default: Progress Report/);
+  assert.match(uploadRoute, /getAll\("file"\)/);
+  assert.match(uploadRoute, /titleFromFileName/);
+  assert.match(uploadRoute, /todayIsoDate/);
+  assert.match(uploadRoute, /fileLastModifiedIsoDate/);
+  assert.match(uploadRoute, /fileLastModifiedValues/);
+  assert.match(uploadRoute, /timestampIsoDate\(fileLastModifiedValues\[index\]\)/);
+  assert.match(uploadRoute, /documentType: effectiveDocumentType/);
+  assert.match(uploadRoute, /fileLastModifiedIsoDate\(file\) \|\|/);
+  assert.match(uploadRoute, /file\(s\) uploaded/);
+  assert.match(actions, /getAll\("file"\)/);
+  assert.match(actions, /titleFromFileName/);
+  assert.match(actions, /todayIsoDate/);
+  assert.match(actions, /fileLastModifiedIsoDate/);
+  assert.match(actions, /timestampIsoDate\(fileLastModifiedValues\[index\]\)/);
 });
 
 test("document worker parses supported file types and rejects unsupported files", () => {
@@ -112,6 +138,9 @@ test("worker and n8n boundaries record success and failure contracts", () => {
   assert.match(parser, /pdfjs-dist/);
   assert.match(job, /status: "failed"/);
   assert.match(job, /status: "completed"/);
+  assert.match(job, /isBenignAssuranceText/);
+  assert.match(job, /under budget/);
+  assert.match(job, /completed on track/);
   assert.match(workerRoute, /x-xass-worker-secret/);
   assert.match(n8nCompose, /XASS_DOCUMENT_WORKER_URL/);
   assert.match(workflow, /Supabase remains the state source/);

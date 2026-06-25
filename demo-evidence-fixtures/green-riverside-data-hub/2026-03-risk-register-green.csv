@@ -1,0 +1,5 @@
+risk_id,title,category,status,probability,impact,owner,mitigation,document_date
+R-101,API throughput below target,risk,closed,low,low,Alex Morgan,Load test passed and issue retired,2026-03-08
+R-102,Data mapping clarification,risk,open,low,low,James Lee,Confirm final mapping questions in weekly working group,2026-03-08
+R-103,Audit evidence delay,risk,closed,low,low,Priya Nair,Evidence checklist completed and uploaded,2026-03-08
+

@@ -58,8 +58,26 @@ test("dashboard UI includes cards, threshold trend bands, alerts, and incomplete
 
   assert.match(component, /Green ≥ 80/);
   assert.match(component, /Amber 50-79/);
+  assert.match(component, /Monthly health history from document dates/);
+  assert.match(component, /statusColor/);
   assert.match(component, /Critical Alerts/);
   assert.match(component, /Top Recommended Actions/);
   assert.match(component, /Incomplete: owner or due date missing/);
   assert.match(component, /<title>/);
+});
+
+test("dashboard refresh uses document dates and explicit health signals", () => {
+  const actions = read("src/features/dashboard/actions/dashboard-actions.ts");
+  const query = read("src/features/dashboard/lib/queries.ts");
+  const worker = read("worker/src/jobs/process-document.ts");
+  const workflow = read("workflows/n8n/x-assurance-supabase-document-processing.json");
+
+  assert.match(actions, /latestDocumentDate/);
+  assert.match(actions, /inferEvidenceStatus/);
+  assert.match(actions, /Evidence includes red or high severity assurance signals/);
+  assert.match(query, /buildTrendPoints/);
+  assert.match(query, /formatMonthLabel/);
+  assert.match(worker, /documentDate/);
+  assert.match(worker, /snapshot_date: snapshotDate/);
+  assert.match(workflow, /document\.document_date/);
 });
