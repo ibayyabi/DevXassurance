@@ -8,6 +8,39 @@ This workflow is designed around the app's Supabase schema. Supabase remains
 the source of truth; n8n only orchestrates the processing job and writes results
 back to the tables already used by the UI.
 
+## VPS polling mode
+
+Use `x-assurance-supabase-document-polling.json` when Supabase cannot reach the
+VPS webhook. This workflow does not require an inbound request from Supabase.
+Every 15 seconds it:
+
+1. requests the oldest queued `parse_document` job from Supabase;
+2. claims it only if its status is still `queued`; and
+3. runs the same document-processing pipeline as the webhook workflow.
+
+The polling workflow uses these n8n environment variables:
+
+```bash
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+XASS_DOCUMENT_WORKER_URL=http://host.docker.internal:3000/api/workers/parse-document
+XASS_WORKER_SECRET=same-value-as-the-root-app
+N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+```
+
+On the VPS:
+
+1. Import `x-assurance-supabase-document-polling.json`.
+2. Publish the polling workflow.
+3. Unpublish the webhook workflow to avoid two consumers.
+4. Disable the Supabase Database Webhook for `public.ai_jobs`.
+5. Upload a new document and inspect n8n Executions.
+
+The job should move from `queued` to `processing` within approximately 15
+seconds and then to `completed`. If there are no queued jobs, a polling
+execution ends without writes. Keep only one published polling workflow unless
+you intentionally introduce additional queue coordination.
+
 ### Local n8n with Docker
 
 From this folder:
