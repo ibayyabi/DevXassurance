@@ -13,7 +13,9 @@ supported evidence files and calls the configured LLM when available.
   are queued for automated extraction; PowerPoint and image files are stored as
   reference evidence.
 - Upload creates a `public.ai_jobs` row.
-- Supabase Database Webhook sends queued jobs to n8n.
+- The deployed n8n polling workflow checks Supabase for queued jobs every 15
+  seconds. The webhook workflow remains available for local/tunnel or future
+  HTTPS deployments.
 - n8n calls the Next.js worker endpoint at
   `/api/workers/parse-document`.
 - The worker extracts supported file text, uses the configured LLM when
@@ -36,7 +38,7 @@ supported evidence files and calls the configured LLM when available.
 - Docker Desktop
 - Supabase hosted project
 - n8n through the included Docker Compose file
-- ngrok for local Supabase-to-n8n webhooks
+- ngrok only when testing the optional webhook workflow locally
 - A cloud LLM API key for hosted extraction and assistant/report writing
   (Ollama remains supported for local demos)
 
@@ -290,11 +292,14 @@ npm test
 
 ## Architecture Boundary
 
-The intended demo flow is:
+The deployed demo flow is:
 
 ```text
-Next.js upload -> Supabase ai_jobs -> Supabase Database Webhook -> ngrok -> n8n -> Next.js worker -> Supabase tables -> UI
+Next.js upload -> Supabase ai_jobs -> n8n polling -> Next.js worker -> cloud LLM -> Supabase tables -> UI
 ```
 
 n8n is the orchestrator. Supabase remains the source of truth. The app does not
 directly call n8n after upload.
+
+See `DEPLOYMENT_HANDOFF.md` for the current VPS configuration, deployment
+procedure, and troubleshooting guide.
