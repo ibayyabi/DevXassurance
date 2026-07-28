@@ -89,7 +89,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { status: 'processing', error_code: null, error_message: null, metadata: { ...($json.metadata ?? {}), claimed_by: 'n8n', claimed_at: new Date().toISOString() } } }}",
+        "jsonBody": "={{ { status: 'processing', attempt_count: Number($json.metadata?.attempt_count ?? 0) + 1, claimed_at: new Date().toISOString(), lease_expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(), error_code: null, error_message: null, updated_at: new Date().toISOString(), metadata: { ...($json.metadata ?? {}), attempt_count: Number($json.metadata?.attempt_count ?? 0) + 1, claimed_by: 'n8n', claimed_at: new Date().toISOString() } } }}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -209,7 +209,10 @@
         -40
       ],
       "id": "2f0b3d29-20fb-448f-bb3a-8703f90b4e99",
-      "name": "Call Document Worker"
+      "name": "Call Document Worker",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
     },
     {
       "parameters": {
@@ -280,8 +283,21 @@
     },
     {
       "parameters": {
+        "jsCode": "return [{ json: { persisted_chunk_count: $input.all().length } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        -40
+      ],
+      "id": "824bb73c-1e61-4574-957f-4e5cad984d30",
+      "name": "Collapse Chunk Response"
+    },
+    {
+      "parameters": {
         "method": "POST",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/extraction_runs' }}",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/extraction_runs?on_conflict=ai_job_id' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -299,7 +315,7 @@
             },
             {
               "name": "Prefer",
-              "value": "return=representation"
+              "value": "resolution=merge-duplicates,return=representation"
             }
           ]
         },
@@ -671,7 +687,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { status: 'completed', error_code: null, error_message: null } }}",
+        "jsonBody": "={{ { status: 'completed', error_code: null, error_message: null, lease_expires_at: null, completed_at: new Date().toISOString(), updated_at: new Date().toISOString() } }}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -791,7 +807,8 @@
     },
     {
       "parameters": {
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/ai_jobs?select=id,project_id,document_id,job_type,status,metadata,created_at&status=eq.queued&job_type=eq.parse_document&order=created_at.asc&limit=1' }}",
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/rpc/recover_and_fetch_document_job' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -806,9 +823,16 @@
             {
               "name": "Accept",
               "value": "application/json"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
             }
           ]
         },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {} }}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -832,6 +856,42 @@
       ],
       "id": "74ee34e1-3d3a-46d5-b34f-4c4197eec44e",
       "name": "Require Successful Claim"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/rpc/reset_document_job_results' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { reset_job_id: $node['Normalize Job Payload'].json.job_id } }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        400,
+        -40
+      ],
+      "id": "47bdfef1-973d-455e-b55c-90feb376c111",
+      "name": "Reset Previous Attempt",
+      "alwaysOutputData": true
     }
   ],
   "pinData": {},
@@ -926,6 +986,17 @@
       ]
     },
     "Upsert Document Chunks": {
+      "main": [
+        [
+          {
+            "node": "Collapse Chunk Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collapse Chunk Response": {
       "main": [
         [
           {
@@ -1118,6 +1189,17 @@
       ]
     },
     "Require Successful Claim": {
+      "main": [
+        [
+          {
+            "node": "Reset Previous Attempt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reset Previous Attempt": {
       "main": [
         [
           {

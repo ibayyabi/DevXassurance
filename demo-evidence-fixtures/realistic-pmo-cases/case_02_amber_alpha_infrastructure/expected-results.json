@@ -1,0 +1,81 @@
+{
+  "scenario": "needs_attention",
+  "project": "Alpha Infrastructure Program",
+  "expected_final_condition": "needs_attention",
+  "baseline": {
+    "budget": 4300000,
+    "currency": "USD",
+    "milestone": {
+      "name": "Building A installation complete",
+      "date": "2026-05-25"
+    }
+  },
+  "periods": [
+    {
+      "period": "2026-03-01",
+      "forecast_cost": 4343000,
+      "forecast_milestone_date": "2026-05-28",
+      "risk": {
+        "open_critical_count": 0,
+        "open_high_count": 1,
+        "high_risks_missing_owner_or_mitigation": 0,
+        "increased_risk_count": 0,
+        "new_high_risk_count": 1,
+        "max_mitigation_overdue_days": 0
+      },
+      "budget_variance_percent": 1.0,
+      "schedule_delay_days": 3,
+      "budget_condition": "needs_attention",
+      "schedule_condition": "needs_attention",
+      "risk_condition": "needs_attention",
+      "overall_condition": "needs_attention"
+    },
+    {
+      "period": "2026-04-01",
+      "forecast_cost": 4420400,
+      "forecast_milestone_date": "2026-06-01",
+      "risk": {
+        "open_critical_count": 0,
+        "open_high_count": 1,
+        "high_risks_missing_owner_or_mitigation": 0,
+        "increased_risk_count": 1,
+        "new_high_risk_count": 0,
+        "max_mitigation_overdue_days": 0
+      },
+      "budget_variance_percent": 2.8,
+      "schedule_delay_days": 7,
+      "budget_condition": "needs_attention",
+      "schedule_condition": "needs_attention",
+      "risk_condition": "needs_attention",
+      "overall_condition": "needs_attention"
+    },
+    {
+      "period": "2026-05-01",
+      "forecast_cost": 4472000,
+      "forecast_milestone_date": "2026-06-08",
+      "risk": {
+        "open_critical_count": 0,
+        "open_high_count": 1,
+        "high_risks_missing_owner_or_mitigation": 0,
+        "increased_risk_count": 0,
+        "new_high_risk_count": 0,
+        "max_mitigation_overdue_days": 7
+      },
+      "budget_variance_percent": 4.0,
+      "schedule_delay_days": 14,
+      "budget_condition": "needs_attention",
+      "schedule_condition": "needs_attention",
+      "risk_condition": "needs_attention",
+      "overall_condition": "needs_attention"
+    }
+  ],
+  "answer_quality_checks": [
+    "States the direct project condition.",
+    "Uses the correct budget variance.",
+    "Uses the correct schedule delay.",
+    "Uses the explicit risk counts and control gaps.",
+    "References supplied evidence.",
+    "Separates facts from general guidance.",
+    "Does not invent missing evidence."
+  ]
+}

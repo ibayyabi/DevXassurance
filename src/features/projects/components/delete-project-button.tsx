@@ -29,7 +29,7 @@ export function DeleteProjectButton({
       <Button
         type="submit"
         variant="outline"
-        className="h-9 border-red-200 px-3 text-red-700 hover:bg-red-50 hover:text-red-800"
+        className="h-9 border-status-critical px-3 text-status-critical-text hover:bg-status-critical-bg hover:text-status-critical-text"
       >
         <Trash2 className="mr-2 h-4 w-4" />
         Delete

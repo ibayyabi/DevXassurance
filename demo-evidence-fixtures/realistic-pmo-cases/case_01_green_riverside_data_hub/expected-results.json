@@ -1,0 +1,81 @@
+{
+  "scenario": "on_track",
+  "project": "Riverside Data Hub",
+  "expected_final_condition": "on_track",
+  "baseline": {
+    "budget": 500000,
+    "currency": "USD",
+    "milestone": {
+      "name": "Operational readiness review",
+      "date": "2026-04-18"
+    }
+  },
+  "periods": [
+    {
+      "period": "2026-01-01",
+      "forecast_cost": 492000,
+      "forecast_milestone_date": "2026-04-17",
+      "risk": {
+        "open_critical_count": 0,
+        "open_high_count": 1,
+        "high_risks_missing_owner_or_mitigation": 0,
+        "increased_risk_count": 0,
+        "new_high_risk_count": 0,
+        "max_mitigation_overdue_days": 0
+      },
+      "budget_variance_percent": -1.6,
+      "schedule_delay_days": -1,
+      "budget_condition": "on_track",
+      "schedule_condition": "on_track",
+      "risk_condition": "on_track",
+      "overall_condition": "on_track"
+    },
+    {
+      "period": "2026-02-01",
+      "forecast_cost": 488500,
+      "forecast_milestone_date": "2026-04-18",
+      "risk": {
+        "open_critical_count": 0,
+        "open_high_count": 1,
+        "high_risks_missing_owner_or_mitigation": 0,
+        "increased_risk_count": 0,
+        "new_high_risk_count": 0,
+        "max_mitigation_overdue_days": 0
+      },
+      "budget_variance_percent": -2.3,
+      "schedule_delay_days": 0,
+      "budget_condition": "on_track",
+      "schedule_condition": "on_track",
+      "risk_condition": "on_track",
+      "overall_condition": "on_track"
+    },
+    {
+      "period": "2026-03-01",
+      "forecast_cost": 487000,
+      "forecast_milestone_date": "2026-04-18",
+      "risk": {
+        "open_critical_count": 0,
+        "open_high_count": 0,
+        "high_risks_missing_owner_or_mitigation": 0,
+        "increased_risk_count": 0,
+        "new_high_risk_count": 0,
+        "max_mitigation_overdue_days": 0
+      },
+      "budget_variance_percent": -2.6,
+      "schedule_delay_days": 0,
+      "budget_condition": "on_track",
+      "schedule_condition": "on_track",
+      "risk_condition": "on_track",
+      "overall_condition": "on_track"
+    }
+  ],
+  "answer_quality_checks": [
+    "States the direct project condition.",
+    "Uses the correct budget variance.",
+    "Uses the correct schedule delay.",
+    "Uses the explicit risk counts and control gaps.",
+    "References supplied evidence.",
+    "Separates facts from general guidance.",
+    "Does not invent missing evidence."
+  ]
+}

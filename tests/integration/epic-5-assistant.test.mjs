@@ -16,17 +16,21 @@ test("assistant migration stores project-scoped interactions and provenance", ()
   assert.match(migration, /is_project_member\(project_id\)/);
 });
 
-test("assistant action retrieves only project-scoped evidence and returns insufficient evidence when empty", () => {
+test("AI Advisor is scoped to the latest Assurance Review and fails honestly", () => {
   const action = read("src/features/assistant/actions/assistant-actions.ts");
 
   assert.match(action, /requireProjectMembership/);
   assert.match(action, /\.eq\("project_id", projectId\)/);
   assert.match(action, /document_chunks/);
-  assert.match(action, /extracted_facts/);
-  assert.match(action, /recommended_actions/);
-  assert.match(action, /Insufficient evidence is available/);
+  assert.match(action, /assurance_reviews/);
+  assert.match(action, /assurance_review_documents/);
+  assert.match(action, /assurance_findings/);
+  assert.match(action, /assurance_actions/);
+  assert.match(action, /latest automatic project assessment/);
+  assert.match(action, /No fallback answer was created/);
   assert.match(action, /assistant_interactions/);
   assert.match(action, /runOllamaChat/);
+  assert.match(action, /assurance_review_id/);
 });
 
 test("assistant UI includes chat shell, source controls, suggested prompts, and recommendations", () => {
@@ -34,13 +38,23 @@ test("assistant UI includes chat shell, source controls, suggested prompts, and 
   const component = read("src/features/assistant/components/assistant-chat.tsx");
 
   assert.match(page, /AssistantChat/);
-  assert.match(component, /Ask a question about your project/);
-  assert.match(component, /Sources \(\{message\.sources\.length\}\)/);
-  assert.match(component, /Evidence & Sources/);
-  assert.match(component, /Page \{source\.pageNumber/);
-  assert.match(component, /Why is the project Amber/);
-  assert.match(component, /What should be escalated/);
-  assert.match(component, /Summarize this week's risks/);
-  assert.match(component, /Recommendations \/ Next Actions/);
-  assert.match(component, /Owner:/);
+  assert.match(component, /Ask about budget, deadlines, risk, or next actions/);
+  assert.match(component, /Direct answer/);
+  assert.match(component, /Sources used/);
+  assert.match(component, /source\.pageNumber/);
+  assert.match(component, /current forecast compare with the approved budget/);
+  assert.match(component, /most important project condition/);
+  assert.match(component, /evidence is still missing/i);
+  assert.match(component, /Next actions/);
+  assert.match(component, /Owner not assigned/);
+  assert.match(component, /startTransition/);
+  assert.match(component, /pendingQuestion/);
+  assert.match(component, /ThinkingBubble/);
+  assert.match(component, /role="status"/);
+  assert.match(component, /Reviewing the latest assessment and source documents/);
+  assert.match(component, /conversation\.scrollTo/);
+  assert.match(component, /prefers-reduced-motion: reduce/);
+  assert.doesNotMatch(component, /window\.setTimeout/);
+  assert.doesNotMatch(component, /AI Runtime/);
+  assert.doesNotMatch(component, /Provider/);
 });

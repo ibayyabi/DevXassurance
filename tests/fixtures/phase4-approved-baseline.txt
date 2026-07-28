@@ -1,0 +1,19 @@
+PHASE 4 SYNTHETIC TEST EVIDENCE - APPROVED BASELINE
+
+Project: Phase 4 Verification Project
+Approval status: Approved baseline
+Reporting basis: July 2026
+
+Budget
+Approved budget: USD 1,000,000
+
+Schedule
+Approved completion milestone: 15 July 2026
+
+Risk
+Risk R-001: Supplier delivery delay
+Rating: High
+Owner: Procurement Manager
+Mitigation: Weekly supplier recovery meeting
+Mitigation due date: 10 July 2026
+Status: Open

@@ -4,58 +4,106 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 0 0% 3.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 0 0% 3.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 3.9%;
-    --primary: 0 0% 9%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 0 0% 96.1%;
-    --secondary-foreground: 0 0% 9%;
-    --muted: 0 0% 96.1%;
-    --muted-foreground: 0 0% 45.1%;
-    --accent: 0 0% 96.1%;
-    --accent-foreground: 0 0% 9%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 0 0% 89.8%;
-    --input: 0 0% 89.8%;
-    --ring: 0 0% 3.9%;
-    --chart-1: 12 76% 61%;
-    --chart-2: 173 58% 39%;
-    --chart-3: 197 37% 24%;
-    --chart-4: 43 74% 66%;
-    --chart-5: 27 87% 67%;
+    /* Foundation: soft monochrome, with color reserved for real status. */
+    --base: #f7f7f5;
+    --surface: #ffffff;
+    --text: #151515;
+    --text-muted: #666662;
+    --border: #e2e2de;
+    --accent: #151515;
+    --accent-soft: #f0f0ed;
+    --on-accent: #ffffff;
+
+    /* Status: reserved for actual project and workflow conditions. */
+    --status-ok: #639922;
+    --status-ok-bg: #eaf3de;
+    --status-ok-text: #27500a;
+    --status-warn: #ef9f27;
+    --status-warn-bg: #faeeda;
+    --status-warn-text: #633806;
+    --status-critical: #e24b4a;
+    --status-crit-bg: #fcebeb;
+    --status-crit-text: #791f1f;
+    --status-neutral: #888780;
+    --plan-track: #f0f0ed;
+
+    /* Sidebar is a structural anchor, not an additional accent palette. */
+    --sidebar: #151515;
+    --sidebar-hover: #242424;
+    --sidebar-text: #f7f7f5;
+    --sidebar-muted: #a3a3a0;
+
+    /* RGB channels let Tailwind opacity modifiers keep working. */
+    --base-rgb: 247 247 245;
+    --surface-rgb: 255 255 255;
+    --text-rgb: 21 21 21;
+    --text-muted-rgb: 102 102 98;
+    --border-rgb: 226 226 222;
+    --accent-rgb: 21 21 21;
+    --accent-soft-rgb: 240 240 237;
+    --on-accent-rgb: 255 255 255;
+    --status-ok-rgb: 99 153 34;
+    --status-ok-bg-rgb: 234 243 222;
+    --status-ok-text-rgb: 39 80 10;
+    --status-warn-rgb: 239 159 39;
+    --status-warn-bg-rgb: 250 238 218;
+    --status-warn-text-rgb: 99 56 6;
+    --status-critical-rgb: 226 75 74;
+    --status-crit-bg-rgb: 252 235 235;
+    --status-crit-text-rgb: 121 31 31;
+    --status-neutral-rgb: 136 135 128;
+    --plan-track-rgb: 240 240 237;
+    --sidebar-rgb: 21 21 21;
+    --sidebar-hover-rgb: 36 36 36;
+    --sidebar-text-rgb: 247 247 245;
+    --sidebar-muted-rgb: 163 163 160;
     --radius: 0.5rem;
   }
-  .dark {
-    --background: 0 0% 3.9%;
-    --foreground: 0 0% 98%;
-    --card: 0 0% 3.9%;
-    --card-foreground: 0 0% 98%;
-    --popover: 0 0% 3.9%;
-    --popover-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 0 0% 9%;
-    --secondary: 0 0% 14.9%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 0 0% 14.9%;
-    --muted-foreground: 0 0% 63.9%;
-    --accent: 0 0% 14.9%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 0 0% 14.9%;
-    --input: 0 0% 14.9%;
-    --ring: 0 0% 83.1%;
-    --chart-1: 220 70% 50%;
-    --chart-2: 160 60% 45%;
-    --chart-3: 30 80% 55%;
-    --chart-4: 280 65% 60%;
-    --chart-5: 340 75% 55%;
+}
+
+@keyframes landing-rise {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
   }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.landing-reveal {
+  animation: landing-rise 700ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-reveal {
+    animation: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+.auth-field {
+  color: rgb(var(--text-rgb));
+  caret-color: rgb(var(--text-rgb));
+}
+
+.auth-field::placeholder {
+  color: rgb(var(--text-muted-rgb));
+  opacity: 0.7;
+}
+
+.auth-field:-webkit-autofill,
+.auth-field:-webkit-autofill:hover,
+.auth-field:-webkit-autofill:focus {
+  -webkit-text-fill-color: rgb(var(--text-rgb));
+  caret-color: rgb(var(--text-rgb));
+  box-shadow: 0 0 0 1000px rgb(var(--surface-rgb)) inset;
 }
 
 @layer base {

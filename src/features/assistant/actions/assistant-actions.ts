@@ -19,10 +19,11 @@ type ChunkRow = {
   documents: { title: string } | null;
 };
 
-type FactRow = {
-  fact_type: string;
-  extracted_text: string;
-  confidence: number;
+type FindingRow = {
+  domain: string;
+  condition: string;
+  headline: string;
+  explanation: string;
 };
 
 type ActionRow = {
@@ -47,29 +48,50 @@ export async function askAssistant(
   const { supabase, user } = await requireProjectMembership(projectId);
   const search = buildSearchTerms(question);
 
-  const [{ data: chunks }, { data: facts }, { data: actions }] =
-    await Promise.all([
-      supabase
-        .from("document_chunks")
-        .select("chunk_text, page_number, section_label, documents(title)")
+  const { data: review } = await supabase
+    .from("assurance_reviews")
+    .select("id, title, reporting_period")
+    .eq("project_id", projectId)
+    .order("reporting_period", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const { data: reviewDocuments } = review
+    ? await supabase
+        .from("assurance_review_documents")
+        .select("document_id")
+        .eq("review_id", review.id)
         .eq("project_id", projectId)
-        .or(search.map((term) => `chunk_text.ilike.%${term}%`).join(","))
-        .limit(4),
-      supabase
-        .from("extracted_facts")
-        .select("fact_type, extracted_text, confidence")
-        .eq("project_id", projectId)
-        .or(search.map((term) => `extracted_text.ilike.%${term}%`).join(","))
-        .limit(5),
-      supabase
-        .from("recommended_actions")
-        .select("id, title, owner_name, priority, source_path")
-        .eq("project_id", projectId)
-        .limit(3),
-    ]);
+    : { data: [] };
+  const documentIds = (reviewDocuments ?? []).map((item) => item.document_id);
+
+  const [{ data: chunks }, { data: findings }, { data: actions }] =
+    review && documentIds.length > 0
+      ? await Promise.all([
+          supabase
+            .from("document_chunks")
+            .select("chunk_text, page_number, section_label, documents(title)")
+            .eq("project_id", projectId)
+            .in("document_id", documentIds)
+            .or(search.map((term) => `chunk_text.ilike.%${term}%`).join(","))
+            .limit(5),
+          supabase
+            .from("assurance_findings")
+            .select("domain, condition, headline, explanation")
+            .eq("review_id", review.id)
+            .eq("project_id", projectId),
+          supabase
+            .from("assurance_actions")
+            .select("id, title, owner_name, priority")
+            .eq("review_id", review.id)
+            .eq("project_id", projectId)
+            .neq("status", "completed")
+            .limit(5),
+        ])
+      : [{ data: [] }, { data: [] }, { data: [] }];
 
   const chunkRows = (chunks ?? []) as unknown as ChunkRow[];
-  const factRows = (facts ?? []) as unknown as FactRow[];
+  const findingRows = (findings ?? []) as unknown as FindingRow[];
   const actionRows = (actions ?? []) as unknown as ActionRow[];
 
   const sources: AssistantSource[] = chunkRows.map((chunk) => ({
@@ -85,36 +107,39 @@ export async function askAssistant(
     title: action.title,
     ownerName: action.owner_name,
     priority: action.priority,
-    sourcePath: action.source_path ?? `/app/projects/${projectId}/anomalies`,
+    sourcePath: `/app/projects/${projectId}/dashboard`,
   }));
 
-  const insufficientEvidence = sources.length === 0 && factRows.length === 0;
-  const llmAnswer = insufficientEvidence
+  const insufficientEvidence = !review || (sources.length === 0 && findingRows.length === 0);
+  const llmResult = insufficientEvidence
     ? null
     : await generateAssistantAnswer(
         question,
-        factRows,
+        review.title,
+        findingRows,
         sources,
         recommendations,
       );
   const answer = insufficientEvidence
-    ? "Insufficient evidence is available in this project workspace to answer that question. Upload and process relevant documents or add reviewed findings before relying on an answer."
-    : llmAnswer ?? buildAnswer(question, factRows, sources);
+    ? "The latest automatic project assessment does not have enough evidence to answer that question. Add the missing project documents and try again."
+    : llmResult?.ok
+      ? llmResult.content
+      : `AI Advisor could not generate a reliable answer: ${llmResult?.warning ?? "the configured model was unavailable"}. No fallback answer was created.`;
 
-  const inferredClaims = insufficientEvidence
-    ? []
+  const inferredClaims = insufficientEvidence || !llmResult?.ok
+      ? []
     : [
-        llmAnswer
-          ? `Generated with ${configuredLlmLabel()} using retrieved project evidence.`
-          : "Generated with grounded fallback logic because the configured LLM response was unavailable.",
+        `The answer is scoped to ${review?.title} and its organized evidence.`,
+        "Method guidance is general project-assurance guidance and not a licensed reproduction of PMBOK.",
       ];
 
   await supabase.from("assistant_interactions").insert({
     project_id: projectId,
+    assurance_review_id: review?.id ?? null,
     user_id: user.id,
     question,
     answer,
-    insufficient_evidence: insufficientEvidence,
+    insufficient_evidence: insufficientEvidence || !llmResult?.ok,
     evidence_links: sources,
     inferred_claims: inferredClaims,
     recommended_action_ids: recommendations.map((recommendation) => recommendation.id),
@@ -126,7 +151,7 @@ export async function askAssistant(
       {
         question,
         answer,
-        insufficientEvidence,
+        insufficientEvidence: insufficientEvidence || !llmResult?.ok,
         sources,
         inferredClaims,
         recommendations,
@@ -137,14 +162,15 @@ export async function askAssistant(
 
 async function generateAssistantAnswer(
   question: string,
-  facts: FactRow[],
+  reviewTitle: string,
+  findings: FindingRow[],
   sources: AssistantSource[],
   recommendations: AssistantRecommendation[],
 ) {
   const evidence = [
-    ...facts.map(
-      (fact, index) =>
-        `Fact ${index + 1} [${fact.fact_type}, confidence ${fact.confidence}]: ${fact.extracted_text}`,
+    ...findings.map(
+      (finding, index) =>
+        `Finding ${index + 1} [${finding.domain}, ${finding.condition}]: ${finding.headline}. ${finding.explanation}`,
     ),
     ...sources.map(
       (source, index) =>
@@ -158,23 +184,11 @@ async function generateAssistantAnswer(
 
   const response = await runOllamaChat({
     system:
-      "You are X-Assurance, a project assurance assistant. Answer only from supplied evidence. If evidence is weak, say what is missing. Keep the response concise and actionable.",
-    user: `Question: ${question}\n\nProject evidence:\n${evidence.slice(0, 12000)}`,
+      "You are X-Assurance AI Advisor. Write a clear management answer using four plain-text sections: Direct answer, Evidence, Next actions, and General guidance. Use short paragraphs or hyphen bullets only. Never use Markdown tables, bold markers, headings with hash characters, or decorative separators. Project claims must come only from supplied review evidence. Never claim a comparison that is not present. Never invent an owner, due date, threshold, or project fact. If an owner or due date is absent, say it is not assigned. If evidence is weak, state exactly what is missing. Keep general method guidance separate and do not pretend to quote PMBOK.",
+    user: `Assurance Review: ${reviewTitle}\nQuestion: ${question}\n\nReview evidence and findings:\n${evidence.slice(0, 12000)}\n\nGeneral method guidance:\n- Confirm scope and reporting period before comparing performance.\n- Trace every finding to evidence.\n- Assign an accountable owner and due date to material actions.\n- Escalate exceptions according to approved governance thresholds.`,
   });
 
-  return response.ok ? response.content : null;
-}
-
-function configuredLlmLabel() {
-  const provider = process.env.XASS_LLM_PROVIDER ?? "ollama";
-  const model =
-    provider === "ollama"
-      ? (process.env.OLLAMA_MODEL ?? "qwen2.5:3b")
-      : provider === "ollama_cloud"
-        ? (process.env.OLLAMA_CLOUD_MODEL ?? "gpt-oss:20b")
-        : (process.env.XASS_CLOUD_LLM_MODEL ?? "gpt-oss:20b");
-
-  return `${provider} (${model})`;
+  return response;
 }
 
 function buildSearchTerms(question: string) {
@@ -186,18 +200,4 @@ function buildSearchTerms(question: string) {
     .slice(0, 5);
 
   return terms.length > 0 ? terms : ["project"];
-}
-
-function buildAnswer(
-  question: string,
-  facts: FactRow[],
-  sources: AssistantSource[],
-) {
-  const factText = facts
-    .map((fact) => `${fact.fact_type}: ${fact.extracted_text}`)
-    .join(" ");
-  const sourceText = sources.map((source) => source.excerpt).join(" ");
-  const evidence = [factText, sourceText].filter(Boolean).join(" ");
-
-  return `Based on project-scoped evidence for "${question}", the strongest available signal is: ${evidence.slice(0, 900)}${evidence.length > 900 ? "..." : ""}`;
 }

@@ -23,11 +23,18 @@ export type RenderReportInput = {
 };
 
 const sectionLabels: Record<string, string> = {
-  project_health: "Project Health",
+  project_health: "Project Condition",
   key_findings: "Key Findings",
   critical_risks: "Critical Risks",
   recommended_actions: "Recommended Actions",
 };
+
+// Export renderers cannot read browser CSS variables, so these values mirror
+// the global foundation tokens in src/app/globals.css.
+const reportColors = {
+  text: "#151515",
+  textMuted: "#666662",
+} as const;
 
 export async function renderReportPdf(input: RenderReportInput): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -40,10 +47,10 @@ export async function renderReportPdf(input: RenderReportInput): Promise<Buffer>
 
     document
       .fontSize(18)
-      .fillColor("#0f172a")
+      .fillColor(reportColors.text)
       .text("Project Assurance Report", { continued: false });
     document.moveDown(0.4);
-    document.fontSize(11).fillColor("#334155");
+    document.fontSize(11).fillColor(reportColors.textMuted);
     document.text(`Project: ${input.projectName}`);
     document.text(`Report type: ${reportTypeLabels[input.reportType]}`);
     document.text(`Reporting period: ${input.reportingPeriod}`);
@@ -51,23 +58,23 @@ export async function renderReportPdf(input: RenderReportInput): Promise<Buffer>
 
     document.moveDown(1);
     Object.entries(input.sections).forEach(([key, value]) => {
-      document.fontSize(13).fillColor("#0f172a").text(sectionLabels[key] ?? titleCase(key), {
+      document.fontSize(13).fillColor(reportColors.text).text(sectionLabels[key] ?? titleCase(key), {
         underline: false,
       });
       document.moveDown(0.25);
-      document.fontSize(10.5).fillColor("#334155").text(cleanReportText(value), {
+      document.fontSize(10.5).fillColor(reportColors.textMuted).text(cleanReportText(value), {
         lineGap: 3,
       });
       document.moveDown(0.8);
     });
 
     document.addPage();
-    document.fontSize(14).fillColor("#0f172a").text("Evidence Appendix");
+    document.fontSize(14).fillColor(reportColors.text).text("Evidence Appendix");
     document.moveDown(0.5);
     Object.entries(input.evidenceCounts).forEach(([key, value]) => {
       document
         .fontSize(10.5)
-        .fillColor("#334155")
+        .fillColor(reportColors.textMuted)
         .text(`${titleCase(key)}: ${value}`);
     });
 

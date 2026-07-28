@@ -17,6 +17,10 @@ export type EvidenceDocument = {
   processingError: string | null;
   documentDate: string | null;
   createdAt: string;
+  evidenceRole: "baseline" | "current" | "supporting" | null;
+  classificationConfidence: number | null;
+  classificationReason: string | null;
+  detectedReportingPeriod: string | null;
 };
 
 export type ExtractedFact = {
@@ -68,6 +72,10 @@ type DocumentRow = {
   processing_error: string | null;
   document_date: string | null;
   created_at: string;
+  evidence_role: "baseline" | "current" | "supporting" | null;
+  classification_confidence: number | null;
+  classification_reason: string | null;
+  detected_reporting_period: string | null;
 };
 
 type FactRow = {
@@ -111,7 +119,7 @@ export async function getDocumentIntelligence(projectId: string) {
       supabase
         .from("documents")
         .select(
-          "id, project_id, title, file_name, file_size, mime_type, document_type, processing_status, processing_error, document_date, created_at",
+          "id, project_id, title, file_name, file_size, mime_type, document_type, processing_status, processing_error, document_date, created_at, evidence_role, classification_confidence, classification_reason, detected_reporting_period",
         )
         .eq("project_id", projectId)
         .order("created_at", { ascending: false }),
@@ -130,8 +138,7 @@ export async function getDocumentIntelligence(projectId: string) {
         )
         .eq("project_id", projectId)
         .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle(),
+        .limit(100),
     ]);
 
   if (documentsError) throw new Error(documentsError.message);
@@ -144,8 +151,9 @@ export async function getDocumentIntelligence(projectId: string) {
       mapDocument,
     ),
     facts: ((factsData ?? []) as unknown as FactRow[]).map(mapFact),
-    summary: summaryData
-      ? mapSummary(summaryData as unknown as SummaryRow)
+    summaries: ((summaryData ?? []) as unknown as SummaryRow[]).map(mapSummary),
+    summary: summaryData?.[0]
+      ? mapSummary(summaryData[0] as unknown as SummaryRow)
       : null,
   };
 }
@@ -163,6 +171,10 @@ function mapDocument(row: DocumentRow): EvidenceDocument {
     processingError: row.processing_error,
     documentDate: row.document_date,
     createdAt: row.created_at,
+    evidenceRole: row.evidence_role,
+    classificationConfidence: row.classification_confidence,
+    classificationReason: row.classification_reason,
+    detectedReportingPeriod: row.detected_reporting_period,
   };
 }
 

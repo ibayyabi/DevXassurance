@@ -292,6 +292,33 @@ export async function updateDocumentClassification(
   revalidatePath(`/app/projects/${projectId}/documents`);
 }
 
+export async function retryDocumentProcessing(formData: FormData): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const documentId = String(formData.get("documentId") ?? "");
+
+  if (!projectId || !documentId) {
+    throw new Error("Project and document are required to retry processing.");
+  }
+
+  const { supabase, membership } = await requireProjectMembership(projectId);
+
+  if (!canManageProject(membership.role)) {
+    throw new Error("Your project role cannot retry document processing.");
+  }
+
+  const { error } = await supabase.rpc("retry_document_job", {
+    retry_project_id: projectId,
+    retry_document_id: documentId,
+  });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  revalidatePath(`/app/projects/${projectId}/documents`);
+  revalidatePath(`/app/projects/${projectId}/assurance`);
+}
+
 export async function deleteDocument(formData: FormData): Promise<void> {
   const projectId = String(formData.get("projectId") ?? "");
   const documentId = String(formData.get("documentId") ?? "");

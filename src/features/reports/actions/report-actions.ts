@@ -4,179 +4,112 @@ import { revalidatePath } from "next/cache";
 
 import { requireProjectMembership } from "@/features/projects/lib/queries";
 import { canManageProject } from "@/features/projects/lib/roles";
-import { reportTypes, type ReportType } from "@/features/reports/lib/constants";
 import {
   renderReportDocx,
   renderReportPdf,
 } from "@/features/reports/lib/render-report";
-import { parseJsonObject, runOllamaChat } from "@/lib/ai/ollama";
 
 export async function generateReportPreview(formData: FormData) {
   const projectId = String(formData.get("projectId") ?? "");
-  const reportType = String(formData.get("reportType") ?? "");
-  const reportingPeriod = String(formData.get("reportingPeriod") ?? "").trim();
+  const requestedReviewId = String(formData.get("assuranceReviewId") ?? "");
   const audience = String(formData.get("audience") ?? "").trim();
   const detailLevel = String(formData.get("detailLevel") ?? "").trim();
 
-  if (!projectId || !isReportType(reportType) || !reportingPeriod || !audience || !detailLevel) return;
+  if (!projectId || !audience || !detailLevel) return;
 
   const { supabase, user, membership } = await requireProjectMembership(projectId);
   if (!canManageProject(membership.role)) return;
 
-  const [
-    { data: health },
-    { data: anomalies },
-    { data: actions },
-    { data: facts },
-    { data: summaries },
-    { count: documentCount },
-    { count: chunkCount },
-  ] =
+  let reviewQuery = supabase
+    .from("assurance_reviews")
+    .select("id, reporting_period, title, status")
+    .eq("project_id", projectId);
+  reviewQuery = requestedReviewId
+    ? reviewQuery.eq("id", requestedReviewId)
+    : reviewQuery.order("reporting_period", { ascending: false }).limit(1);
+  const { data: reviewRows, error: reviewError } = await reviewQuery;
+  if (reviewError) throw new Error(reviewError.message);
+  const review = reviewRows?.[0];
+  if (!review) throw new Error("Create an Assurance Review before generating a report.");
+
+  const [{ data: findings, error: findingsError }, { data: actions, error: actionsError }, { count: evidenceCount }] =
     await Promise.all([
       supabase
-        .from("dashboard_health_snapshots")
-        .select("dimension, score, status, status_text")
+        .from("assurance_findings")
+        .select("domain, condition, headline, explanation, confirmation_state")
+        .eq("review_id", review.id)
         .eq("project_id", projectId)
-        .order("snapshot_date", { ascending: false })
-        .limit(6),
+        .order("domain"),
       supabase
-        .from("anomalies")
-        .select("title, severity, category, recommended_action")
+        .from("assurance_actions")
+        .select("title, owner_name, due_date, priority, status")
+        .eq("review_id", review.id)
         .eq("project_id", projectId)
-        .order("created_at", { ascending: false })
-        .limit(5),
+        .order("priority", { ascending: false }),
       supabase
-        .from("recommended_actions")
-        .select("title, owner_name, priority")
-        .eq("project_id", projectId)
-        .limit(5),
-      supabase
-        .from("extracted_facts")
-        .select("fact_type, extracted_text, confidence")
-        .eq("project_id", projectId)
-        .order("created_at", { ascending: false })
-        .limit(8),
-      supabase
-        .from("document_summaries")
-        .select("summary_text, confidence, quality_warning")
-        .eq("project_id", projectId)
-        .order("created_at", { ascending: false })
-        .limit(3),
-      supabase
-        .from("documents")
+        .from("assurance_review_documents")
         .select("id", { count: "exact", head: true })
-        .eq("project_id", projectId),
-      supabase
-        .from("document_chunks")
-        .select("id", { count: "exact", head: true })
+        .eq("review_id", review.id)
         .eq("project_id", projectId),
     ]);
+  if (findingsError) throw new Error(findingsError.message);
+  if (actionsError) throw new Error(actionsError.message);
+  if ((findings ?? []).length !== 3) {
+    throw new Error("Complete the Budget, Schedule, and Risk analysis first.");
+  }
 
-  const fallbackSections = {
-    project_health:
-      health?.length
-        ? health.map((item) => `${item.dimension}: ${item.score ?? "n/a"} (${item.status}) - ${item.status_text}`).join("\n")
-        : "Insufficient evidence to summarize project health.",
-    key_findings:
-      [
-        ...(summaries?.map((item) => `Document summary: ${item.summary_text}`) ?? []),
-        ...(facts?.map((item) => `${item.fact_type}: ${item.extracted_text} (${Math.round(Number(item.confidence ?? 0) * 100)}% confidence)`) ?? []),
-        ...(anomalies?.map((item) => `${item.severity} ${item.category}: ${item.title}`) ?? []),
-      ].join("\n") || "No reviewed findings available.",
+  const conditionSummary = (findings ?? [])
+    .map((finding) => `${titleCase(finding.domain)} - ${conditionLabel(finding.condition)}: ${finding.headline}`)
+    .join("\n");
+  const sections = {
+    project_health: `Reporting period: ${formatReportingPeriod(review.reporting_period)}\n${reviewCondition(findings ?? [])}\n\n${conditionSummary}`,
+    key_findings: (findings ?? [])
+      .map((finding) => `${titleCase(finding.domain)}: ${finding.explanation}`)
+      .join("\n\n"),
     critical_risks:
-      anomalies?.filter((item) => item.severity === "high" || item.severity === "critical").map((item) => item.title).join("\n") ||
-      "No high priority risks available.",
+      (findings ?? [])
+        .filter((finding) => finding.condition === "critical")
+        .map((finding) => `${titleCase(finding.domain)}: ${finding.headline}`)
+        .join("\n") || "No Critical condition is recorded in this Assurance Review.",
     recommended_actions:
-      actions?.length
-        ? actions.map((item) => `${item.title} - owner ${item.owner_name ?? "missing"} - ${item.priority}`).join("\n")
-        : "No recommended actions available.",
+      (actions ?? [])
+        .map((action) => `${action.title} - owner: ${action.owner_name ?? "not assigned"}; due: ${action.due_date ?? "not set"}; status: ${action.status}`)
+        .join("\n") || "No management action is required by the current findings.",
   };
-  const sections =
-    (await generateAiReportSections({
-      reportType,
-      reportingPeriod,
-      audience,
-      detailLevel,
-      fallbackSections,
-    })) ?? fallbackSections;
 
-  await supabase.from("report_previews").insert({
+  const { error: previewError } = await supabase.from("report_previews").insert({
     project_id: projectId,
     created_by: user.id,
-    report_type: reportType,
-    reporting_period: reportingPeriod,
+    assurance_review_id: review.id,
+    report_type: "assurance_report",
+    reporting_period: formatReportingPeriod(review.reporting_period),
     audience,
     detail_level: detailLevel,
     original_sections: sections,
     included_evidence_counts: {
-      documents: documentCount ?? 0,
-      chunks: chunkCount ?? 0,
-      facts: facts?.length ?? 0,
-      summaries: summaries?.length ?? 0,
-      anomalies: anomalies?.length ?? 0,
-      recommendations: actions?.length ?? 0,
+      review_documents: evidenceCount ?? 0,
+      findings: findings?.length ?? 0,
+      confirmed_findings: findings?.filter((finding) => finding.confirmation_state === "user_confirmed").length ?? 0,
+      actions: actions?.length ?? 0,
     },
     provenance: [
-      { label: "Project health", source: "dashboard_health_snapshots" },
-      { label: "Document summaries", source: "document_summaries" },
-      { label: "Extracted facts", source: "extracted_facts" },
-      { label: "Findings", source: "anomalies" },
-      { label: "Recommended actions", source: "recommended_actions" },
+      { label: "Reporting-period review", source: `assurance_reviews:${review.id}` },
+      { label: "Bound evidence", source: "assurance_review_documents" },
+      { label: "Budget, Schedule, and Risk findings", source: "assurance_findings" },
+      { label: "Management actions", source: "assurance_actions" },
     ],
     review_state: "draft_ai_generated",
   });
+  if (previewError) throw new Error(previewError.message);
+
+  await supabase
+    .from("assurance_reviews")
+    .update({ status: "report_draft", current_step: "report", updated_at: new Date().toISOString() })
+    .eq("id", review.id)
+    .eq("project_id", projectId);
 
   revalidatePath(`/app/projects/${projectId}/reports`);
-}
-
-async function generateAiReportSections({
-  reportType,
-  reportingPeriod,
-  audience,
-  detailLevel,
-  fallbackSections,
-}: {
-  reportType: ReportType;
-  reportingPeriod: string;
-  audience: string;
-  detailLevel: string;
-  fallbackSections: Record<string, string>;
-}) {
-  const response = await runOllamaChat({
-    system:
-      "You are X-Assurance, an AI project assurance report writer. Use only supplied evidence. Return valid JSON only.",
-    user: `Generate report preview sections for:
-- report_type: ${reportType}
-- reporting_period: ${reportingPeriod}
-- audience: ${audience}
-- detail_level: ${detailLevel}
-
-Return exactly this JSON object shape:
-{
-  "project_health": "grounded report text",
-  "key_findings": "grounded report text",
-  "critical_risks": "grounded report text",
-  "recommended_actions": "grounded report text"
-}
-
-Evidence:
-${JSON.stringify(fallbackSections, null, 2).slice(0, 12000)}`,
-    format: "json",
-  });
-
-  if (!response.ok) return null;
-
-  const parsed = parseJsonObject(response.content);
-  if (!parsed) return null;
-
-  const sections = {
-    project_health: stringValue(parsed.project_health),
-    key_findings: stringValue(parsed.key_findings),
-    critical_risks: stringValue(parsed.critical_risks),
-    recommended_actions: stringValue(parsed.recommended_actions),
-  };
-
-  return Object.values(sections).every(Boolean) ? sections : null;
+  revalidatePath(`/app/projects/${projectId}/assurance`);
 }
 
 export async function saveReportEdits(formData: FormData) {
@@ -230,7 +163,7 @@ export async function markReportReviewed(formData: FormData) {
 
   const { data: before } = await supabase
     .from("report_previews")
-    .select("review_state")
+    .select("review_state, assurance_review_id")
     .eq("id", previewId)
     .eq("project_id", projectId)
     .maybeSingle();
@@ -251,7 +184,22 @@ export async function markReportReviewed(formData: FormData) {
     after_state: { review_state: "reviewed" },
   });
 
+  if (before?.assurance_review_id) {
+    await supabase
+      .from("assurance_reviews")
+      .update({
+        status: "approved",
+        current_step: "report",
+        reviewed_by: user.id,
+        approved_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", before.assurance_review_id)
+      .eq("project_id", projectId);
+  }
+
   revalidatePath(`/app/projects/${projectId}/reports`);
+  revalidatePath(`/app/projects/${projectId}/assurance`);
 }
 
 export async function exportReport(formData: FormData) {
@@ -265,12 +213,14 @@ export async function exportReport(formData: FormData) {
 
   const { data: preview } = await supabase
     .from("report_previews")
-    .select("report_type, reporting_period, original_sections, edited_sections, included_evidence_counts")
+    .select("report_type, reporting_period, original_sections, edited_sections, included_evidence_counts, review_state")
     .eq("id", previewId)
     .eq("project_id", projectId)
     .maybeSingle();
 
-  if (!preview) return;
+  if (!preview || !["reviewed", "exported"].includes(preview.review_state)) {
+    throw new Error("Approve the report before exporting PDF or DOCX.");
+  }
 
   const extension = format as "pdf" | "docx";
   const generatedAt = new Date();
@@ -355,10 +305,34 @@ export async function exportReport(formData: FormData) {
   revalidatePath(`/app/projects/${projectId}/reports`);
 }
 
-function isReportType(value: string): value is ReportType {
-  return reportTypes.includes(value as ReportType);
+function titleCase(value: string) {
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
-function stringValue(value: unknown) {
-  return typeof value === "string" ? value.trim() : "";
+function conditionLabel(value: string) {
+  if (value === "on_track") return "On Track";
+  if (value === "needs_attention") return "Needs Attention";
+  if (value === "critical") return "Critical";
+  return "More Evidence Required";
+}
+
+function reviewCondition(findings: { condition: string }[]) {
+  if (findings.some((finding) => finding.condition === "more_evidence_required")) {
+    return "Overall condition: Review Incomplete";
+  }
+  if (findings.some((finding) => finding.condition === "critical")) {
+    return "Overall condition: Critical";
+  }
+  if (findings.some((finding) => finding.condition === "needs_attention")) {
+    return "Overall condition: Needs Attention";
+  }
+  return "Overall condition: On Track";
+}
+
+function formatReportingPeriod(value: string) {
+  return new Intl.DateTimeFormat("en", {
+    month: "long",
+    timeZone: "UTC",
+    year: "numeric",
+  }).format(new Date(`${value}T00:00:00Z`));
 }

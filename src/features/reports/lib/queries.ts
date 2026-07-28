@@ -32,6 +32,15 @@ export type ReportEvidenceStats = {
   summaries: number;
 };
 
+export type ReportAssuranceReview = {
+  id: string;
+  title: string;
+  reportingPeriod: string;
+  status: string;
+  ready: boolean;
+  completedAt: string | null;
+};
+
 type ReportPreviewRow = {
   id: string;
   report_type: ReportType;
@@ -66,6 +75,7 @@ export async function getReportsWorkspace(projectId: string) {
     { count: chunkCount, error: chunkCountError },
     { count: factCount, error: factCountError },
     { count: summaryCount, error: summaryCountError },
+    { data: reviewData, error: reviewError },
   ] =
     await Promise.all([
       supabase
@@ -99,6 +109,13 @@ export async function getReportsWorkspace(projectId: string) {
         .from("document_summaries")
         .select("id", { count: "exact", head: true })
         .eq("project_id", projectId),
+      supabase
+        .from("assurance_reviews")
+        .select("id, title, reporting_period, status, analysis_metadata")
+        .eq("project_id", projectId)
+        .order("reporting_period", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
     ]);
 
   if (error) throw new Error(error.message);
@@ -107,12 +124,15 @@ export async function getReportsWorkspace(projectId: string) {
   if (chunkCountError) throw new Error(chunkCountError.message);
   if (factCountError) throw new Error(factCountError.message);
   if (summaryCountError) throw new Error(summaryCountError.message);
+  if (reviewError) throw new Error(reviewError.message);
 
   const exports = await Promise.all(
     ((exportsData ?? []) as unknown as ReportExportRow[]).map(async (row) => {
       const { data: signed } = await supabase.storage
         .from(row.storage_bucket)
-        .createSignedUrl(row.storage_path, 60 * 10);
+        .createSignedUrl(row.storage_path, 60 * 10, {
+          download: row.file_name,
+        });
 
       return mapExport(row, signed?.signedUrl ?? null);
     }),
@@ -128,6 +148,21 @@ export async function getReportsWorkspace(projectId: string) {
       facts: factCount ?? 0,
       summaries: summaryCount ?? 0,
     } satisfies ReportEvidenceStats,
+    review: reviewData
+      ? {
+          id: reviewData.id,
+          title: reviewData.title,
+          reportingPeriod: reviewData.reporting_period,
+          status: reviewData.status,
+          ready: ["findings_ready", "report_draft", "approved"].includes(
+            reviewData.status,
+          ),
+          completedAt:
+            typeof reviewData.analysis_metadata?.completed_at === "string"
+              ? reviewData.analysis_metadata.completed_at
+              : null,
+        } satisfies ReportAssuranceReview
+      : null,
   };
 }
 

@@ -101,18 +101,18 @@ function EvidenceTrace({
   ];
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+    <section className="rounded-lg border border-ui-border bg-surface p-4 shadow-sm">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <h2 className="font-semibold text-slate-950">Evidence Traceability</h2>
-          <p className="mt-1 text-sm leading-6 text-slate-600">
+          <h2 className="font-semibold text-ink">Evidence Traceability</h2>
+          <p className="mt-1 text-sm leading-6 text-ink-muted">
             Dashboard scores, alerts, assistant answers, and reports are derived
             from these project-scoped evidence records.
           </p>
         </div>
         <Link
           href="../documents"
-          className="text-sm font-medium text-blue-700 hover:underline"
+          className="text-sm font-medium text-ink underline-offset-4 hover:underline"
         >
           Review source library
         </Link>
@@ -122,15 +122,15 @@ function EvidenceTrace({
           <Link
             key={item.label}
             href={item.href}
-            className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3 hover:border-blue-300 hover:bg-blue-50"
+            className="rounded-md border border-ui-border bg-base px-3 py-3 hover:bg-plan-track"
           >
             <div className="flex items-center justify-between gap-3">
-              <p className="text-sm font-medium text-slate-600">{item.label}</p>
-              <p className="text-lg font-semibold text-slate-950">
+              <p className="text-sm font-medium text-ink-muted">{item.label}</p>
+              <p className="text-lg font-semibold text-ink">
                 {item.value}
               </p>
             </div>
-            <p className="mt-1 text-xs text-slate-500">{item.help}</p>
+            <p className="mt-1 text-xs text-ink-muted">{item.help}</p>
           </Link>
         ))}
       </div>
@@ -140,13 +140,13 @@ function EvidenceTrace({
 
 function EmptyEvidencePrompt() {
   return (
-    <section className="rounded-lg border border-dashed border-blue-300 bg-blue-50 p-5">
+    <section className="rounded-lg border border-dashed border-ui-border bg-base p-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="font-semibold text-slate-950">
+          <h2 className="font-semibold text-ink">
             This project needs evidence
           </h2>
-          <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-700">
+          <p className="mt-1 max-w-3xl text-sm leading-6 text-ink-muted">
             Upload project documents before relying on dashboard health,
             anomalies, assistant answers, or report previews. Good first
             sources are progress reports, risk registers, issue logs, meeting
@@ -155,7 +155,7 @@ function EmptyEvidencePrompt() {
         </div>
         <Link
           href="../documents"
-          className="inline-flex h-9 items-center justify-center rounded-md bg-blue-700 px-4 text-sm font-medium text-white hover:bg-blue-800"
+          className="inline-flex h-9 items-center justify-center rounded-md bg-brand px-4 text-sm font-medium text-brand-foreground hover:bg-brand/90"
         >
           Upload evidence
         </Link>
@@ -171,9 +171,9 @@ function HealthCard({ metric }: { metric: HealthCardMetric }) {
     metric.score === null ? healthStatusLabels[metric.status] : `${Math.round(metric.score)}%`;
 
   return (
-    <article className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+    <article className="rounded-lg border border-ui-border bg-surface p-4 shadow-sm">
       <div className="flex items-center justify-between gap-3">
-        <p className="text-sm font-semibold text-slate-700">
+        <p className="text-sm font-semibold text-ink-muted">
           {healthDimensionLabels[metric.dimension]}
         </p>
         <span className={`rounded-md p-1.5 ${tone.iconBg}`}>
@@ -186,13 +186,13 @@ function HealthCard({ metric }: { metric: HealthCardMetric }) {
           {healthStatusLabels[metric.status]}
         </span>
       </div>
-      <p className="mt-3 min-h-10 text-xs leading-5 text-slate-600">
+      <p className="mt-3 min-h-10 text-xs leading-5 text-ink-muted">
         {metric.statusText}
       </p>
-      <div className="mt-3 grid gap-1 border-t border-slate-100 pt-3 text-xs text-slate-500">
+      <div className="mt-3 grid gap-1 border-t border-ui-border pt-3 text-xs text-ink-muted">
         <p>
           Evidence:{" "}
-          <span className="font-medium text-slate-700">
+          <span className="font-medium text-ink-muted">
             {metric.evidenceCoverage === null
               ? "not available"
               : `${Math.round(metric.evidenceCoverage * 100)}%`}
@@ -201,7 +201,7 @@ function HealthCard({ metric }: { metric: HealthCardMetric }) {
         {metric.snapshotDate && (
           <p>
             Snapshot:{" "}
-            <span className="font-medium text-slate-700">
+            <span className="font-medium text-ink-muted">
               {formatShortDate(metric.snapshotDate)}
             </span>
           </p>
@@ -209,7 +209,7 @@ function HealthCard({ metric }: { metric: HealthCardMetric }) {
         {metric.sourceSummary && (
           <p className="line-clamp-2">
             Source:{" "}
-            <span className="font-medium text-slate-700">
+            <span className="font-medium text-ink-muted">
               {metric.sourceSummary}
             </span>
           </p>
@@ -245,21 +245,21 @@ function HealthTrend({ trend }: { trend: HealthTrendPoint[] }) {
   const amberY = margin.top + ((100 - 50) / 100) * chartHeight;
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+    <section className="rounded-lg border border-ui-border bg-surface p-5 shadow-sm">
       <div className="mb-4 flex items-center justify-between">
         <div>
           <h2 className="font-semibold">Project Health Trend</h2>
-          <p className="text-sm text-slate-500">
+          <p className="text-sm text-ink-muted">
             Monthly health history from document dates
           </p>
         </div>
         <div className="flex items-center gap-3">
           {latestPoint && (
-            <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">
+            <span className="rounded-md bg-plan-track px-2 py-1 text-xs font-medium text-ink-muted">
               Latest {latestPoint.label}: {Math.round(latestPoint.score)}%
             </span>
           )}
-          <TrendingUp className="h-5 w-5 text-blue-700" />
+          <TrendingUp className="h-5 w-5 text-ink-muted" />
         </div>
       </div>
 
@@ -269,28 +269,28 @@ function HealthTrend({ trend }: { trend: HealthTrendPoint[] }) {
             viewBox={`0 0 ${width} ${height}`}
             role="img"
             aria-label="Health trend chart with green, amber, and red threshold bands"
-            className="h-72 w-full rounded-md border border-slate-200 bg-white"
+            className="h-72 w-full rounded-md border border-ui-border bg-surface"
           >
             <rect
               x={margin.left}
               y={margin.top}
               width={chartWidth}
               height={greenY - margin.top}
-              fill="#dcfce7"
+              fill="var(--status-ok-bg)"
             />
             <rect
               x={margin.left}
               y={greenY}
               width={chartWidth}
               height={amberY - greenY}
-              fill="#fef3c7"
+              fill="var(--status-warn-bg)"
             />
             <rect
               x={margin.left}
               y={amberY}
               width={chartWidth}
               height={margin.top + chartHeight - amberY}
-              fill="#fee2e2"
+              fill="var(--status-crit-bg)"
             />
             {[100, 80, 50, 0].map((score) => {
               const y = margin.top + ((100 - score) / 100) * chartHeight;
@@ -301,14 +301,14 @@ function HealthTrend({ trend }: { trend: HealthTrendPoint[] }) {
                     x2={margin.left + chartWidth}
                     y1={y}
                     y2={y}
-                    stroke="#cbd5e1"
+                    stroke="var(--border)"
                     strokeDasharray={score === 0 ? "0" : "4 4"}
                   />
                   <text
                     x={margin.left - 10}
                     y={y + 4}
                     textAnchor="end"
-                    className="fill-slate-500 text-[11px]"
+                    className="fill-ink-muted text-[11px]"
                   >
                     {score}
                   </text>
@@ -318,7 +318,7 @@ function HealthTrend({ trend }: { trend: HealthTrendPoint[] }) {
             <polyline
               points={polyline}
               fill="none"
-              stroke="#2563eb"
+              stroke={latestPoint ? statusColor(latestPoint.status) : "var(--status-neutral)"}
               strokeWidth="3"
               strokeLinejoin="round"
               strokeLinecap="round"
@@ -333,7 +333,7 @@ function HealthTrend({ trend }: { trend: HealthTrendPoint[] }) {
                     cy={point.y}
                     r="5"
                     fill={statusColor(point.status)}
-                    stroke="#ffffff"
+                    stroke="var(--surface)"
                     strokeWidth="2"
                   >
                     <title>
@@ -348,7 +348,7 @@ function HealthTrend({ trend }: { trend: HealthTrendPoint[] }) {
                       x={point.x}
                       y={height - 18}
                       textAnchor="middle"
-                      className="fill-slate-500 text-[11px]"
+                      className="fill-ink-muted text-[11px]"
                     >
                       {point.label.replace(" 20", " '")}
                     </text>
@@ -357,20 +357,20 @@ function HealthTrend({ trend }: { trend: HealthTrendPoint[] }) {
               );
             })}
           </svg>
-          <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-600">
+          <div className="mt-3 flex flex-wrap gap-3 text-xs text-ink-muted">
             <span className="inline-flex items-center gap-1">
-              <span className="h-2 w-2 rounded-full bg-emerald-600" /> Green ≥ 80
+              <span className="h-2 w-2 rounded-full bg-status-ok" /> Green ≥ 80
             </span>
             <span className="inline-flex items-center gap-1">
-              <span className="h-2 w-2 rounded-full bg-amber-600" /> Amber 50-79
+              <span className="h-2 w-2 rounded-full bg-status-warn" /> Amber 50-79
             </span>
             <span className="inline-flex items-center gap-1">
-              <span className="h-2 w-2 rounded-full bg-red-600" /> Red &lt; 50
+              <span className="h-2 w-2 rounded-full bg-status-critical" /> Red &lt; 50
             </span>
           </div>
         </div>
       ) : (
-        <div className="rounded-md border border-dashed border-slate-300 p-8 text-sm text-slate-600">
+        <div className="rounded-md border border-dashed border-ui-border p-8 text-sm text-ink-muted">
           No health history yet. Add evidence-backed health snapshots before trend analysis.
         </div>
       )}
@@ -379,23 +379,23 @@ function HealthTrend({ trend }: { trend: HealthTrendPoint[] }) {
 }
 
 function statusColor(status: HealthTrendPoint["status"]) {
-  if (status === "green") return "#059669";
-  if (status === "amber") return "#d97706";
-  return "#dc2626";
+  if (status === "green") return "var(--status-ok)";
+  if (status === "amber") return "var(--status-warn)";
+  return "var(--status-critical)";
 }
 
 function CriticalAlerts({ alerts }: { alerts: CriticalAlert[] }) {
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+    <section className="rounded-lg border border-ui-border bg-surface p-5 shadow-sm">
       <div className="mb-4 flex items-center justify-between">
         <h2 className="font-semibold">Critical Alerts</h2>
-        <Link href="../anomalies" className="text-sm font-medium text-blue-700">
+        <Link href="../anomalies" className="text-sm font-medium text-ink underline-offset-4 hover:underline">
           View all
         </Link>
       </div>
       <div className="grid gap-3">
         {alerts.length === 0 ? (
-          <p className="rounded-md bg-slate-50 p-3 text-sm text-slate-600">
+          <p className="rounded-md bg-base p-3 text-sm text-ink-muted">
             No high priority alerts for this project.
           </p>
         ) : (
@@ -403,16 +403,16 @@ function CriticalAlerts({ alerts }: { alerts: CriticalAlert[] }) {
             <Link
               key={alert.id}
               href={alert.sourcePath}
-              className="rounded-md border border-slate-200 p-3 hover:border-red-300"
+              className="rounded-md border border-ui-border p-3 hover:border-status-critical"
             >
               <div className="flex items-center justify-between gap-3">
-                <p className="font-medium text-slate-950">{alert.impactedArea}</p>
-                <span className="rounded-md bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">
+                <p className="font-medium text-ink">{alert.impactedArea}</p>
+                <span className="rounded-md bg-status-critical-bg px-2 py-1 text-xs font-semibold text-status-critical-text">
                   {alert.severity.toUpperCase()}
                 </span>
               </div>
-              <p className="mt-1 text-sm text-slate-600">{alert.explanation}</p>
-              <p className="mt-2 text-xs text-slate-500">
+              <p className="mt-1 text-sm text-ink-muted">{alert.explanation}</p>
+              <p className="mt-2 text-xs text-ink-muted">
                 Evidence {alert.evidenceCount} • Action: {alert.recommendedAction}
               </p>
             </Link>
@@ -425,14 +425,14 @@ function CriticalAlerts({ alerts }: { alerts: CriticalAlert[] }) {
 
 function RecommendedActions({ actions }: { actions: RecommendedAction[] }) {
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+    <section className="rounded-lg border border-ui-border bg-surface p-5 shadow-sm">
       <div className="mb-4 flex items-center justify-between">
         <h2 className="font-semibold">Top Recommended Actions</h2>
-        <CheckCircle2 className="h-5 w-5 text-blue-700" />
+        <CheckCircle2 className="h-5 w-5 text-ink-muted" />
       </div>
       <div className="grid gap-3">
         {actions.length === 0 ? (
-          <p className="rounded-md bg-slate-50 p-3 text-sm text-slate-600">
+          <p className="rounded-md bg-base p-3 text-sm text-ink-muted">
             No recommended actions yet.
           </p>
         ) : (
@@ -442,22 +442,22 @@ function RecommendedActions({ actions }: { actions: RecommendedAction[] }) {
               <Link
                 key={action.id}
                 href={action.sourcePath}
-                className="rounded-md border border-slate-200 p-3 hover:border-blue-300"
+                className="rounded-md border border-ui-border p-3 hover:border-ui-border"
               >
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <p className="font-medium text-slate-950">{action.title}</p>
-                    <p className="mt-1 text-xs text-slate-500">
+                    <p className="font-medium text-ink">{action.title}</p>
+                    <p className="mt-1 text-xs text-ink-muted">
                       Owner: {action.ownerName ?? "Missing"} • Due:{" "}
                       {action.dueDate ?? "Missing"}
                     </p>
                   </div>
-                  <span className="rounded-md bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">
+                  <span className="rounded-md bg-status-warn-bg px-2 py-1 text-xs font-semibold text-status-warn-text">
                     {priorityLabels[action.priority]}
                   </span>
                 </div>
                 {incomplete && (
-                  <p className="mt-2 text-xs font-medium text-red-700">
+                  <p className="mt-2 text-xs font-medium text-status-critical-text">
                     Incomplete: owner or due date missing
                   </p>
                 )}
@@ -473,33 +473,33 @@ function RecommendedActions({ actions }: { actions: RecommendedAction[] }) {
 function getHealthTone(status: HealthCardMetric["status"]) {
   if (status === "green") {
     return {
-      text: "text-emerald-700",
-      icon: "text-emerald-700",
-      iconBg: "bg-emerald-50",
-      badge: "bg-emerald-50 text-emerald-700",
+      text: "text-status-ok-text",
+      icon: "text-status-ok-text",
+      iconBg: "bg-status-ok-bg",
+      badge: "bg-status-ok-bg text-status-ok-text",
     };
   }
   if (status === "amber") {
     return {
-      text: "text-amber-700",
-      icon: "text-amber-700",
-      iconBg: "bg-amber-50",
-      badge: "bg-amber-50 text-amber-700",
+      text: "text-status-warn-text",
+      icon: "text-status-warn-text",
+      iconBg: "bg-status-warn-bg",
+      badge: "bg-status-warn-bg text-status-warn-text",
     };
   }
   if (status === "red") {
     return {
-      text: "text-red-700",
-      icon: "text-red-700",
-      iconBg: "bg-red-50",
-      badge: "bg-red-50 text-red-700",
+      text: "text-status-critical-text",
+      icon: "text-status-critical-text",
+      iconBg: "bg-status-critical-bg",
+      badge: "bg-status-critical-bg text-status-critical-text",
     };
   }
   return {
-    text: "text-slate-600",
-    icon: "text-slate-500",
-    iconBg: "bg-slate-100",
-    badge: "bg-slate-100 text-slate-700",
+    text: "text-ink-muted",
+    icon: "text-ink-muted",
+    iconBg: "bg-plan-track",
+    badge: "bg-plan-track text-ink-muted",
   };
 }
 

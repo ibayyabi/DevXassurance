@@ -6,11 +6,11 @@ import {
   BarChart3,
   Bell,
   Bot,
-  FileText,
+  Files,
   LayoutDashboard,
   Menu,
   ShieldAlert,
-  TriangleAlert,
+  TrendingUp,
   Users,
 } from "lucide-react";
 import { useState } from "react";
@@ -21,12 +21,12 @@ import type { AssignedProject } from "@/features/projects/lib/queries";
 import { roleLabels } from "@/features/projects/lib/roles";
 
 const navItems = [
-  { label: "Dashboard", href: "dashboard", icon: LayoutDashboard },
-  { label: "Documents", href: "documents", icon: FileText },
-  { label: "Anomalies", href: "anomalies", icon: TriangleAlert },
-  { label: "AI Assistant", href: "assistant", icon: Bot },
+  { label: "Overview", href: "dashboard", icon: LayoutDashboard },
+  { label: "Evidence", href: "documents", icon: Files },
   { label: "Reports", href: "reports", icon: BarChart3 },
-  { label: "Members", href: "members", icon: Users },
+  { label: "AI Advisor", href: "assistant", icon: Bot },
+  { label: "Trends", href: "trends", icon: TrendingUp },
+  { label: "Team & Settings", href: "members", icon: Users },
 ];
 
 export function AppShell({
@@ -43,11 +43,11 @@ export function AppShell({
   const projectRoot = `/app/projects/${project.projectId}`;
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-950">
+    <div className="min-h-screen bg-base text-ink">
       <div className="flex min-h-screen">
         <aside
           className={cn(
-            "sticky top-0 hidden h-screen shrink-0 flex-col bg-slate-950 px-3 py-4 text-white md:flex",
+            "sticky top-0 hidden h-screen shrink-0 flex-col bg-sidebar px-3 py-4 text-sidebar-text md:flex",
             collapsed ? "w-20" : "w-64",
           )}
         >
@@ -61,7 +61,7 @@ export function AppShell({
               type="button"
               size="icon"
               variant="ghost"
-              className="text-white hover:bg-blue-900 hover:text-white"
+              className="text-sidebar-text hover:bg-sidebar-hover hover:text-sidebar-text focus-visible:ring-sidebar-text"
               aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
               onClick={() => setCollapsed((value) => !value)}
             >
@@ -81,8 +81,8 @@ export function AppShell({
                   href={href}
                   title={collapsed ? item.label : undefined}
                   className={cn(
-                    "flex h-11 items-center gap-3 rounded-md px-3 text-sm font-medium text-slate-300 outline-none transition hover:bg-blue-900 hover:text-white focus-visible:ring-2 focus-visible:ring-blue-300",
-                    active && "bg-blue-700 text-white",
+                    "relative flex h-11 items-center gap-3 rounded-md border-l-[3px] border-transparent px-3 text-sm font-medium text-sidebar-muted outline-none transition hover:bg-sidebar-hover hover:text-sidebar-text focus-visible:ring-2 focus-visible:ring-sidebar-text",
+                    active && "border-l-sidebar-text bg-sidebar-hover text-sidebar-text",
                     collapsed && "justify-center",
                   )}
                 >
@@ -96,7 +96,7 @@ export function AppShell({
           <Link
             href="/app/projects"
             className={cn(
-              "mt-auto flex items-center gap-3 rounded-md border border-slate-700 px-3 py-3 text-sm text-slate-200 hover:border-blue-400 hover:text-white",
+              "mt-auto flex items-center gap-3 rounded-md border border-sidebar-muted/30 px-3 py-3 text-sm text-sidebar-muted outline-none hover:border-sidebar-muted/60 hover:text-sidebar-text focus-visible:ring-2 focus-visible:ring-sidebar-text",
               collapsed && "justify-center",
             )}
           >
@@ -106,10 +106,10 @@ export function AppShell({
         </aside>
 
         <div className="flex min-w-0 flex-1 flex-col">
-          <header className="sticky top-0 z-10 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur md:px-6">
+          <header className="sticky top-0 z-10 border-b border-ui-border bg-surface/95 px-4 py-3 backdrop-blur md:px-6">
             <div className="flex items-center justify-between gap-4">
               <div className="min-w-0">
-                <p className="text-sm font-medium text-slate-500">
+                <p className="text-sm font-medium text-ink-muted">
                   {project.organizationName}
                 </p>
                 <h1 className="truncate text-xl font-semibold">
@@ -126,11 +126,31 @@ export function AppShell({
                   <Bell className="h-4 w-4" />
                 </Button>
                 <div className="hidden text-right text-sm sm:block">
-                  <p className="font-medium text-slate-950">{userEmail}</p>
-                  <p className="text-slate-500">{roleLabels[project.role]}</p>
+                  <p className="font-medium text-ink">{userEmail}</p>
+                  <p className="text-ink-muted">{roleLabels[project.role]}</p>
                 </div>
               </div>
             </div>
+            <nav className="mt-3 flex gap-1 overflow-x-auto border-t border-ui-border pt-3 md:hidden">
+              {navItems.map((item) => {
+                const href = `${projectRoot}/${item.href}`;
+                const active = pathname === href;
+                const Icon = item.icon;
+                return (
+                  <Link
+                    key={item.href}
+                    href={href}
+                    className={cn(
+                      "flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-ink-muted",
+                      active && "bg-plan-track text-ink",
+                    )}
+                  >
+                    <Icon className="h-4 w-4" />
+                    {item.label}
+                  </Link>
+                );
+              })}
+            </nav>
           </header>
           <main className="flex-1 p-4 md:p-6">{children}</main>
         </div>

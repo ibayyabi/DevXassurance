@@ -1,8 +1,9 @@
 ---
 title: X-Assurance Design
-status: final
+status: superseded-for-recovery
 created: 2026-06-08
-updated: 2026-06-08
+updated: 2026-07-21
+superseded_by: ../../product-recovery/phase-3-usable-mvp-spec.md
 sources:
   - ../../prds/prd-x-assistance-2026-06-08/prd.md
   - ../../architecture.md
@@ -75,6 +76,8 @@ tokens:
 ---
 
 # X-Assurance Design
+
+> **Recovery notice:** The density and component guidance in this file are superseded where they conflict with [`phase-3-usable-mvp-spec.md`](../../product-recovery/phase-3-usable-mvp-spec.md). Existing brand colors and reusable visual tokens remain references, not requirements to preserve the old screen layout.
 
 ## Brand & Style
 

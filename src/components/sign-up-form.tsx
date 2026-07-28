@@ -3,13 +3,6 @@
 import { cn } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import Link from "next/link";
@@ -44,7 +37,7 @@ export function SignUpForm({
         email,
         password,
         options: {
-          emailRedirectTo: `${window.location.origin}/protected`,
+          emailRedirectTo: `${window.location.origin}/app/projects`,
         },
       });
       if (error) throw error;
@@ -57,64 +50,93 @@ export function SignUpForm({
   };
 
   return (
-    <div className={cn("flex flex-col gap-6", className)} {...props}>
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-2xl">Sign up</CardTitle>
-          <CardDescription>Create a new account</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSignUp}>
-            <div className="flex flex-col gap-6">
-              <div className="grid gap-2">
-                <Label htmlFor="email">Email</Label>
-                <Input
-                  id="email"
-                  type="email"
-                  placeholder="m@example.com"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                />
-              </div>
-              <div className="grid gap-2">
-                <div className="flex items-center">
-                  <Label htmlFor="password">Password</Label>
-                </div>
-                <Input
-                  id="password"
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
-              </div>
-              <div className="grid gap-2">
-                <div className="flex items-center">
-                  <Label htmlFor="repeat-password">Repeat Password</Label>
-                </div>
-                <Input
-                  id="repeat-password"
-                  type="password"
-                  required
-                  value={repeatPassword}
-                  onChange={(e) => setRepeatPassword(e.target.value)}
-                />
-              </div>
-              {error && <p className="text-sm text-red-500">{error}</p>}
-              <Button type="submit" className="w-full" disabled={isLoading}>
-                {isLoading ? "Creating an account..." : "Sign up"}
-              </Button>
-            </div>
-            <div className="mt-4 text-center text-sm">
-              Already have an account?{" "}
-              <Link href="/auth/login" className="underline underline-offset-4">
-                Login
-              </Link>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
+    <div className={cn("w-full", className)} {...props}>
+      <form onSubmit={handleSignUp} className="space-y-5">
+        <div className="grid gap-2">
+          <Label htmlFor="email" className="text-sm font-semibold text-ink">
+            Work email
+          </Label>
+          <Input
+            id="email"
+            name="email"
+            type="email"
+            autoComplete="email"
+            placeholder="you@company.com"
+            required
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            className="auth-field h-12 rounded-lg border-ui-border bg-surface px-4 text-base shadow-none placeholder:text-ink-muted/70 focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/20"
+          />
+        </div>
+
+        <div className="grid gap-2">
+          <Label
+            htmlFor="password"
+            className="text-sm font-semibold text-ink"
+          >
+            Password
+          </Label>
+          <Input
+            id="password"
+            name="password"
+            type="password"
+            autoComplete="new-password"
+            required
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            className="auth-field h-12 rounded-lg border-ui-border bg-surface px-4 text-base shadow-none focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/20"
+          />
+          <p className="text-xs leading-5 text-ink-muted">
+            Use a strong password that you do not reuse elsewhere.
+          </p>
+        </div>
+
+        <div className="grid gap-2">
+          <Label
+            htmlFor="repeat-password"
+            className="text-sm font-semibold text-ink"
+          >
+            Confirm password
+          </Label>
+          <Input
+            id="repeat-password"
+            name="repeatPassword"
+            type="password"
+            autoComplete="new-password"
+            required
+            value={repeatPassword}
+            onChange={(event) => setRepeatPassword(event.target.value)}
+            className="auth-field h-12 rounded-lg border-ui-border bg-surface px-4 text-base shadow-none focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/20"
+          />
+        </div>
+
+        {error && (
+          <p
+            role="alert"
+            className="rounded-lg border border-status-critical bg-status-critical-bg px-4 py-3 text-sm leading-6 text-status-critical-text"
+          >
+            {error}
+          </p>
+        )}
+
+        <Button
+          type="submit"
+          className="h-12 w-full rounded-lg bg-brand text-brand-foreground shadow-none hover:bg-brand/90 active:translate-y-px"
+          disabled={isLoading}
+        >
+          {isLoading ? "Creating account..." : "Create account"}
+        </Button>
+      </form>
+
+      <div className="mt-8 border-t border-ui-border pt-6 text-center text-sm text-ink-muted">
+        Already have an account?{" "}
+        <Link
+          href="/login"
+          className="font-semibold text-ink underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2"
+        >
+          Sign in
+        </Link>
+      </div>
     </div>
   );
 }
