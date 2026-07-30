@@ -87,6 +87,7 @@ async function runOllamaRequest({
   try {
     const response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/chat`, {
       method: "POST",
+      signal: AbortSignal.timeout(llmTimeoutMs()),
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model,
@@ -162,6 +163,7 @@ async function runOllamaCloudRequest({
   try {
     const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat`, {
       method: "POST",
+      signal: AbortSignal.timeout(llmTimeoutMs()),
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
@@ -250,6 +252,7 @@ async function runOpenAiCompatibleRequest({
       `${baseUrl.replace(/\/$/, "")}/chat/completions`,
       {
         method: "POST",
+        signal: AbortSignal.timeout(llmTimeoutMs()),
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
@@ -318,4 +321,11 @@ export function parseJsonObject(raw: string) {
   } catch {
     return null;
   }
+}
+
+function llmTimeoutMs() {
+  const configured = Number(process.env.XASS_LLM_TIMEOUT_MS ?? 120000);
+
+  if (!Number.isFinite(configured)) return 120000;
+  return Math.max(5000, Math.min(300000, configured));
 }

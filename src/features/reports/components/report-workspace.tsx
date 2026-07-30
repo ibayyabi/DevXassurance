@@ -1,8 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { CheckCircle2, FileDown, Mail, Sparkles } from "lucide-react";
-import { useState } from "react";
+import {
+  CheckCircle2,
+  FileDown,
+  FileText,
+  Mail,
+  Sparkles,
+} from "lucide-react";
 
 import {
   exportReport,
@@ -10,37 +15,31 @@ import {
   markReportReviewed,
   saveReportEdits,
 } from "@/features/reports/actions/report-actions";
-import {
-  audiences,
-  detailLevels,
-  reportTypeLabels,
-  reportTypes,
-  type ReportType,
-} from "@/features/reports/lib/constants";
+import { audiences, detailLevels } from "@/features/reports/lib/constants";
 import type {
+  ReportAssuranceReview,
   ReportEvidenceStats,
   ReportExport,
   ReportPreview,
 } from "@/features/reports/lib/queries";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 
 const sectionMeta = {
   project_health: {
-    label: "Project Health",
-    help: "Overall delivery condition and evidence-backed health signal.",
+    label: "Executive condition",
+    help: "The clearest management statement about the project condition.",
   },
   key_findings: {
-    label: "Key Findings",
-    help: "Material facts from processed documents, summaries, and anomalies.",
+    label: "Budget, Schedule, and Risk findings",
+    help: "Evidence-backed findings from the latest automatic assessment.",
   },
   critical_risks: {
-    label: "Critical Risks",
-    help: "High priority risk and issue signals that need attention.",
+    label: "Critical matters",
+    help: "Conditions that need escalation or a management decision.",
   },
   recommended_actions: {
-    label: "Recommended Actions",
-    help: "Owner-ready next steps drawn from evidence and open actions.",
+    label: "Recommended actions",
+    help: "Specific next steps for accountable owners.",
   },
 } as const;
 
@@ -50,223 +49,186 @@ export function ReportWorkspace({
   preview,
   exports,
   evidenceStats,
+  review,
 }: {
   projectId: string;
   projectName: string;
   preview: ReportPreview | null;
   exports: ReportExport[];
   evidenceStats: ReportEvidenceStats;
+  review: ReportAssuranceReview | null;
 }) {
-  const [selectedType, setSelectedType] = useState<ReportType>(
-    preview?.reportType ?? "executive_summary",
+  const reviewReady = review?.ready === true;
+  const previewIsCurrent = Boolean(
+    preview &&
+      (!review?.completedAt ||
+        Date.parse(preview.createdAt) >= Date.parse(review.completedAt)),
   );
-  const sections = preview?.editedSections ?? preview?.originalSections ?? null;
-  const hasProcessedEvidence = evidenceStats.chunks > 0 || evidenceStats.facts > 0 || evidenceStats.summaries > 0;
+  const currentPreview = previewIsCurrent ? preview : null;
+  const currentSections = currentPreview?.editedSections ?? currentPreview?.originalSections ?? null;
+  const approved = Boolean(
+    currentPreview &&
+      ["reviewed", "exported"].includes(currentPreview.reviewState),
+  );
+
+  if (!reviewReady) {
+    return (
+      <section className="rounded-3xl border border-status-warn bg-status-warn-bg p-7 shadow-sm md:p-10">
+        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-status-warn-text">
+          Assessment not ready
+        </p>
+        <h2 className="mt-3 max-w-2xl text-3xl font-semibold tracking-tight text-status-warn-text">
+          Add enough evidence before creating a management report.
+        </h2>
+        <p className="mt-3 max-w-2xl text-sm leading-6 text-status-warn-text/80">
+          The report uses the latest automatic Budget, Schedule, and Risk
+          assessment. Upload project files and wait for analysis to finish.
+        </p>
+        <Button asChild className="mt-6 bg-brand text-brand-foreground hover:bg-brand/90">
+          <Link href={`/app/projects/${projectId}/documents`}>Review evidence</Link>
+        </Button>
+      </section>
+    );
+  }
 
   return (
-    <div className="grid gap-5 xl:grid-cols-[0.72fr_1.45fr_0.88fr]">
-      <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-        <h2 className="font-semibold">1. Select Report Type</h2>
-        <div className="mt-4 grid gap-3">
-          {reportTypes.map((type) => (
-            <label
-              key={type}
-              className={
-                selectedType === type
-                  ? "rounded-md border border-blue-500 bg-blue-50 p-3 shadow-sm"
-                  : "rounded-md border border-slate-200 p-3 hover:border-blue-200"
-              }
-            >
-              <input
-                type="radio"
-                name="reportTypeChoice"
-                value={type}
-                checked={selectedType === type}
-                onChange={() => setSelectedType(type)}
-                className="mr-2"
-              />
-              <span className="text-sm font-semibold text-slate-950">
-                {reportTypeLabels[type]}
-              </span>
-              <p className="mt-1 text-xs leading-5 text-slate-500">
-                {reportTypeDescription(type)}
+    <div className="space-y-5">
+      <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-3">
+            <span className="rounded-xl bg-plan-track p-2.5 text-ink-muted">
+              <FileText className="h-5 w-5" />
+            </span>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-ink-muted">
+                Source assessment
               </p>
-            </label>
-          ))}
+              <h2 className="mt-1 font-semibold text-ink">{review.title}</h2>
+            </div>
+          </div>
+          <span className={`w-fit rounded-full px-3 py-1 text-xs font-semibold ${approved || !currentPreview ? "bg-status-ok-bg text-status-ok-text" : "bg-status-warn-bg text-status-warn-text"}`}>
+            {approved ? "Approved for export" : currentPreview ? "Draft ready" : "Ready to generate"}
+          </span>
         </div>
       </section>
 
-      <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <h2 className="font-semibold">2. Report Preview</h2>
-            {preview && (
-              <p className="mt-1 text-sm text-slate-500">
-                {reportTypeLabels[preview.reportType]} for {preview.audience} •{" "}
-                {preview.detailLevel}
-              </p>
-            )}
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.3fr)_minmax(300px,0.7fr)]">
+        <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm md:p-6">
+          <div className="border-b border-ui-border pb-4">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-brand">
+              Management report
+            </p>
+            <h2 className="mt-1 text-2xl font-semibold text-ink">
+              {projectName}
+            </h2>
+            <p className="mt-1 text-sm text-ink-muted">
+              Review the wording before approving and exporting.
+            </p>
           </div>
-          {preview && (
-            <span className="w-fit rounded-md bg-blue-50 px-2 py-1 text-xs font-semibold capitalize text-blue-700">
-              {preview.reviewState.replaceAll("_", " ")}
-            </span>
+
+          {currentPreview && currentSections ? (
+            <form action={saveReportEdits} className="mt-5 grid gap-4">
+              <input type="hidden" name="projectId" value={projectId} />
+              <input type="hidden" name="previewId" value={currentPreview.id} />
+              {Object.entries(sectionMeta).map(([name, meta]) => (
+                <PreviewSection
+                  key={name}
+                  name={name}
+                  title={meta.label}
+                  help={meta.help}
+                  value={currentSections[name]}
+                />
+              ))}
+              <Button type="submit" variant="outline" className="w-fit bg-surface text-ink">
+                Save report edits
+              </Button>
+            </form>
+          ) : (
+            <div className="mt-5 rounded-2xl border border-dashed border-ui-border bg-base p-8 text-center">
+              <Sparkles className="mx-auto h-7 w-7 text-ink-muted" />
+              <p className="mt-3 font-semibold text-ink">
+                Generate a concise report draft
+              </p>
+              <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-ink-muted">
+                The draft will use only the latest automatic assessment,
+                evidence, and management actions.
+              </p>
+            </div>
           )}
-        </div>
-        {preview && sections ? (
-          <form action={saveReportEdits} className="grid gap-4">
+        </section>
+
+        <aside className="space-y-5">
+          <form action={generateReportPreview} className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
             <input type="hidden" name="projectId" value={projectId} />
-            <input type="hidden" name="previewId" value={preview.id} />
-            {Object.entries(sectionMeta).map(([name, meta], index) => (
-              <PreviewSection
-                key={name}
-                name={name}
-                title={meta.label}
-                help={meta.help}
-                value={sections[name]}
-                accentIndex={index}
-              />
-            ))}
-            <div className="flex flex-wrap gap-2">
-              <Button type="submit" variant="outline">
-                Save Edits
+            <input type="hidden" name="assuranceReviewId" value={review.id} />
+            <h2 className="text-lg font-semibold text-ink">Report options</h2>
+            <div className="mt-4 grid gap-4">
+              <label className="grid gap-1.5 text-sm font-medium text-ink">
+                Audience
+                <select name="audience" className="h-11 rounded-lg border border-ui-border bg-surface px-3 text-sm text-ink shadow-sm">
+                  {audiences.map((audience) => (
+                    <option key={audience}>{audience}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium text-ink">
+                Detail level
+                <select name="detailLevel" className="h-11 rounded-lg border border-ui-border bg-surface px-3 text-sm text-ink shadow-sm">
+                  {detailLevels.map((level) => (
+                    <option key={level}>{level}</option>
+                  ))}
+                </select>
+              </label>
+              <Button type="submit" className="bg-brand text-brand-foreground hover:bg-brand/90">
+                <Sparkles className="h-4 w-4" />
+                {currentPreview ? "Regenerate report" : preview ? "Generate updated report" : "Generate report"}
               </Button>
             </div>
           </form>
-        ) : (
-          <div className="rounded-md border border-dashed border-slate-300 p-8 text-sm text-slate-600">
-            Choose report settings and generate a preview. Export buttons remain secondary until a preview exists.
-          </div>
-        )}
-      </section>
 
-      <aside className="space-y-5">
-        <form action={generateReportPreview} className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-          <input type="hidden" name="projectId" value={projectId} />
-          <input type="hidden" name="reportType" value={selectedType} />
-          <h2 className="font-semibold">3. Report Settings</h2>
-          {!hasProcessedEvidence && (
-            <p className="mt-3 rounded-md bg-amber-50 p-3 text-sm leading-6 text-amber-800">
-              Upload and process project evidence before generating a report.
-              Reports are grounded in summaries, extracted facts, anomalies,
-              and recommended actions.
+          <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
+            <h2 className="font-semibold text-ink">Approve and create files</h2>
+            <p className="mt-1 text-sm leading-6 text-ink-muted">
+              Approve the wording, create the required format, then download it
+              from Recent downloads.
             </p>
-          )}
-          <div className="mt-4 grid gap-3">
-            <label className="text-sm font-medium">
-              Reporting period
-              <Input name="reportingPeriod" defaultValue="Current reporting period" required className="mt-1" />
-            </label>
-            <label className="text-sm font-medium">
-              Program / Project
-              <Input value={projectName} readOnly className="mt-1" />
-            </label>
-            <label className="text-sm font-medium">
-              Audience
-              <select name="audience" className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm">
-                {audiences.map((audience) => <option key={audience}>{audience}</option>)}
-              </select>
-            </label>
-            <label className="text-sm font-medium">
-              Detail level
-              <select name="detailLevel" className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm">
-                {detailLevels.map((level) => <option key={level}>{level}</option>)}
-              </select>
-            </label>
-            <Button
-              type="submit"
-              disabled={!hasProcessedEvidence}
-              className="bg-blue-700 hover:bg-blue-800"
-            >
-              <Sparkles className="h-4 w-4" />
-              Generate Preview
-            </Button>
-          </div>
-        </form>
-
-        <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-          <h2 className="font-semibold">Included Evidence</h2>
-          {preview ? (
-            <div className="mt-3 grid gap-2 text-sm">
-              {Object.entries(preview.includedEvidenceCounts).map(([key, value]) => (
-                <div key={key} className="flex justify-between rounded-md bg-slate-50 px-3 py-2">
-                  <span className="capitalize">{key.replaceAll("_", " ")}</span>
-                  <span className="font-semibold">{value}</span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="mt-3 grid gap-2 text-sm">
-              {Object.entries(evidenceStats).map(([key, value]) => (
-                <div key={key} className="flex justify-between rounded-md bg-slate-50 px-3 py-2">
-                  <span className="capitalize">{key}</span>
-                  <span className="font-semibold">{value}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <ReportProvenance preview={preview} />
-
-        <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-          <h2 className="font-semibold">Export</h2>
-          <div className="mt-3 grid gap-2">
-            <ExportButton projectId={projectId} preview={preview} format="pdf" label="Export PDF" />
-            <ExportButton projectId={projectId} preview={preview} format="docx" label="Export DOCX" />
-            <form action={markReportReviewed}>
-              <input type="hidden" name="projectId" value={projectId} />
-              <input type="hidden" name="previewId" value={preview?.id ?? ""} />
-              <Button type="submit" variant="outline" className="w-full" disabled={!preview}>
-                <CheckCircle2 className="h-4 w-4" />
-                Mark Reviewed
-              </Button>
-            </form>
-            <Button type="button" variant="outline" disabled>
-              <Mail className="h-4 w-4" />
-              Share Report
-            </Button>
-          </div>
-        </section>
-
-        <ExportHistory exports={exports} />
-      </aside>
-    </div>
-  );
-}
-
-function ReportProvenance({ preview }: { preview: ReportPreview | null }) {
-  return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-      <h2 className="font-semibold">Traceability</h2>
-      {preview ? (
-        <div className="mt-3 grid gap-2">
-          {preview.provenance.length === 0 ? (
-            <p className="rounded-md bg-slate-50 p-3 text-sm text-slate-600">
-              No provenance records were stored for this preview.
-            </p>
-          ) : (
-            preview.provenance.map((item) => (
-              <div
-                key={`${item.label}-${item.source}`}
-                className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
+            <div className="mt-4 grid gap-2">
+              <form action={markReportReviewed}>
+                <input type="hidden" name="projectId" value={projectId} />
+                <input type="hidden" name="previewId" value={currentPreview?.id ?? ""} />
+                <Button
+                  type="submit"
+                  variant="outline"
+                  className="w-full border-ui-border bg-surface text-ink hover:bg-base"
+                  disabled={!currentPreview}
+                >
+                  <CheckCircle2 className="h-4 w-4" />
+                  {approved ? "Report approved" : "Approve report"}
+                </Button>
+              </form>
+              <ExportButton projectId={projectId} preview={currentPreview} format="pdf" label="Create PDF file" />
+              <ExportButton projectId={projectId} preview={currentPreview} format="docx" label="Create DOCX file" />
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full border-ui-border bg-base text-ink-muted"
+                disabled
               >
-                <p className="text-sm font-medium text-slate-950">
-                  {item.label}
-                </p>
-                <p className="mt-1 font-mono text-xs text-slate-500">
-                  {item.source}
-                </p>
-              </div>
-            ))
-          )}
-        </div>
-      ) : (
-        <p className="mt-3 rounded-md bg-slate-50 p-3 text-sm leading-6 text-slate-600">
-          Generate a preview to capture which Supabase evidence tables were used.
-        </p>
-      )}
-    </section>
+                <Mail className="h-4 w-4" />
+                Share coming later
+              </Button>
+            </div>
+          </section>
+
+          <EvidenceSummary stats={evidenceStats} />
+        </aside>
+      </div>
+
+      <div className="grid min-w-0 gap-5 xl:grid-cols-2">
+        <ExportHistory exports={exports} />
+        <ReportProvenance preview={currentPreview} />
+      </div>
+    </div>
   );
 }
 
@@ -275,24 +237,20 @@ function PreviewSection({
   title,
   help,
   value,
-  accentIndex,
 }: {
   name: string;
   title: string;
   help: string;
   value?: string;
-  accentIndex: number;
 }) {
-  const accent = ["border-l-blue-600", "border-l-emerald-600", "border-l-red-600", "border-l-amber-500"][accentIndex] ?? "border-l-slate-400";
-
   return (
-    <label className={`grid gap-2 rounded-md border border-l-4 border-slate-200 ${accent} bg-white p-3`}>
-      <span className="font-semibold text-slate-950">{title}</span>
-      <span className="text-xs leading-5 text-slate-500">{help}</span>
+    <label className="grid gap-2 rounded-xl border border-ui-border bg-surface p-4">
+      <span className="font-semibold text-ink">{title}</span>
+      <span className="text-xs leading-5 text-ink-muted">{help}</span>
       <textarea
         name={name}
         defaultValue={value ?? ""}
-        className="min-h-32 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm leading-6 text-slate-800 focus:bg-white"
+        className="min-h-32 rounded-lg border border-ui-border bg-base p-3 text-sm leading-6 text-ink outline-none focus:border-brand focus:bg-surface focus:ring-2 focus:ring-brand/20"
       />
     </label>
   );
@@ -309,12 +267,20 @@ function ExportButton({
   format: "pdf" | "docx";
   label: string;
 }) {
+  const enabled = Boolean(
+    preview && ["reviewed", "exported"].includes(preview.reviewState),
+  );
   return (
     <form action={exportReport}>
       <input type="hidden" name="projectId" value={projectId} />
       <input type="hidden" name="previewId" value={preview?.id ?? ""} />
       <input type="hidden" name="format" value={format} />
-      <Button type="submit" variant="outline" className="w-full" disabled={!preview}>
+      <Button
+        type="submit"
+        variant="outline"
+        className="w-full border-ui-border bg-surface text-ink hover:bg-plan-track disabled:bg-ui-border disabled:text-ink-muted"
+        disabled={!enabled}
+      >
         <FileDown className="h-4 w-4" />
         {label}
       </Button>
@@ -322,38 +288,74 @@ function ExportButton({
   );
 }
 
+function EvidenceSummary({ stats }: { stats: ReportEvidenceStats }) {
+  return (
+    <details className="min-w-0 rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
+      <summary className="cursor-pointer font-semibold text-ink">
+        Evidence included
+      </summary>
+      <dl className="mt-4 grid grid-cols-2 gap-2">
+        {Object.entries(stats).map(([key, value]) => (
+          <div key={key} className="rounded-xl bg-base px-3 py-3">
+            <dt className="text-xs capitalize text-ink-muted">{key}</dt>
+            <dd className="mt-1 text-xl font-semibold text-ink">{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
+  );
+}
+
+function ReportProvenance({ preview }: { preview: ReportPreview | null }) {
+  return (
+    <details className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
+      <summary className="cursor-pointer font-semibold text-ink">
+        Technical traceability
+      </summary>
+      <p className="mt-2 text-sm leading-6 text-ink-muted">
+        Use this when an auditor needs to trace the report back to stored records.
+      </p>
+      <div className="mt-4 grid gap-2">
+        {preview?.provenance.length ? (
+          preview.provenance.map((item) => (
+            <div key={`${item.label}-${item.source}`} className="rounded-xl bg-base px-3 py-3">
+              <p className="text-sm font-medium text-ink">{item.label}</p>
+              <p className="mt-1 break-all font-mono text-xs text-ink-muted">{item.source}</p>
+            </div>
+          ))
+        ) : (
+          <p className="text-sm text-ink-muted">Generate a report to create traceability records.</p>
+        )}
+      </div>
+    </details>
+  );
+}
+
 function ExportHistory({ exports }: { exports: ReportExport[] }) {
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-      <h2 className="font-semibold">Recent Exports</h2>
-      <div className="mt-3 grid gap-2">
+    <section className="min-w-0 rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
+      <h2 className="font-semibold text-ink">Recent downloads</h2>
+      <div className="mt-4 grid gap-2">
         {exports.length === 0 ? (
-          <p className="rounded-md bg-slate-50 p-3 text-sm text-slate-600">
-            Exported files will appear here.
+          <p className="rounded-xl bg-base p-4 text-sm text-ink-muted">
+            Downloaded reports will appear here.
           </p>
         ) : (
           exports.map((item) => (
-            <div key={item.id} className="rounded-md border border-slate-200 p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-slate-950">
-                    {item.fileName}
-                  </p>
-                  <p className="mt-1 text-xs uppercase text-slate-500">
-                    {item.format} • {item.status} • {formatFileSize(item.fileSize)}
-                  </p>
-                  <p className="mt-1 text-xs text-slate-500">
-                    {new Date(item.createdAt).toLocaleString()}
-                  </p>
-                </div>
-                {item.downloadUrl ? (
-                  <Button asChild size="sm" variant="outline">
-                    <Link href={item.downloadUrl}>Download</Link>
-                  </Button>
-                ) : (
-                  <span className="text-xs text-slate-400">Unavailable</span>
-                )}
+            <div key={item.id} className="flex flex-col gap-3 rounded-xl border border-ui-border p-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                  <p className="break-all text-sm font-medium text-ink sm:truncate">{item.fileName}</p>
+                <p className="mt-1 text-xs text-ink-muted">
+                  {item.format.toUpperCase()} · {formatFileSize(item.fileSize)} · {formatExportDate(item.createdAt)}
+                </p>
               </div>
+              {item.downloadUrl ? (
+                <Button asChild size="sm" variant="outline" className="bg-surface text-ink">
+                  <Link href={item.downloadUrl}>Download</Link>
+                </Button>
+              ) : (
+                <span className="text-xs text-ink-muted/70">Unavailable</span>
+              )}
             </div>
           ))
         )}
@@ -368,9 +370,11 @@ function formatFileSize(size: number) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function reportTypeDescription(type: ReportType) {
-  if (type === "executive_summary") return "Short leadership readout with health, risks, and decisions.";
-  if (type === "assurance_report") return "Broader assurance report with evidence counts and review trail.";
-  if (type === "governance_gap_report") return "Focused view of missing approvals, reviews, and controls.";
-  return "Consolidated risk, issue, owner, and escalation summary.";
+function formatExportDate(value: string) {
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    timeZone: "UTC",
+    year: "numeric",
+  }).format(new Date(value));
 }

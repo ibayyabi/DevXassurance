@@ -49,7 +49,7 @@ test("document classification values and processing statuses are stable", () => 
   }
 });
 
-test("documents page includes upload, library, extraction, summary, and source panels", () => {
+test("evidence page keeps upload and library primary while hiding technical extraction details", () => {
   assert.ok(existsSync("src/app/app/projects/[projectId]/documents/page.tsx"));
   const page = read("src/app/app/projects/[projectId]/documents/page.tsx");
   const panel = read("src/features/documents/components/document-intelligence.tsx");
@@ -57,17 +57,19 @@ test("documents page includes upload, library, extraction, summary, and source p
   const actions = read("src/features/documents/actions/document-actions.ts");
 
   assert.match(page, /DocumentIntelligence/);
-  assert.match(upload, /Upload Documents/);
-  assert.match(panel, /Document Library/);
-  assert.match(panel, /Extracted Information/);
-  assert.match(panel, /Document Summary/);
-  assert.match(panel, /Source & Evidence/);
+  assert.match(upload, /Upload everything you have/);
+  assert.match(panel, /Project documents/);
+  assert.match(panel, /Evidence status/);
+  assert.match(panel, /Review extracted details/);
+  assert.match(panel, /Document summary/);
+  assert.match(panel, /AutomaticAssessment/);
+  assert.doesNotMatch(panel, /Return to Assurance Review/);
   assert.match(actions, /isSupportedEvidenceFile/);
   assert.match(read("src/features/documents/lib/file-types.ts"), /application\/pdf/);
   assert.match(actions, /Automated extraction supports PDF, TXT, CSV, DOCX, and XLSX files/);
-  assert.match(upload, /Document title optional/);
-  assert.match(upload, /Document date optional/);
-  assert.match(upload, /Primary type optional/);
+  assert.doesNotMatch(upload, /Document title optional/);
+  assert.doesNotMatch(upload, /Document date optional/);
+  assert.doesNotMatch(upload, /Primary type optional/);
   assert.match(upload, /multiple/);
   assert.match(actions, /parse_document/);
   assert.match(actions, /runOllamaChat/);
@@ -97,7 +99,7 @@ test("upload defaults metadata and supports multiple files in one request", () =
   const actions = read("src/features/documents/actions/document-actions.ts");
   const form = read("src/features/documents/components/upload-document-form.tsx");
 
-  assert.match(form, /Default: Progress Report/);
+  assert.match(form, /AI reads the content/);
   assert.match(uploadRoute, /getAll\("file"\)/);
   assert.match(uploadRoute, /titleFromFileName/);
   assert.match(uploadRoute, /todayIsoDate/);
@@ -114,6 +116,28 @@ test("upload defaults metadata and supports multiple files in one request", () =
   assert.match(actions, /timestampIsoDate\(fileLastModifiedValues\[index\]\)/);
 });
 
+test("automatic evidence organization is auditable and idempotent", () => {
+  const migration = read("supabase/migrations/202607220001_automatic_evidence_organization.sql");
+  const action = read("src/features/assurance/actions/assurance-actions.ts");
+  const automatic = read("src/features/assurance/components/automatic-assessment.tsx");
+
+  for (const column of [
+    "evidence_role",
+    "classification_confidence",
+    "classification_reason",
+    "detected_reporting_period",
+  ]) {
+    assert.match(migration, new RegExp(column));
+  }
+  assert.match(action, /refreshAutomaticAssurance/);
+  assert.match(action, /document_fingerprint/);
+  assert.match(action, /evidence_selection: "automatic"/);
+  assert.match(action, /normalizeAutomaticClassifications/);
+  assert.match(action, /evaluateAssuranceReview/);
+  assert.match(automatic, /processing.*completed/s);
+  assert.match(automatic, /router\.refresh/);
+});
+
 test("document worker parses supported file types and rejects unsupported files", () => {
   const parser = read("worker/src/services/document-parser.ts");
   const workerRoute = read("src/app/api/workers/parse-document/route.ts");
@@ -125,7 +149,10 @@ test("document worker parses supported file types and rejects unsupported files"
   assert.match(parser, /unsupported_file_type/);
   assert.match(parser, /PDF, TXT, CSV, DOCX, and XLSX/);
   assert.match(workerRoute, /next_document_worker/);
-  assert.match(workerRoute, /source text extraction fails/);
+  assert.match(workerRoute, /markJobFailed/);
+  assert.match(workerRoute, /status: "failed"/);
+  assert.match(workerRoute, /errorCode: result\.errorCode/);
+  assert.doesNotMatch(workerRoute, /fallbackText/);
 });
 
 test("worker and n8n boundaries record success and failure contracts", () => {
@@ -138,6 +165,9 @@ test("worker and n8n boundaries record success and failure contracts", () => {
   assert.match(parser, /pdfjs-dist/);
   assert.match(job, /status: "failed"/);
   assert.match(job, /status: "completed"/);
+  assert.match(job, /llm_analysis_failed/);
+  assert.match(job, /invalid_analysis_contract/);
+  assert.match(job, /AbortSignal\.timeout/);
   assert.match(job, /isBenignAssuranceText/);
   assert.match(job, /under budget/);
   assert.match(job, /completed on track/);

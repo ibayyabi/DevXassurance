@@ -1,7 +1,9 @@
 ---
 stepsCompleted: [1, 2, 3, 4]
-status: complete
+status: superseded-for-recovery
 completedAt: 2026-06-08
+updatedAt: 2026-07-21
+supersededBy: planning-artifacts/product-recovery/phase-3-usable-mvp-spec.md
 inputDocuments:
   - planning-artifacts/prds/prd-x-assistance-2026-06-08/prd.md
   - planning-artifacts/prds/prd-x-assistance-2026-06-08/addendum.md
@@ -11,6 +13,8 @@ inputDocuments:
 ---
 
 # X-Assurance / X-Assistance - Epic Breakdown
+
+> **Recovery notice:** These epics describe the original broad module implementation. Do not use them as the recovery backlog without reconciling them against [`phase-3-usable-mvp-spec.md`](product-recovery/phase-3-usable-mvp-spec.md).
 
 ## Overview
 

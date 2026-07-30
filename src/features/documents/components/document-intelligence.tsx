@@ -1,16 +1,20 @@
 "use client";
 
 import {
+  BrainCircuit,
+  FileCheck2,
+  FileClock,
   FileText,
-  ShieldCheck,
-  Sparkles,
-  TriangleAlert,
+  RefreshCw,
   Trash2,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useEffect } from "react";
 
+import { AutomaticAssessment } from "@/features/assurance/components/automatic-assessment";
 import {
   deleteDocument,
-  generateDocumentSummary,
+  retryDocumentProcessing,
   updateDocumentClassification,
   updateExtractedFact,
 } from "@/features/documents/actions/document-actions";
@@ -31,201 +35,325 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
+const roleLabels = {
+  baseline: "Approved plan",
+  current: "Current evidence",
+  supporting: "Supporting evidence",
+} as const;
+
 export function DocumentIntelligence({
   projectId,
   documents,
   facts,
-  summary,
+  summaries,
+  assessedFingerprint,
 }: {
   projectId: string;
   documents: EvidenceDocument[];
   facts: ExtractedFact[];
-  summary: DocumentSummary | null;
+  summaries: DocumentSummary[];
+  assessedFingerprint: string | null;
 }) {
+  const router = useRouter();
+  const hasActiveProcessing = documents.some((document) =>
+    ["uploaded", "queued", "processing"].includes(document.processingStatus),
+  );
+
+  useEffect(() => {
+    if (!hasActiveProcessing) return;
+    const timer = window.setInterval(() => router.refresh(), 4000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveProcessing, router]);
+
   return (
-    <div className="grid gap-5 2xl:grid-cols-[minmax(320px,420px)_minmax(0,1fr)]">
-      <section className="min-w-0 space-y-5">
-        <ProcessingFlow documents={documents} facts={facts} summary={summary} />
-        <UploadDocumentForm projectId={projectId} />
-        <DocumentLibrary projectId={projectId} documents={documents} />
-      </section>
-      <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(300px,0.85fr)_minmax(440px,1.15fr)]">
-        <ExtractedInformationPanel projectId={projectId} facts={facts} />
-        <SummaryPanel
+    <div className="space-y-5">
+      <AutomaticAssessment
+        projectId={projectId}
+        documents={documents}
+        assessedFingerprint={assessedFingerprint}
+      />
+
+      <div className="grid gap-5 xl:grid-cols-[minmax(300px,0.72fr)_minmax(0,1.28fr)]">
+        <div className="space-y-5">
+          <UploadDocumentForm projectId={projectId} />
+          <ProcessingSummary documents={documents} />
+        </div>
+        <DocumentLibrary
           projectId={projectId}
           documents={documents}
-          summary={summary}
+          summaries={summaries}
         />
       </div>
+
+      <details className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
+        <summary className="cursor-pointer font-semibold text-ink">
+          Review extracted details
+        </summary>
+        <p className="mt-2 max-w-3xl text-sm leading-6 text-ink-muted">
+          These source-linked facts are available when a reviewer needs to
+          inspect or correct the extraction. Most users can rely on the Overview.
+        </p>
+        <div className="mt-5">
+          <ExtractedInformationPanel projectId={projectId} facts={facts} />
+        </div>
+      </details>
     </div>
   );
 }
 
-function ProcessingFlow({
-  documents,
-  facts,
-  summary,
-}: {
-  documents: EvidenceDocument[];
-  facts: ExtractedFact[];
-  summary: DocumentSummary | null;
-}) {
-  const completedDocuments = documents.filter(
+function ProcessingSummary({ documents }: { documents: EvidenceDocument[] }) {
+  const ready = documents.filter(
     (document) => document.processingStatus === "completed",
   ).length;
-  const steps = [
-    {
-      label: "Upload",
-      value: documents.length,
-      help: "Evidence sources",
-    },
-    {
-      label: "Process",
-      value: completedDocuments,
-      help: "Completed document jobs",
-    },
-    {
-      label: "Extract",
-      value: facts.length,
-      help: "Evidence-backed facts",
-    },
-    {
-      label: "Summarize",
-      value: summary ? 1 : 0,
-      help: "Grounded summary",
-    },
-  ];
+  const active = documents.filter((document) =>
+    ["uploaded", "queued", "processing"].includes(document.processingStatus),
+  ).length;
+  const failed = documents.filter(
+    (document) => document.processingStatus === "failed",
+  ).length;
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-      <h2 className="font-semibold text-slate-950">Evidence Flow</h2>
-      <p className="mt-1 text-sm leading-6 text-slate-600">
-        Project outputs are only populated after documents move through this
-        chain.
-      </p>
-      <div className="mt-4 grid grid-cols-2 gap-2">
-        {steps.map((step) => (
-          <div key={step.label} className="rounded-md bg-slate-50 px-3 py-2">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-sm font-medium text-slate-600">{step.label}</p>
-              <p className="font-semibold text-slate-950">{step.value}</p>
-            </div>
-            <p className="mt-1 text-xs text-slate-500">{step.help}</p>
-          </div>
-        ))}
+    <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
+      <div className="flex items-center gap-3">
+        <span className="rounded-xl bg-plan-track p-2 text-ink-muted">
+          <BrainCircuit className="h-5 w-5" />
+        </span>
+        <div>
+          <h2 className="font-semibold text-ink">Evidence status</h2>
+          <p className="text-sm text-ink-muted">Updates automatically</p>
+        </div>
       </div>
+      <dl className="mt-5 grid grid-cols-3 gap-3">
+        <StatusCount label="Ready" value={ready} tone="text-status-ok-text" />
+        <StatusCount label="Analyzing" value={active} tone="text-status-warn-text" />
+        <StatusCount label="Failed" value={failed} tone="text-status-critical-text" />
+      </dl>
     </section>
+  );
+}
+
+function StatusCount({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: string;
+}) {
+  return (
+    <div className="rounded-xl bg-base px-3 py-3">
+      <dt className="text-xs font-medium text-ink-muted">{label}</dt>
+      <dd className={`mt-1 text-2xl font-semibold ${tone}`}>{value}</dd>
+    </div>
   );
 }
 
 function DocumentLibrary({
   projectId,
   documents,
+  summaries,
 }: {
   projectId: string;
   documents: EvidenceDocument[];
+  summaries: DocumentSummary[];
 }) {
+  const groups = groupDocuments(documents);
+
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="mb-4 flex items-center justify-between gap-3">
+    <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
+      <div className="flex items-end justify-between gap-3 border-b border-ui-border pb-4">
         <div>
-          <h2 className="font-semibold">Document Library</h2>
-          <p className="text-sm text-slate-500">
-            {documents.length} project evidence source{documents.length === 1 ? "" : "s"}
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-brand">
+            Organized by AI
           </p>
+          <h2 className="mt-1 text-xl font-semibold text-ink">
+            Project documents
+          </h2>
         </div>
+        <p className="text-sm text-ink-muted">
+          {documents.length} file{documents.length === 1 ? "" : "s"}
+        </p>
       </div>
 
-      <div className="grid max-h-[620px] gap-3 overflow-auto pr-1">
+      <div className="mt-4 grid gap-5">
         {documents.length === 0 ? (
-          <div className="rounded-md border border-dashed border-blue-300 bg-blue-50 p-5 text-sm leading-6 text-slate-700">
-            <p className="font-semibold text-slate-950">
-              Start by uploading project evidence.
+          <div className="rounded-xl border border-dashed border-ui-border bg-base p-6">
+            <FileClock className="h-7 w-7 text-ink-muted" />
+            <p className="mt-3 font-semibold text-ink">
+              No project evidence yet
             </p>
-            <p className="mt-1">
-              Use progress reports, risk registers, issue logs, meeting
-              minutes, schedules, cost reports, or approval records. The
-              dashboard, anomalies, assistant, and reports stay empty until
-              evidence is processed.
+            <p className="mt-1 text-sm leading-6 text-ink-muted">
+              Upload plans, progress reports, cost reports, schedules, risk
+              registers, issue logs, and any supporting project records.
             </p>
           </div>
         ) : (
-          documents.map((document) => (
-            <div
-              key={document.id}
-              className="rounded-md border border-slate-200 bg-white p-3"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex min-w-0 gap-3">
-                  <div className="rounded-md bg-red-50 p-2 text-red-600">
-                    <FileText className="h-5 w-5" />
-                  </div>
-                  <div className="min-w-0">
-                    <h3 className="break-words font-semibold text-slate-950">
-                      {document.title}
-                    </h3>
-                    <p className="mt-1 text-xs text-slate-500">
-                      {fileKindLabel(document.mimeType, document.fileName)} •{" "}
-                      {formatBytes(document.fileSize)} •{" "}
-                      {formatDate(document.documentDate ?? document.createdAt)}
-                    </p>
-                  </div>
-                </div>
-                <form
-                  action={deleteDocument}
-                  onSubmit={(event) => {
-                    if (!window.confirm(`Remove "${document.title}" from this project?`)) {
-                      event.preventDefault();
-                    }
-                  }}
-                >
-                  <input type="hidden" name="projectId" value={projectId} />
-                  <input type="hidden" name="documentId" value={document.id} />
-                  <Button
-                    type="submit"
-                    size="sm"
-                    variant="outline"
-                    className="border-red-200 bg-white text-red-700 hover:bg-red-50 hover:text-red-800"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                    Remove
-                  </Button>
-                </form>
+          groups.map((group) => (
+            <section key={group.key}>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold text-ink">
+                  {group.label}
+                </h3>
+                <span className="text-xs text-ink-muted">
+                  {group.documents.length} file{group.documents.length === 1 ? "" : "s"}
+                </span>
               </div>
-
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <StatusBadge status={document.processingStatus} />
-                {document.processingError && (
-                  <span className="max-w-full break-words rounded-md bg-red-50 px-2 py-1 text-xs font-medium text-red-700">
-                    {document.processingError}
-                  </span>
-                )}
+              <div className="grid gap-3">
+                {group.documents.map((document) => (
+                  <DocumentRow
+                    key={document.id}
+                    projectId={projectId}
+                    document={document}
+                    summary={summaries.find((item) =>
+                      item.selectedDocumentIds.includes(document.id),
+                    )}
+                  />
+                ))}
               </div>
-
-              <form action={updateDocumentClassification} className="mt-3">
-                <input type="hidden" name="projectId" value={projectId} />
-                <input type="hidden" name="documentId" value={document.id} />
-                <label className="text-xs font-medium text-slate-500">
-                  Primary type
-                  <select
-                    name="documentType"
-                    defaultValue={document.documentType}
-                    className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm shadow-sm"
-                    onChange={(event) => event.currentTarget.form?.requestSubmit()}
-                  >
-                    {documentTypes.map((type) => (
-                      <option key={type} value={type}>
-                        {documentTypeLabels[type]}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </form>
-            </div>
+            </section>
           ))
         )}
       </div>
     </section>
+  );
+}
+
+function DocumentRow({
+  projectId,
+  document,
+  summary,
+}: {
+  projectId: string;
+  document: EvidenceDocument;
+  summary?: DocumentSummary;
+}) {
+  return (
+    <article className="rounded-xl border border-ui-border bg-surface p-4 transition-colors hover:border-ui-border">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex min-w-0 gap-3">
+          <span className={`rounded-xl p-2.5 ${document.processingStatus === "completed" ? "bg-status-ok-bg text-status-ok-text" : document.processingStatus === "failed" ? "bg-status-critical-bg text-status-critical-text" : "bg-plan-track text-ink-muted"}`}>
+            {document.processingStatus === "completed" ? (
+              <FileCheck2 className="h-5 w-5" />
+            ) : (
+              <FileText className="h-5 w-5" />
+            )}
+          </span>
+          <div className="min-w-0">
+            <h3 className="break-words font-semibold text-ink">
+              {document.title}
+            </h3>
+            <p className="mt-1 text-xs leading-5 text-ink-muted">
+              {fileKindLabel(document.mimeType, document.fileName)} · {formatBytes(document.fileSize)} · {formatDate(document.documentDate ?? document.createdAt)}
+            </p>
+          </div>
+        </div>
+        <form
+          action={deleteDocument}
+          onSubmit={(event) => {
+            if (!window.confirm(`Remove "${document.title}" from this project?`)) {
+              event.preventDefault();
+            }
+          }}
+        >
+          <input type="hidden" name="projectId" value={projectId} />
+          <input type="hidden" name="documentId" value={document.id} />
+          <Button
+            type="submit"
+            size="sm"
+            variant="outline"
+            className="border-status-critical bg-surface text-status-critical-text hover:bg-status-critical-bg hover:text-status-critical-text"
+          >
+            <Trash2 className="h-4 w-4" />
+            Remove
+          </Button>
+        </form>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <StatusBadge status={document.processingStatus} />
+        {document.evidenceRole && (
+          <span className="rounded-full bg-plan-track px-2.5 py-1 text-xs font-semibold text-ink-muted">
+            {roleLabels[document.evidenceRole]}
+          </span>
+        )}
+        {document.evidenceRole && (
+          <span className="rounded-full bg-plan-track px-2.5 py-1 text-xs font-semibold text-ink-muted">
+            {documentTypeLabels[document.documentType]}
+          </span>
+        )}
+        {["uploaded", "queued", "processing"].includes(
+          document.processingStatus,
+        ) && (
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-status-warn-text">
+            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+            Analyzing
+          </span>
+        )}
+      </div>
+
+      {document.processingError && (
+        <p className="mt-3 rounded-lg bg-status-critical-bg px-3 py-2 text-sm text-status-critical-text">
+          {document.processingError}
+        </p>
+      )}
+
+      {document.processingStatus === "failed" && (
+        <form action={retryDocumentProcessing} className="mt-3">
+          <input type="hidden" name="projectId" value={projectId} />
+          <input type="hidden" name="documentId" value={document.id} />
+          <Button type="submit" size="sm" variant="outline" className="border-status-critical bg-surface text-status-critical-text hover:bg-status-critical-bg">
+            <RefreshCw className="h-4 w-4" />
+            Retry analysis
+          </Button>
+        </form>
+      )}
+
+      {document.classificationReason && (
+        <p className="mt-3 text-sm leading-6 text-ink-muted">
+          <span className="font-medium text-ink">Why it was organized here:</span>{" "}
+          {document.classificationReason}
+        </p>
+      )}
+
+      {summary?.summaryText && (
+        <div className="mt-3 rounded-lg bg-base px-3 py-3">
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-ink-muted">
+            Document summary
+          </p>
+          <p className="mt-2 text-sm leading-6 text-ink-muted">
+            {summary.summaryText}
+          </p>
+        </div>
+      )}
+
+      {document.processingStatus === "completed" && (
+        <details className="mt-3 text-sm">
+          <summary className="cursor-pointer font-medium text-ink">
+            Correct AI classification
+          </summary>
+          <form action={updateDocumentClassification} className="mt-3 max-w-sm">
+            <input type="hidden" name="projectId" value={projectId} />
+            <input type="hidden" name="documentId" value={document.id} />
+            <label className="text-xs font-medium text-ink-muted">
+              Document type
+              <select
+                name="documentType"
+                defaultValue={document.documentType}
+                className="mt-1 h-10 w-full rounded-lg border border-ui-border bg-surface px-3 text-sm text-ink shadow-sm"
+                onChange={(event) => event.currentTarget.form?.requestSubmit()}
+              >
+                {documentTypes.map((type) => (
+                  <option key={type} value={type}>
+                    {documentTypeLabels[type]}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </form>
+        </details>
+      )}
+    </article>
   );
 }
 
@@ -237,245 +365,50 @@ function ExtractedInformationPanel({
   facts: ExtractedFact[];
 }) {
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="mb-4 flex items-center justify-between">
-        <div>
-          <h2 className="font-semibold">Extracted Information</h2>
-          <p className="text-sm text-slate-500">AI extracted with evidence links</p>
-        </div>
-        <span className="rounded-md bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700">
-          AI Extracted
-        </span>
-      </div>
-
-      <div className="grid gap-4">
-        {factTypes.map((type) => {
-          const groupedFacts = facts.filter((fact) => fact.factType === type);
-
-          return (
-            <div key={type}>
-              <h3 className="mb-2 text-sm font-semibold text-slate-700">
-                {factTypeLabels[type]}{" "}
-                <span className="text-slate-400">{groupedFacts.length}</span>
-              </h3>
-              <div className="grid gap-2">
-                {groupedFacts.length === 0 ? (
-                  <p className="rounded-md bg-slate-50 p-3 text-sm text-slate-500">
-                    No {factTypeLabels[type].toLowerCase()} extracted yet.
-                  </p>
-                ) : (
-                  groupedFacts.map((fact) => (
-                    <div
-                      key={fact.id}
-                      className="rounded-md border border-slate-200 p-3"
-                    >
-                      <p className="break-words text-sm font-medium text-slate-900">
-                        {fact.editedValue ?? fact.extractedText}
+    <div className="grid gap-5 lg:grid-cols-2">
+      {factTypes.map((type) => {
+        const groupedFacts = facts.filter((fact) => fact.factType === type);
+        return (
+          <section key={type} className="rounded-xl bg-base p-4">
+            <h3 className="text-sm font-semibold text-ink">
+              {factTypeLabels[type]} ({groupedFacts.length})
+            </h3>
+            <div className="mt-3 grid gap-2">
+              {groupedFacts.length === 0 ? (
+                <p className="text-sm text-ink-muted">Nothing extracted.</p>
+              ) : (
+                groupedFacts.map((fact) => (
+                  <div key={fact.id} className="rounded-lg border border-ui-border bg-surface p-3">
+                    <p className="break-words text-sm leading-6 text-ink">
+                      {fact.editedValue ?? fact.extractedText}
+                    </p>
+                    {fact.evidenceLinks[0] && (
+                      <p className="mt-2 text-xs leading-5 text-ink-muted">
+                        Source: {fact.evidenceLinks[0].documentTitle}
                       </p>
-                      <p className="mt-1 text-xs text-slate-500">
-                        Confidence {Math.round(fact.confidence * 100)}% •{" "}
-                        {fact.confirmationState.replace("_", " ")}
-                      </p>
-                      {fact.evidenceLinks[0] && (
-                        <p className="mt-2 break-words rounded-md bg-slate-50 p-2 text-xs leading-5 text-slate-600">
-                          Source: {fact.evidenceLinks[0].documentTitle}
-                          {fact.evidenceLinks[0].excerpt
-                            ? ` — ${fact.evidenceLinks[0].excerpt}`
-                            : ""}
-                        </p>
-                      )}
-                      <form
-                        action={updateExtractedFact}
-                        className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]"
-                      >
-                        <input type="hidden" name="projectId" value={projectId} />
-                        <input type="hidden" name="factId" value={fact.id} />
-                        <Input
-                          name="editedValue"
-                          placeholder="Correct extracted value"
-                          defaultValue={fact.editedValue ?? ""}
-                          className="h-8"
-                        />
-                        <Button
-                          type="submit"
-                          size="sm"
-                          variant="outline"
-                          className="border-blue-200 bg-white text-blue-800 hover:bg-blue-50 hover:text-blue-900"
-                        >
-                          Save
-                        </Button>
-                      </form>
-                    </div>
-                  ))
-                )}
-              </div>
+                    )}
+                    <form action={updateExtractedFact} className="mt-3 flex gap-2">
+                      <input type="hidden" name="projectId" value={projectId} />
+                      <input type="hidden" name="factId" value={fact.id} />
+                      <Input
+                        name="editedValue"
+                        placeholder="Correct extracted value"
+                        defaultValue={fact.editedValue ?? ""}
+                        className="h-9"
+                      />
+                      <Button type="submit" size="sm" variant="outline">
+                        Save
+                      </Button>
+                    </form>
+                  </div>
+                ))
+              )}
             </div>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
-function SummaryPanel({
-  projectId,
-  documents,
-  summary,
-}: {
-  projectId: string;
-  documents: EvidenceDocument[];
-  summary: DocumentSummary | null;
-}) {
-  return (
-    <section className="space-y-4">
-      <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <h2 className="font-semibold">Document Summary</h2>
-            <p className="text-sm text-slate-500">Grounded in selected source evidence</p>
-          </div>
-          <Sparkles className="h-5 w-5 text-blue-700" />
-        </div>
-
-        {summary ? (
-          <div>
-            {summary.qualityWarning ? (
-              <div className="mb-3 flex gap-2 rounded-md bg-amber-50 p-3 text-sm text-amber-800">
-                <TriangleAlert className="h-4 w-4 shrink-0" />
-                <span>{summary.qualityWarning}</span>
-              </div>
-            ) : (
-              <div className="mb-3 flex gap-2 rounded-md bg-emerald-50 p-3 text-sm text-emerald-800">
-                <ShieldCheck className="h-4 w-4 shrink-0" />
-                <span>Grounded in source evidence</span>
-              </div>
-            )}
-            <div className="rounded-md border border-slate-200 bg-slate-50/60 p-4">
-              <SummaryText text={summary.summaryText} />
-            </div>
-            <div className="mt-3 grid gap-2 sm:grid-cols-2">
-              <div className="rounded-md bg-slate-50 px-3 py-2">
-                <p className="text-xs font-medium text-slate-500">Confidence</p>
-                <p className="text-sm font-semibold text-slate-900">
-                  {Math.round(summary.confidence * 100)}%
-                </p>
-              </div>
-              <div className="rounded-md bg-slate-50 px-3 py-2">
-                <p className="text-xs font-medium text-slate-500">Sources</p>
-                <p className="text-sm font-semibold text-slate-900">
-                  {summary.sources.length} linked source
-                  {summary.sources.length === 1 ? "" : "s"}
-                </p>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <p className="rounded-md bg-slate-50 p-3 text-sm text-slate-600">
-            No summary generated yet. Select processed documents to create a grounded summary.
-          </p>
-        )}
-
-        <form action={generateDocumentSummary} className="mt-4 grid gap-2">
-          <input type="hidden" name="projectId" value={projectId} />
-          <div className="max-h-36 overflow-auto rounded-md border border-slate-200 p-2">
-            {documents.length === 0 ? (
-              <p className="p-2 text-sm text-slate-500">Upload documents first.</p>
-            ) : (
-              documents.map((document) => (
-                <label
-                  key={document.id}
-                  className="flex items-center gap-2 rounded-md px-2 py-1 text-sm hover:bg-slate-50"
-                >
-                  <input
-                    type="checkbox"
-                    name="documentIds"
-                    value={document.id}
-                    disabled={document.processingStatus !== "completed"}
-                  />
-                  <span className="min-w-0 truncate">{document.title}</span>
-                  <span className="ml-auto shrink-0 text-xs text-slate-500">
-                    {statusLabels[document.processingStatus]}
-                  </span>
-                </label>
-              ))
-            )}
-          </div>
-          <Button type="submit" className="bg-blue-700 text-white hover:bg-blue-800">
-            Generate Summary
-          </Button>
-        </form>
-      </div>
-
-      <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-        <h2 className="font-semibold">Source & Evidence</h2>
-        <div className="mt-3 grid gap-2">
-          {summary?.sources.length ? (
-            summary.sources.map((source) => (
-              <div
-                key={source.id}
-                className="rounded-md border border-slate-200 p-3"
-              >
-                <p className="text-sm font-medium">{source.documentTitle}</p>
-                <p className="mt-1 break-words text-xs leading-5 text-slate-600">
-                  {source.excerpt ?? "Source chunk linked"}
-                </p>
-                {source.confidence !== null && (
-                  <p className="mt-1 text-xs text-slate-500">
-                    {Math.round(source.confidence * 100)}% confidence
-                  </p>
-                )}
-              </div>
-            ))
-          ) : (
-            <p className="rounded-md bg-slate-50 p-3 text-sm text-slate-500">
-              Sources will appear after a grounded summary is generated.
-            </p>
-          )}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function SummaryText({ text }: { text: string }) {
-  const lines = text
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const content = lines.length > 1 ? lines : splitSummarySentences(text);
-
-  return (
-    <div className="space-y-2 text-sm leading-6 text-slate-700">
-      {content.map((line, index) => {
-        const cleanLine = line.replace(/^[-*]\s*/, "").replace(/^\d+[.)]\s*/, "");
-        const isBullet =
-          /^[-*]\s+/.test(line) ||
-          /^\d+[.)]\s+/.test(line) ||
-          content.length > 1;
-
-        return isBullet ? (
-          <div key={`${cleanLine}-${index}`} className="flex gap-2">
-            <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-600" />
-            <p className="min-w-0 break-words">{cleanLine}</p>
-          </div>
-        ) : (
-          <p key={`${cleanLine}-${index}`} className="break-words">
-            {cleanLine}
-          </p>
+          </section>
         );
       })}
     </div>
   );
-}
-
-function splitSummarySentences(text: string) {
-  const sentences = text
-    .replace(/\s+/g, " ")
-    .split(/(?<=[.!?])\s+/)
-    .map((sentence) => sentence.trim())
-    .filter(Boolean);
-
-  return sentences.length > 1 ? sentences : [text];
 }
 
 function StatusBadge({
@@ -485,15 +418,15 @@ function StatusBadge({
 }) {
   const tone =
     status === "failed"
-      ? "bg-red-50 text-red-700"
+      ? "bg-status-critical-bg text-status-critical-text"
       : status === "completed"
-        ? "bg-emerald-50 text-emerald-700"
+        ? "bg-status-ok-bg text-status-ok-text"
         : status === "needs_review"
-          ? "bg-amber-50 text-amber-700"
-          : "bg-blue-50 text-blue-700";
+          ? "bg-status-warn-bg text-status-warn-text"
+          : "bg-status-warn-bg text-status-warn-text";
 
   return (
-    <span className={`rounded-md px-2 py-1 text-xs font-medium ${tone}`}>
+    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${tone}`}>
       {statusLabels[status]}
     </span>
   );
@@ -511,4 +444,42 @@ function formatDate(value: string) {
     day: "numeric",
     year: "numeric",
   }).format(new Date(value));
+}
+
+function groupDocuments(documents: EvidenceDocument[]) {
+  const groups = new Map<string, EvidenceDocument[]>();
+  for (const document of documents) {
+    const key =
+      document.evidenceRole === "baseline"
+        ? "baseline"
+        : document.detectedReportingPeriod ?? "organizing";
+    groups.set(key, [...(groups.get(key) ?? []), document]);
+  }
+
+  return [...groups.entries()]
+    .sort(([left], [right]) => {
+      if (left === "baseline") return -1;
+      if (right === "baseline") return 1;
+      if (left === "organizing") return 1;
+      if (right === "organizing") return -1;
+      return right.localeCompare(left);
+    })
+    .map(([key, groupedDocuments]) => ({
+      key,
+      label:
+        key === "baseline"
+          ? "Approved baseline"
+          : key === "organizing"
+            ? "Awaiting organization"
+            : formatPeriod(key),
+      documents: groupedDocuments,
+    }));
+}
+
+function formatPeriod(value: string) {
+  return new Intl.DateTimeFormat("en", {
+    month: "long",
+    timeZone: "UTC",
+    year: "numeric",
+  }).format(new Date(`${value}T00:00:00Z`));
 }

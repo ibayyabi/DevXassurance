@@ -18,15 +18,20 @@ type WorkerRequest = {
 export async function POST(request: NextRequest) {
   const expectedSecret = process.env.XASS_WORKER_SECRET;
 
-  if (expectedSecret) {
-    const providedSecret = request.headers.get("x-xass-worker-secret");
+  if (!expectedSecret) {
+    return NextResponse.json(
+      { ok: false, error: "Document worker authentication is not configured." },
+      { status: 503 },
+    );
+  }
 
-    if (providedSecret !== expectedSecret) {
-      return NextResponse.json(
-        { ok: false, error: "Invalid worker secret." },
-        { status: 401 },
-      );
-    }
+  const providedSecret = request.headers.get("x-xass-worker-secret");
+
+  if (providedSecret !== expectedSecret) {
+    return NextResponse.json(
+      { ok: false, error: "Invalid worker secret." },
+      { status: 401 },
+    );
   }
 
   const payload = (await request.json()) as WorkerRequest;
@@ -49,149 +54,141 @@ export async function POST(request: NextRequest) {
   }
 
   const supabase = createServiceRoleClient();
-  const { data, error } = await supabase.storage
-    .from(storageBucket)
-    .download(storagePath);
 
-  if (error || !data) {
-    return NextResponse.json(
-      {
-        ok: false,
-        status: "failed",
+  try {
+    const { data, error } = await supabase.storage
+      .from(storageBucket)
+      .download(storagePath);
+
+    if (error || !data) {
+      const message = error?.message ?? "Document could not be downloaded.";
+      await markJobFailed({
+        jobId,
+        documentId,
         errorCode: "storage_download_failed",
-        errorMessage: error?.message ?? "Document could not be downloaded.",
-      },
-      { status: 500 },
-    );
-  }
+        errorMessage: message,
+      });
 
-  const result = await processDocumentJob({
-    jobId,
-    projectId,
-    documentId,
-    title: payload.title,
-    documentType: payload.document_type,
-    documentDate: payload.document_date,
-    fileName,
-    fileBuffer: await data.arrayBuffer(),
-  });
+      return NextResponse.json(
+        {
+          ok: false,
+          status: "failed",
+          errorCode: "storage_download_failed",
+          errorMessage: message,
+        },
+        { status: 502 },
+      );
+    }
 
-  if (result.status === "failed") {
-    const fallbackText = `${payload.title ?? fileName}: ${result.errorMessage}`;
+    const result = await processDocumentJob({
+      jobId,
+      projectId,
+      documentId,
+      title: payload.title,
+      documentType: payload.document_type,
+      documentDate: payload.document_date,
+      fileName,
+      fileBuffer: await data.arrayBuffer(),
+    });
+
+    if (result.status === "failed") {
+      await markJobFailed({
+        jobId,
+        documentId,
+        errorCode: result.errorCode,
+        errorMessage: result.errorMessage,
+      });
+
+      return NextResponse.json(
+        {
+          ok: false,
+          status: "failed",
+          errorCode: result.errorCode,
+          errorMessage: result.errorMessage,
+        },
+        { status: 422 },
+      );
+    }
 
     return NextResponse.json({
       ok: true,
       worker: "next_document_worker",
-      chunks: [
-        {
-          chunk_index: 0,
-          chunk_text: fallbackText,
-          page_number: null,
-          section_label: "Processing warning",
-          parser_metadata: {
-            errorCode: result.errorCode,
-            errorMessage: result.errorMessage,
-          },
-        },
-      ],
-      facts: [
-        {
-          fact_type: "owner_action",
-          extracted_text:
-            "Document needs manual review because text extraction did not complete.",
-          original_value:
-            "Document needs manual review because text extraction did not complete.",
-          confidence: 0.2,
-          evidence_chunk_index: 0,
-          excerpt: fallbackText,
-        },
-      ],
-      summary: {
-        summary_text: fallbackText,
-        confidence: 0.2,
-        quality_warning:
-          "The worker could not extract reliable source text. OCR, conversion, or manual review is required.",
-      },
-      health_snapshots: [
-        {
-          dimension: "overall",
-          score: null,
-          status: "insufficient_evidence",
-          evidence_coverage: 0.1,
-          status_text: "Insufficient extractable evidence.",
-          snapshot_date: payload.document_date ?? todayIsoDate(),
-          source_summary: result.errorMessage,
-        },
-      ],
-      alerts: [
-        {
-          severity: "medium",
-          impacted_area: "Audit readiness",
-          explanation: result.errorMessage,
-          evidence_count: 0,
-          recommended_action:
-            "Upload a supported extractable file or run OCR before relying on AI extraction.",
-        },
-      ],
-      actions: [
-        {
-          title: "Review document extraction quality and provide OCR if needed.",
-          owner_name: null,
-          priority: "medium",
-          status: "open",
-        },
-      ],
-      anomalies: [
-        {
-          category: "governance",
-          missing_field: "evidence_quality",
-          severity: "medium",
-          title: "Document extraction quality requires review",
-          affected_item: payload.title ?? fileName,
-          explanation: result.errorMessage,
-          impact:
-            "Project assurance evidence cannot be trusted until readable source text is available.",
-          impact_rating: "Medium",
-          recommended_action:
-            "Upload a text-based PDF or run OCR before relying on AI extraction.",
-          suggested_owners: [],
-          evidence_count: 0,
-          absence_type: "confirmed_missing",
-          rationale:
-            "Generated by the document worker when source text extraction fails.",
-        },
-      ],
-      parser_metadata: {
-        errorCode: result.errorCode,
-        errorMessage: result.errorMessage,
-      },
+      chunks: result.chunks,
+      facts: result.facts,
+      summary: result.summary,
+      health_snapshots: result.health_snapshots,
+      alerts: result.alerts,
+      actions: result.actions,
+      anomalies: result.anomalies,
+      parser_metadata: result.parserMetadata,
     });
-  }
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unexpected worker failure.";
+    await markJobFailed({
+      jobId,
+      documentId,
+      errorCode: "worker_unhandled_error",
+      errorMessage: message,
+    });
 
-  return NextResponse.json({
-    ok: true,
-    worker: "next_document_worker",
-    chunks: result.chunks,
-    facts: result.facts,
-    summary: result.summary,
-    health_snapshots: result.health_snapshots,
-    alerts: result.alerts,
-    actions: result.actions,
-    anomalies: result.anomalies,
-    parser_metadata: result.parserMetadata,
-  });
+    return NextResponse.json(
+      {
+        ok: false,
+        status: "failed",
+        errorCode: "worker_unhandled_error",
+        errorMessage: message,
+      },
+      { status: 500 },
+    );
+  }
 }
 
-function todayIsoDate() {
-  const parts = new Intl.DateTimeFormat("en", {
-    day: "2-digit",
-    month: "2-digit",
-    timeZone: process.env.TZ ?? "Asia/Jakarta",
-    year: "numeric",
-  }).formatToParts(new Date());
-  const valueByType = Object.fromEntries(
-    parts.map((part) => [part.type, part.value]),
-  );
+async function markJobFailed({
+  jobId,
+  documentId,
+  errorCode,
+  errorMessage,
+}: {
+  jobId: string;
+  documentId: string;
+  errorCode: string;
+  errorMessage: string;
+}) {
+  const supabase = createServiceRoleClient();
+  const safeMessage = errorMessage.slice(0, 1000);
 
-  return `${valueByType.year}-${valueByType.month}-${valueByType.day}`;
+  await Promise.all([
+    supabase
+      .from("ai_jobs")
+      .update({
+        status: "failed",
+        error_code: errorCode,
+        error_message: safeMessage,
+        lease_expires_at: null,
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", jobId),
+    supabase
+      .from("documents")
+      .update({
+        processing_status: "failed",
+        processing_error: safeMessage,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", documentId),
+    supabase
+      .from("extraction_runs")
+      .update({
+        status: "failed",
+        metadata: {
+          error_code: errorCode,
+          error_message: safeMessage,
+          failed_at: new Date().toISOString(),
+        },
+        updated_at: new Date().toISOString(),
+      })
+      .eq("ai_job_id", jobId),
+  ]);
 }

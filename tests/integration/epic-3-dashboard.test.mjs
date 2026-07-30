@@ -4,80 +4,87 @@ import { test } from "node:test";
 
 const read = (path) => readFileSync(path, "utf8");
 
-test("dashboard migration defines health, alert, and recommended action read models with RLS", () => {
-  const migration = read("supabase/migrations/202606080004_dashboard_read_model.sql");
+test("Assurance Review migration defines period-scoped findings and actions with RLS", () => {
+  const migration = read("supabase/migrations/202607210002_assurance_reviews.sql");
 
   for (const table of [
-    "dashboard_health_snapshots",
-    "dashboard_critical_alerts",
-    "recommended_actions",
+    "assurance_reviews",
+    "assurance_review_documents",
+    "assurance_findings",
+    "assurance_actions",
   ]) {
     assert.match(migration, new RegExp(`create table public\\.${table}`));
     assert.match(migration, new RegExp(`alter table public\\.${table} enable row level security`));
-    assert.match(migration, /is_project_member\(project_id\)/);
   }
 
-  for (const dimension of [
-    "overall",
-    "schedule",
-    "cost",
-    "risk",
-    "governance",
-    "audit_readiness",
-  ]) {
-    assert.match(migration, new RegExp(`'${dimension}'`));
+  for (const domain of ["budget", "schedule", "risk"]) {
+    assert.match(migration, new RegExp(`'${domain}'`));
   }
 });
 
-test("dashboard query returns insufficient evidence defaults and project-scoped panels", () => {
-  const query = read("src/features/dashboard/lib/queries.ts");
+test("overview uses the latest automatic project assessment", () => {
+  const query = read("src/features/assurance/lib/queries.ts");
   const page = read("src/app/app/projects/[projectId]/dashboard/page.tsx");
+  const component = read("src/features/dashboard/components/usable-overview.tsx");
 
   assert.match(query, /requireProjectMembership/);
-  assert.match(query, /insufficient_evidence/);
-  assert.match(query, /dashboard_health_snapshots/);
-  assert.match(query, /dashboard_critical_alerts/);
-  assert.match(query, /recommended_actions/);
-  assert.match(page, /DashboardOverview/);
+  assert.match(query, /assurance_reviews/);
+  assert.match(query, /assurance_findings/);
+  assert.match(query, /assurance_actions/);
+  assert.match(page, /UsableOverview/);
+  assert.match(component, /Latest automatic assessment/);
+  assert.match(component, /Evidence incomplete/);
+  assert.match(component, /document_fingerprint|analysisMetadata/);
+  assert.doesNotMatch(component, /Math\.round.*%/);
 });
 
-test("dashboard UI includes cards, threshold trend bands, alerts, and incomplete action flags", () => {
-  const component = read("src/features/dashboard/components/dashboard-overview.tsx");
-  const constants = read("src/features/dashboard/lib/constants.ts");
+test("overview presents only understandable conditions and next actions", () => {
+  const component = read("src/features/dashboard/components/usable-overview.tsx");
 
   for (const label of [
-    "Overall Health",
+    "Budget",
     "Schedule",
-    "Cost",
     "Risk",
-    "Governance",
-    "Audit Readiness",
+    "Management focus",
+    "On track",
+    "Needs attention",
+    "Critical",
+    "More evidence needed",
   ]) {
-    assert.match(constants, new RegExp(label));
+    assert.match(component, new RegExp(label));
   }
-
-  assert.match(component, /Green ≥ 80/);
-  assert.match(component, /Amber 50-79/);
-  assert.match(component, /Monthly health history from document dates/);
-  assert.match(component, /statusColor/);
-  assert.match(component, /Critical Alerts/);
-  assert.match(component, /Top Recommended Actions/);
-  assert.match(component, /Incomplete: owner or due date missing/);
-  assert.match(component, /<title>/);
 });
 
-test("dashboard refresh uses document dates and explicit health signals", () => {
-  const actions = read("src/features/dashboard/actions/dashboard-actions.ts");
-  const query = read("src/features/dashboard/lib/queries.ts");
-  const worker = read("worker/src/jobs/process-document.ts");
-  const workflow = read("workflows/n8n/x-assurance-supabase-document-processing.json");
+test("overview uses real finding values for budget, schedule, and risk visuals", () => {
+  const component = read("src/features/dashboard/components/usable-overview.tsx");
+  const charts = read("src/features/dashboard/components/overview-charts.tsx");
+  assert.match(component, /BudgetComparison/);
+  assert.match(component, /ScheduleComparison/);
+  assert.match(component, /RiskSummary/);
+  assert.match(component, /baselineValue/);
+  assert.match(component, /currentValue/);
+  assert.match(component, /variance/);
+  assert.doesNotMatch(component, /Math\.random/);
+  assert.equal(charts.match(/initialDimension=\{\{/g)?.length, 5);
+  assert.equal(charts.match(/minWidth=\{0\}/g)?.length, 5);
+});
 
-  assert.match(actions, /latestDocumentDate/);
-  assert.match(actions, /inferEvidenceStatus/);
-  assert.match(actions, /Evidence includes red or high severity assurance signals/);
-  assert.match(query, /buildTrendPoints/);
-  assert.match(query, /formatMonthLabel/);
-  assert.match(worker, /documentDate/);
-  assert.match(worker, /snapshot_date: snapshotDate/);
-  assert.match(workflow, /document\.document_date/);
+test("schedule chart always compares forecast against the approved zero-day baseline", () => {
+  const charts = read("src/features/dashboard/components/overview-charts.tsx");
+  assert.match(charts, /scheduleBaseline: 0/);
+  assert.match(charts, /dataKey="scheduleBaseline"/);
+  assert.match(charts, /name="Approved baseline"/);
+  assert.match(charts, /name="Current forecast"/);
+});
+
+test("condition snapshot keeps long overall labels inside the donut", () => {
+  const charts = read("src/features/dashboard/components/overview-charts.tsx");
+  assert.match(charts, /max-w-24 text-balance text-lg/);
+});
+
+test("trends is an honest placeholder and does not fabricate history", () => {
+  const trends = read("src/app/app/projects/[projectId]/trends/page.tsx");
+  assert.match(trends, /Under Development/);
+  assert.match(trends, /does not affect the current Assurance/);
+  assert.doesNotMatch(trends, /Math\.round|score|%/i);
 });

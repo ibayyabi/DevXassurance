@@ -1,13 +1,16 @@
 ---
 title: X-Assurance / X-Assistance
-status: draft
+status: superseded-for-recovery
 created: 2026-06-08
-updated: 2026-06-08
+updated: 2026-07-21
+superseded_by: ../../product-recovery/phase-3-usable-mvp-spec.md
 source:
   - "C:/Users/kasyf/Downloads/[26-04] X-Assistance (Project_Assurance)-1.pdf"
 ---
 
 # PRD: X-Assurance / X-Assistance
+
+> **Recovery notice:** Product scope, terminology, workflow, health behavior, and UX decisions in this draft are superseded by [`phase-3-usable-mvp-spec.md`](../../product-recovery/phase-3-usable-mvp-spec.md). Retain this file as concept and planning history.
 
 *Working title: X-Assurance. The user request and source filename use X-Assistance; product naming should be confirmed.*
 

@@ -1,32 +1,28 @@
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import Link from "next/link";
+import { MailCheck } from "lucide-react";
+
+import { AuthShell } from "@/components/auth-shell";
+import { Button } from "@/components/ui/button";
 
 export default function Page() {
   return (
-    <div className="flex min-h-svh w-full items-center justify-center p-6 md:p-10">
-      <div className="w-full max-w-sm">
-        <div className="flex flex-col gap-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-2xl">
-                Thank you for signing up!
-              </CardTitle>
-              <CardDescription>Check your email to confirm</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-muted-foreground">
-                You&apos;ve successfully signed up. Please check your email to
-                confirm your account before signing in.
-              </p>
-            </CardContent>
-          </Card>
-        </div>
+    <AuthShell
+      title="Check your inbox"
+      description="Your account is almost ready. Confirm your email address to continue."
+    >
+      <div className="rounded-2xl border border-status-ok bg-status-ok-bg p-6">
+        <MailCheck className="h-7 w-7 text-status-ok-text" />
+        <p className="mt-5 text-sm leading-6 text-ink-muted">
+          Open the confirmation email from Supabase, then return to X-Assurance
+          and sign in with your new account.
+        </p>
       </div>
-    </div>
+      <Button
+        asChild
+        className="mt-5 h-12 w-full rounded-lg bg-brand text-brand-foreground shadow-none hover:bg-brand/90"
+      >
+        <Link href="/login">Return to sign in</Link>
+      </Button>
+    </AuthShell>
   );
 }

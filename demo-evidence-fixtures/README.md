@@ -1,25 +1,20 @@
 # Demo Evidence Fixtures
 
-Use these files to create three separate demo projects and verify dashboard status, trend, document intelligence, anomaly, assistant, and report flows.
+Use the `realistic-pmo-cases` packs for product demonstrations and acceptance testing. Each pack contains real uploadable DOCX, PDF, and XLSX evidence covering three reporting periods.
 
-## Suggested Projects
+## Verified cases
 
-1. `Green Demo - Riverside Data Hub`
-   - Upload all files in `green-riverside-data-hub`
-   - Expected dashboard: mostly green, high scores, few or no critical alerts.
+1. `case_01_green_riverside_data_hub`: final condition `on_track`.
+2. `case_02_amber_alpha_infrastructure`: final condition `needs_attention`.
+3. `case_03_red_orion_erp_recovery`: final condition `critical`.
 
-2. `Amber Demo - Alpha Infrastructure Program`
-   - Upload all files in `amber-alpha-infrastructure`
-   - Expected dashboard: amber overall, schedule/cost attention, medium-to-high alerts.
+## Test procedure
 
-3. `Red Demo - Orion ERP Recovery`
-   - Upload all files in `red-orion-erp-recovery`
-   - Expected dashboard: red overall, high/critical alerts, urgent recommended actions.
+1. Create one fresh project per case.
+2. Upload every DOCX, PDF, and XLSX file in that case together.
+3. Do not upload `expected-results.json`.
+4. Wait for document processing and automatic assessment.
+5. Confirm that three reporting periods appear and the final condition matches `expected-results.json`.
+6. Verify the Overview trends, evidence sources, AI Advisor answer, report preview, PDF, and DOCX export.
 
-## Upload Notes
-
-- Leave title, document date, and type empty when uploading. The app should use the filename, file modified date, and default type.
-- Upload multiple files at once per project.
-- After upload, confirm n8n processes the queued jobs.
-- Use Dashboard after processing to check the percentage/status cards and monthly trend.
-
+Do not manually select a baseline or reporting period. Automatic organization is part of the acceptance test.

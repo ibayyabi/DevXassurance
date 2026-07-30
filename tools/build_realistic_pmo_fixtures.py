@@ -1,446 +1,544 @@
 from __future__ import annotations
 
+import json
+import os
 from datetime import datetime
 from pathlib import Path
 
 from docx import Document
+from docx.enum.section import WD_SECTION
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Inches, Pt
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill, Side, Border
-from openpyxl.utils import get_column_letter
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt, RGBColor
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    KeepTogether,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "demo-evidence-fixtures" / "realistic-pmo-cases"
+SCENARIOS_PATH = OUT / "scenarios.json"
+INK = "0F172A"
+BLUE = "1D4ED8"
+MUTED = "475569"
+LIGHT = "F1F5F9"
+BORDER = "CBD5E1"
 
 
-CASES = [
-    {
-        "folder": "case_01_green_riverside_data_hub",
-        "project": "Riverside Data Hub",
-        "sector": "Digital services and data platform",
-        "sponsor": "Customer Operations Directorate",
-        "manager": "Maya Prasetyo",
-        "period": "March 2026",
-        "baseline_budget": 500000,
-        "forecast_budget": 487000,
-        "planned_progress": 60,
-        "actual_progress": 62,
-        "narrative": (
-            "Delivery remains controlled. The team completed the API integration milestone "
-            "ahead of the March checkpoint, expenditure remains below the approved baseline, "
-            "and the evidence pack is current for requirements, design review, and test planning."
-        ),
-        "baseline_milestones": [
-            ("Requirements baseline approved", "2026-01-20", "Baseline", "Scope signed off by product and operations"),
-            ("Data ingestion foundation complete", "2026-02-28", "Baseline", "Core ingestion service and schema controls"),
-            ("API integration checkpoint", "2026-03-15", "Baseline", "External service integration and load test"),
-            ("Operational readiness review", "2026-04-18", "Baseline", "Runbook and support readiness approval"),
-        ],
-        "progress_milestones": [
-            ("Requirements baseline approved", "2026-01-20", "Completed", "Approved on 2026-01-18 with no open scope caveats"),
-            ("Data ingestion foundation complete", "2026-02-28", "Completed", "Completed on 2026-02-27"),
-            ("API integration checkpoint", "2026-03-15", "Completed", "Completed on 2026-03-13 after successful load test"),
-            ("Operational readiness review", "2026-04-18", "On Track", "Draft runbook accepted by service owner"),
-        ],
-        "attention_points": [
-            "Maintain weekly evidence updates through the readiness review.",
-            "Keep contingency usage under review as the team enters operational testing.",
-            "Confirm support handover attendance before the April readiness meeting.",
-        ],
-        "cost_rows": [
-            ("Requirements and design", 90000, 85000, 88000, "Normal", "Design effort closed below estimate"),
-            ("Data ingestion build", 145000, 136000, 141000, "Normal", "No material variance"),
-            ("API integration", 120000, 105000, 118000, "Normal", "Vendor API testing completed"),
-            ("Operational readiness", 95000, 42000, 91000, "Monitor", "Training sessions remain scheduled"),
-            ("Contingency", 50000, 0, 49000, "Normal", "Contingency largely preserved"),
-        ],
-        "risk_rows": [
-            ("R-101", "Operational support attendance slips", "Low", "Medium", "Low", "Confirm named attendees two weeks before readiness review", "Service Owner", "Open"),
-            ("R-102", "Minor data mapping clarification remains", "Low", "Low", "Low", "Resolve in weekly data working group", "Data Lead", "Open"),
-            ("R-103", "Vendor API availability risk retired", "Low", "Low", "Low", "Load test passed and risk can be closed after March report", "Integration Lead", "Closed"),
-        ],
-        "issue_rows": [
-            ("I-101", "Support rota confirmation pending", "Service Owner", "2026-04-02", "Open", "Low", "No delivery impact expected"),
-            ("I-102", "One optional report field requires wording decision", "Product Owner", "2026-03-28", "Open", "Low", "Decision can be made in working session"),
-        ],
-    },
-    {
-        "folder": "case_02_amber_alpha_infrastructure",
-        "project": "Alpha Infrastructure Program",
-        "sector": "Infrastructure modernization",
-        "sponsor": "Capital Delivery Board",
-        "manager": "Sarah Khan",
-        "period": "May 2026",
-        "baseline_budget": 4300000,
-        "forecast_budget": 4550000,
-        "planned_progress": 54,
-        "actual_progress": 43,
-        "narrative": (
-            "The program needs management attention. Installation progress is below the baseline, "
-            "the forecast is above the approved budget, and metering approval evidence is incomplete. "
-            "The delivery team has a recovery proposal, but the plan has not yet been fully evidenced."
-        ),
-        "baseline_milestones": [
-            ("Energy audit baseline approved", "2026-02-20", "Baseline", "Baseline reference for plan-vs-actual comparison"),
-            ("Smart meter procurement award", "2026-04-30", "Baseline", "Procurement award required before installation mobilization"),
-            ("Building A installation complete", "2026-05-25", "Baseline", "Controls pilot depends on this milestone"),
-            ("Campus dashboard pilot", "2026-07-10", "Baseline", "Pilot needs clean metering data and approval evidence"),
-        ],
-        "progress_milestones": [
-            ("Energy audit baseline approved", "2026-02-20", "Completed", "Completed on 2026-02-18"),
-            ("Smart meter procurement award", "2026-04-30", "Completed Late", "Award completed on 2026-05-03"),
-            ("Building A installation complete", "2026-05-25", "At Risk", "Forecast completion on 2026-06-08"),
-            ("Campus dashboard pilot", "2026-07-10", "At Risk", "Dependent on metering data and Building A recovery"),
-        ],
-        "attention_points": [
-            "Validate whether the revised installation sequence protects the July dashboard pilot.",
-            "Review forecast cost variance against the approved baseline and agree mitigation.",
-            "Close the missing metering approval evidence before the next assurance checkpoint.",
-        ],
-        "cost_rows": [
-            ("Energy audit and design", 520000, 510000, 540000, "Monitor", "Minor consulting extension"),
-            ("Smart meter procurement", 1850000, 1320000, 1910000, "At Risk", "Supplier price adjustment"),
-            ("Installation works", 1400000, 610000, 1540000, "At Risk", "Night shift work may increase labor cost"),
-            ("Dashboard integration", 380000, 90000, 390000, "Normal", "No major variance"),
-            ("Contingency", 150000, 0, 170000, "At Risk", "Contingency may be exceeded"),
-        ],
-        "risk_rows": [
-            ("R-201", "Building A installation delay affects dashboard pilot", "High", "Medium", "High", "Add weekend installation shift and daily constraint review", "Installation Lead", "Open"),
-            ("R-202", "Metering approval evidence incomplete", "Medium", "High", "High", "Collect approval records and update evidence register", "Document Control", "Open"),
-            ("R-203", "Supplier price adjustment increases forecast cost", "Medium", "Medium", "Medium", "Validate quotation and negotiate fixed price addendum", "Procurement Lead", "Open"),
-        ],
-        "issue_rows": [
-            ("I-201", "Building A installation behind plan", "Installation Lead", "2026-05-25", "Open", "High", "Forecast completion shifted into June"),
-            ("I-202", "Metering approval record missing from evidence register", "Document Control", "2026-05-14", "Overdue", "High", "Approval email not attached"),
-            ("I-203", "Supplier revised quotation not validated", "Procurement Lead", "2026-05-18", "Overdue", "Medium", "Commercial review pending"),
-        ],
-    },
-    {
-        "folder": "case_03_red_orion_erp_recovery",
-        "project": "Orion ERP Recovery",
-        "sector": "Enterprise systems transformation",
-        "sponsor": "Finance Transformation Steering Committee",
-        "manager": "Leon Hartono",
-        "period": "June 2026",
-        "baseline_budget": 900000,
-        "forecast_budget": 1062000,
-        "planned_progress": 59,
-        "actual_progress": 31,
-        "narrative": (
-            "The recovery workstream is no longer tracking to the approved baseline. The cutover path "
-            "is blocked by unresolved customer master reconciliation failures, the cost forecast has "
-            "moved materially above the approved budget, and key governance evidence is missing."
-        ),
-        "baseline_milestones": [
-            ("Recovery baseline approved", "2026-03-15", "Baseline", "Steering committee checkpoint"),
-            ("Customer master migration verified", "2026-05-20", "Baseline", "Required before cutover rehearsal"),
-            ("Cutover rehearsal complete", "2026-06-10", "Baseline", "Required evidence for go/no-go"),
-            ("Release 2 go-live", "2026-07-01", "Baseline", "Depends on clean migration and sign-off"),
-        ],
-        "progress_milestones": [
-            ("Recovery baseline approved", "2026-03-15", "Partially Approved", "Decision record lacks signed recovery owner"),
-            ("Customer master migration verified", "2026-05-20", "Blocked", "Reconciliation failure remains unresolved"),
-            ("Cutover rehearsal complete", "2026-06-10", "Missed", "Rehearsal could not proceed without migration evidence"),
-            ("Release 2 go-live", "2026-07-01", "Not Credible", "Current path requires re-baseline"),
-        ],
-        "attention_points": [
-            "Appoint a single accountable recovery owner and publish an approved recovery baseline.",
-            "Escalate the migration defect to the steering committee with decision options.",
-            "Freeze non-critical scope until reconciliation evidence and cutover readiness are restored.",
-        ],
-        "cost_rows": [
-            ("Recovery PMO and controls", 130000, 112000, 156000, "Over Baseline", "Extended governance cycle"),
-            ("Data migration remediation", 280000, 265000, 378000, "Over Baseline", "Repeated reconciliation failures"),
-            ("Vendor defect triage", 210000, 196000, 278000, "Over Baseline", "Additional vendor sprint requested"),
-            ("Cutover rehearsal", 180000, 68000, 205000, "At Risk", "Rehearsal delayed and may need repeat cycle"),
-            ("Contingency", 100000, 96000, 45000, "Depleted", "Contingency mostly consumed"),
-        ],
-        "risk_rows": [
-            ("R-301", "Customer master migration reconciliation failure blocks cutover", "High", "High", "Critical", "Dedicated recovery squad and executive decision on data tolerance", "", "Open"),
-            ("R-302", "No approved recovery baseline after missed rehearsal", "High", "High", "Critical", "Steering committee to approve re-baseline and owner", "Program Director", "Open"),
-            ("R-303", "Cost forecast exceeds approved funding envelope", "Medium", "High", "High", "Finance to approve or reject revised forecast", "Finance Controller", "Open"),
-        ],
-        "issue_rows": [
-            ("I-301", "Customer master reconciliation fails tolerance threshold", "", "2026-06-05", "Overdue", "Critical", "No accepted workaround"),
-            ("I-302", "Cutover readiness evidence unavailable", "PMO Controls", "2026-06-10", "Overdue", "High", "Go/no-go pack incomplete"),
-            ("I-303", "Recovery owner not confirmed in decision record", "", "2026-06-12", "Open", "High", "Accountability gap remains"),
-        ],
-    },
-]
+def load_scenarios() -> list[dict]:
+    payload = json.loads(SCENARIOS_PATH.read_text(encoding="utf-8"))
+    return payload["scenarios"]
 
 
-def apply_doc_styles(doc: Document) -> None:
-    styles = doc.styles
-    normal = styles["Normal"]
-    normal.font.name = "Arial"
-    normal.font.size = Pt(10)
-    for name, size, color in [
-        ("Heading 1", 16, "1F4E79"),
-        ("Heading 2", 12, "1F4E79"),
-    ]:
-        style = styles[name]
-        style.font.name = "Arial"
+def set_cell_shading(cell, fill: str) -> None:
+    cell_properties = cell._tc.get_or_add_tcPr()
+    shading = cell_properties.find(qn("w:shd"))
+    if shading is None:
+        shading = OxmlElement("w:shd")
+        cell_properties.append(shading)
+    shading.set(qn("w:fill"), fill)
+
+
+def set_cell_margins(cell, top=80, start=120, bottom=80, end=120) -> None:
+    cell_properties = cell._tc.get_or_add_tcPr()
+    margins = cell_properties.first_child_found_in("w:tcMar")
+    if margins is None:
+        margins = OxmlElement("w:tcMar")
+        cell_properties.append(margins)
+    for edge, value in (("top", top), ("start", start), ("bottom", bottom), ("end", end)):
+        element = margins.find(qn(f"w:{edge}"))
+        if element is None:
+            element = OxmlElement(f"w:{edge}")
+            margins.append(element)
+        element.set(qn("w:w"), str(value))
+        element.set(qn("w:type"), "dxa")
+
+
+def set_repeat_table_header(row) -> None:
+    properties = row._tr.get_or_add_trPr()
+    repeat = OxmlElement("w:tblHeader")
+    repeat.set(qn("w:val"), "true")
+    properties.append(repeat)
+
+
+def add_page_number(paragraph) -> None:
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    run = paragraph.add_run("Page ")
+    run.font.name = "Calibri"
+    run.font.size = Pt(9)
+    run.font.color.rgb = RGBColor.from_string(MUTED)
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    instruction = OxmlElement("w:instrText")
+    instruction.set(qn("xml:space"), "preserve")
+    instruction.text = " PAGE "
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    run._r.extend([begin, instruction, end])
+
+
+def configure_doc(doc: Document, running_label: str) -> None:
+    section = doc.sections[0]
+    section.start_type = WD_SECTION.NEW_PAGE
+    section.page_width = Inches(8.5)
+    section.page_height = Inches(11)
+    section.top_margin = Inches(1)
+    section.right_margin = Inches(1)
+    section.bottom_margin = Inches(1)
+    section.left_margin = Inches(1)
+    section.header_distance = Inches(0.492)
+    section.footer_distance = Inches(0.492)
+
+    normal = doc.styles["Normal"]
+    normal.font.name = "Calibri"
+    normal.font.size = Pt(11)
+    normal.font.color.rgb = RGBColor.from_string(INK)
+    normal.paragraph_format.space_before = Pt(0)
+    normal.paragraph_format.space_after = Pt(6)
+    normal.paragraph_format.line_spacing = 1.1
+
+    for name, size, color, before, after in (
+        ("Heading 1", 16, BLUE, 16, 8),
+        ("Heading 2", 13, BLUE, 12, 6),
+        ("Heading 3", 12, "1E3A5F", 8, 4),
+    ):
+        style = doc.styles[name]
+        style.font.name = "Calibri"
         style.font.size = Pt(size)
         style.font.bold = True
-        style.font.color.rgb = __import__("docx").shared.RGBColor.from_string(color)
+        style.font.color.rgb = RGBColor.from_string(color)
+        style.paragraph_format.space_before = Pt(before)
+        style.paragraph_format.space_after = Pt(after)
+
+    header = section.header.paragraphs[0]
+    header.text = running_label
+    header.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    for run in header.runs:
+        run.font.name = "Calibri"
+        run.font.size = Pt(9)
+        run.font.color.rgb = RGBColor.from_string(MUTED)
+
+    add_page_number(section.footer.paragraphs[0])
 
 
-def add_title(doc: Document, title: str, subtitle: str) -> None:
-    paragraph = doc.add_paragraph()
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    run = paragraph.add_run(title)
-    run.bold = True
-    run.font.name = "Arial"
-    run.font.size = Pt(22)
-    run.font.color.rgb = __import__("docx").shared.RGBColor(31, 78, 121)
-    sub = doc.add_paragraph(subtitle)
-    sub.runs[0].font.size = Pt(11)
-    sub.runs[0].font.color.rgb = __import__("docx").shared.RGBColor(89, 89, 89)
+def add_title(doc: Document, title: str, project: str, metadata: str) -> None:
+    title_paragraph = doc.add_paragraph()
+    title_paragraph.paragraph_format.space_after = Pt(3)
+    title_run = title_paragraph.add_run(title)
+    title_run.bold = True
+    title_run.font.name = "Calibri"
+    title_run.font.size = Pt(24)
+    title_run.font.color.rgb = RGBColor.from_string(INK)
+
+    project_paragraph = doc.add_paragraph()
+    project_paragraph.paragraph_format.space_after = Pt(3)
+    project_run = project_paragraph.add_run(project)
+    project_run.bold = True
+    project_run.font.name = "Calibri"
+    project_run.font.size = Pt(14)
+    project_run.font.color.rgb = RGBColor.from_string(BLUE)
+
+    metadata_paragraph = doc.add_paragraph(metadata)
+    metadata_paragraph.paragraph_format.space_after = Pt(14)
+    for run in metadata_paragraph.runs:
+        run.font.name = "Calibri"
+        run.font.size = Pt(9)
+        run.font.color.rgb = RGBColor.from_string(MUTED)
 
 
-def add_table(doc: Document, headers: list[str], rows: list[tuple], widths: list[float] | None = None) -> None:
+def add_table(doc: Document, headers: list[str], rows: list[list | tuple], widths: list[float]) -> None:
     table = doc.add_table(rows=1, cols=len(headers))
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    table.autofit = False
     table.style = "Table Grid"
-    hdr = table.rows[0].cells
-    for i, header in enumerate(headers):
-        hdr[i].text = str(header)
-        for paragraph in hdr[i].paragraphs:
+
+    table_properties = table._tbl.tblPr
+    table_width = table_properties.first_child_found_in("w:tblW")
+    if table_width is None:
+        table_width = OxmlElement("w:tblW")
+        table_properties.append(table_width)
+    table_width.set(qn("w:w"), "9360")
+    table_width.set(qn("w:type"), "dxa")
+
+    indent = table_properties.first_child_found_in("w:tblInd")
+    if indent is None:
+        indent = OxmlElement("w:tblInd")
+        table_properties.append(indent)
+    indent.set(qn("w:w"), "120")
+    indent.set(qn("w:type"), "dxa")
+
+    header_cells = table.rows[0].cells
+    set_repeat_table_header(table.rows[0])
+    for index, header in enumerate(headers):
+        header_cells[index].width = Inches(widths[index])
+        header_cells[index].text = header
+        header_cells[index].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        set_cell_shading(header_cells[index], LIGHT)
+        set_cell_margins(header_cells[index])
+        for paragraph in header_cells[index].paragraphs:
+            paragraph.paragraph_format.space_after = Pt(0)
             for run in paragraph.runs:
                 run.bold = True
-        hdr[i]._tc.get_or_add_tcPr().append(shading("D9EAF7"))
-    for row in rows:
+                run.font.name = "Calibri"
+                run.font.size = Pt(9)
+                run.font.color.rgb = RGBColor.from_string(INK)
+
+    for row_values in rows:
         cells = table.add_row().cells
-        for i, value in enumerate(row):
-            cells[i].text = "" if value is None else str(value)
-    if widths:
-        for row in table.rows:
-            for i, width in enumerate(widths):
-                row.cells[i].width = Inches(width)
+        for index, value in enumerate(row_values):
+            cells[index].width = Inches(widths[index])
+            cells[index].text = "" if value is None else str(value)
+            cells[index].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            set_cell_margins(cells[index])
+            for paragraph in cells[index].paragraphs:
+                paragraph.paragraph_format.space_after = Pt(0)
+                for run in paragraph.runs:
+                    run.font.name = "Calibri"
+                    run.font.size = Pt(9)
+                    run.font.color.rgb = RGBColor.from_string(INK)
     doc.add_paragraph()
 
 
-def shading(fill: str):
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
+def extraction_rows(scenario: dict, period: dict) -> list[tuple[str, str]]:
+    risk = period["risk"]
+    return [
+        ("Reporting period", period["label"]),
+        ("Approved budget", f"{scenario['currency']} {scenario['baseline_budget']:,}"),
+        ("Current forecast at completion", f"{scenario['currency']} {period['forecast_cost']:,}"),
+        ("Current actual cost", f"{scenario['currency']} {period['actual_cost']:,}"),
+        ("Approved milestone", f"{scenario['baseline_milestone']['name']} on {scenario['baseline_milestone']['date']}"),
+        ("Current forecast milestone", f"{scenario['baseline_milestone']['name']} on {period['forecast_milestone_date']}"),
+        ("Open critical risks", str(risk["open_critical_count"])),
+        ("Open high risks", str(risk["open_high_count"])),
+        ("High risks missing owner or mitigation", str(risk["high_risks_missing_owner_or_mitigation"])),
+        ("Increased high risks", str(risk["increased_risk_count"])),
+        ("New high risks", str(risk["new_high_risk_count"])),
+        ("Maximum mitigation overdue days", str(risk["max_mitigation_overdue_days"])),
+    ]
 
-    element = OxmlElement("w:shd")
-    element.set(qn("w:fill"), fill)
-    return element
 
-
-def build_baseline(case: dict, folder: Path) -> None:
+def build_baseline(scenario: dict, folder: Path) -> None:
     doc = Document()
-    apply_doc_styles(doc)
-    add_title(doc, "Project Baseline", case["project"])
-    doc.add_paragraph(
-        "This baseline defines the approved delivery reference used by the PMO to compare current "
-        "performance against expected schedule, cost, governance, and assurance evidence."
+    configure_doc(doc, "X-Assurance demo evidence | Approved baseline")
+    add_title(
+        doc,
+        "Project Baseline",
+        scenario["project"],
+        "Approval status: Approved | Assurance cadence: Monthly",
     )
-    doc.add_heading("Project Control Profile", level=1)
+    doc.add_paragraph(
+        "This document is the approved reference for cost, schedule, and risk comparison. "
+        "Current reports must not replace these baseline values."
+    )
+    doc.add_heading("Approved control profile", level=1)
     add_table(
         doc,
-        ["Field", "Value"],
+        ["Field", "Approved value"],
         [
-            ("Project Name", case["project"]),
-            ("Sector", case["sector"]),
-            ("Sponsor", case["sponsor"]),
-            ("Project Manager", case["manager"]),
-            ("Baseline Budget USD", f"{case['baseline_budget']:,}"),
-            ("Assurance Cadence", "Monthly PMO checkpoint with evidence-backed executive summary"),
+            ("Project", scenario["project"]),
+            ("Sector", scenario["sector"]),
+            ("Sponsor", scenario["sponsor"]),
+            ("Project manager", scenario["manager"]),
+            ("Approved budget", f"{scenario['currency']} {scenario['baseline_budget']:,}"),
+            ("Approved milestone", scenario["baseline_milestone"]["name"]),
+            ("Approved milestone date", scenario["baseline_milestone"]["date"]),
         ],
-        [2.0, 4.8],
+        [1.9, 4.6],
     )
-    doc.add_heading("Baseline Milestones", level=1)
-    add_table(doc, ["Milestone", "Baseline Date", "Status", "Planning Note"], case["baseline_milestones"], [2.4, 1.2, 1.1, 2.4])
-    doc.add_heading("Governance and Assurance Requirements", level=1)
-    for item in [
-        "Monthly executive summary must compare planned progress, actual progress, cost forecast, active risk exposure, and evidence readiness.",
-        "Schedule variance above 10 days or a missed dependency milestone requires a named recovery owner.",
-        "Forecast cost above approved baseline requires finance review and mitigation options.",
-        "High risks, overdue high-severity issues, and missing decision evidence must be escalated to the sponsor or steering committee.",
-        "Every management finding should be traceable to a source document, register, or approved record.",
-    ]:
-        doc.add_paragraph(item, style="List Bullet")
-    doc.core_properties.title = f"{case['project']} Project Baseline"
-    doc.core_properties.subject = "PMO project baseline evidence"
+    doc.add_heading("Approved risk posture", level=1)
+    doc.add_paragraph(scenario["baseline_risk_statement"])
+    doc.add_heading("Assurance requirements", level=1)
+    add_table(
+        doc,
+        ["Control", "Requirement"],
+        [
+            ("Cost", "Compare forecast at completion with the approved budget."),
+            ("Schedule", "Compare the current forecast date with the approved milestone date."),
+            ("Risk", "Escalate critical risks and high risks that lack an owner or mitigation."),
+            ("Evidence", "Every conclusion must remain traceable to the source document."),
+        ],
+        [1.4, 5.1],
+    )
+    doc.core_properties.title = f"{scenario['project']} Project Baseline"
+    doc.core_properties.subject = "Approved PMO baseline evidence"
     doc.save(folder / "01_project_baseline.docx")
 
 
-def build_progress(case: dict, folder: Path) -> None:
+def build_current_progress(scenario: dict, folder: Path) -> None:
+    period = scenario["periods"][-1]
     doc = Document()
-    apply_doc_styles(doc)
-    add_title(doc, "Monthly Progress Report", case["project"])
-    doc.add_heading("Executive Narrative", level=1)
-    doc.add_paragraph(case["narrative"])
-    doc.add_heading("Current Control Position", level=1)
+    configure_doc(doc, "X-Assurance demo evidence | Monthly progress report")
+    add_title(
+        doc,
+        "Monthly Progress Report",
+        scenario["project"],
+        f"Reporting period: {period['label']} | Prepared for: {scenario['sponsor']}",
+    )
+    doc.add_heading("Executive narrative", level=1)
+    doc.add_paragraph(period["narrative"])
+    doc.add_heading("Current control position", level=1)
+    add_table(doc, ["Field", "Current evidence"], extraction_rows(scenario, period), [2.6, 3.9])
+    doc.add_heading("Delivery progress", level=1)
     add_table(
         doc,
-        ["Field", "Value"],
-        [
-            ("Reporting Period", case["period"]),
-            ("Prepared For", case["sponsor"]),
-            ("Prepared By", "PMO Assurance Team"),
-            ("Planned Progress", f"{case['planned_progress']}%"),
-            ("Actual Progress", f"{case['actual_progress']}%"),
-            ("Approved Budget USD", f"{case['baseline_budget']:,}"),
-            ("Forecast Budget USD", f"{case['forecast_budget']:,}"),
-        ],
-        [2.1, 4.7],
+        ["Measure", "Planned", "Actual"],
+        [["Overall progress", f"{period['planned_progress']}%", f"{period['actual_progress']}%"]],
+        [3.3, 1.6, 1.6],
     )
-    doc.add_heading("Milestone Status Update", level=1)
-    add_table(doc, ["Milestone", "Baseline Date", "Current Status", "Current Note"], case["progress_milestones"], [2.4, 1.2, 1.2, 2.2])
-    doc.add_heading("Management Attention Points", level=1)
-    for item in case["attention_points"]:
-        doc.add_paragraph(item, style="List Bullet")
-    doc.add_heading("Evidence Interpretation Notes", level=1)
+    doc.add_heading("Management decision", level=1)
+    doc.add_paragraph(period["decision"])
+    doc.add_heading("Evidence note", level=1)
     doc.add_paragraph(
-        "The report should be interpreted alongside the cost report, risk register, and issue log. "
-        "The PMO should avoid treating any single indicator as definitive unless it is supported by the registers."
+        "Read this report with the cost report, risk register, and issue log for the same reporting period. "
+        "Where documents disagree, the PMO must verify the source before approving a report."
     )
-    doc.core_properties.title = f"{case['project']} Monthly Progress Report"
+    doc.core_properties.title = f"{scenario['project']} {period['label']} Progress Report"
     doc.core_properties.subject = "PMO monthly progress evidence"
     doc.save(folder / "02_monthly_progress_report.docx")
 
 
-def style_sheet(ws) -> None:
-    header_fill = PatternFill("solid", fgColor="1F4E79")
-    header_font = Font(color="FFFFFF", bold=True)
-    border = Border(
-        left=Side(style="thin", color="D9E2F3"),
-        right=Side(style="thin", color="D9E2F3"),
-        top=Side(style="thin", color="D9E2F3"),
-        bottom=Side(style="thin", color="D9E2F3"),
+def pdf_styles():
+    styles = getSampleStyleSheet()
+    styles.add(
+        ParagraphStyle(
+            name="DemoTitle",
+            parent=styles["Title"],
+            fontName="Helvetica-Bold",
+            fontSize=22,
+            leading=25,
+            textColor=colors.HexColor(f"#{INK}"),
+            alignment=TA_LEFT,
+            spaceAfter=4,
+        )
     )
-    for cell in ws[1]:
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    for row in ws.iter_rows():
-        for cell in row:
-            cell.border = border
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
-    for col in range(1, ws.max_column + 1):
-        max_len = max(len(str(ws.cell(row=row, column=col).value or "")) for row in range(1, ws.max_row + 1))
-        ws.column_dimensions[get_column_letter(col)].width = min(max(max_len + 3, 12), 42)
-    ws.freeze_panes = "A2"
+    styles.add(
+        ParagraphStyle(
+            name="DemoProject",
+            parent=styles["Heading2"],
+            fontName="Helvetica-Bold",
+            fontSize=13,
+            leading=16,
+            textColor=colors.HexColor(f"#{BLUE}"),
+            spaceAfter=5,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="DemoMeta",
+            parent=styles["BodyText"],
+            fontName="Helvetica",
+            fontSize=8.5,
+            leading=11,
+            textColor=colors.HexColor(f"#{MUTED}"),
+            spaceAfter=12,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="DemoHeading",
+            parent=styles["Heading1"],
+            fontName="Helvetica-Bold",
+            fontSize=13,
+            leading=16,
+            textColor=colors.HexColor(f"#{BLUE}"),
+            spaceBefore=10,
+            spaceAfter=6,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="DemoBody",
+            parent=styles["BodyText"],
+            fontName="Helvetica",
+            fontSize=9.5,
+            leading=13,
+            textColor=colors.HexColor(f"#{INK}"),
+            spaceAfter=6,
+        )
+    )
+    return styles
 
 
-def build_cost(case: dict, folder: Path) -> None:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Cost Report"
-    ws.append(["Cost Item", "Planned Cost USD", "Actual Cost USD", "Forecast Cost USD", "Forecast Variance USD", "Variance %", "Status", "Evidence Note"])
-    for i, row in enumerate(case["cost_rows"], start=2):
-        item, planned, actual, forecast, status, note = row
-        ws.append([item, planned, actual, forecast, f"=D{i}-B{i}", f"=E{i}/B{i}", status, note])
-    total = len(case["cost_rows"]) + 2
-    ws.append(["Total", f"=SUM(B2:B{total-1})", f"=SUM(C2:C{total-1})", f"=SUM(D2:D{total-1})", f"=SUM(E2:E{total-1})", f"=E{total}/B{total}", "", ""])
-    for row in ws.iter_rows(min_row=2, min_col=2, max_col=5):
-        for cell in row:
-            cell.number_format = '"$"#,##0'
-    for cell in ws.iter_rows(min_row=2, min_col=6, max_col=6):
-        cell[0].number_format = "0.0%"
-    style_sheet(ws)
-    meta = wb.create_sheet("Project Metadata")
-    meta.append(["Field", "Value"])
-    meta.append(["Project Name", case["project"]])
-    meta.append(["Reporting Period", case["period"]])
-    meta.append(["Approved Baseline Budget USD", case["baseline_budget"]])
-    meta.append(["Total Forecast Budget USD", case["forecast_budget"]])
-    style_sheet(meta)
-    wb.save(folder / "03_cost_report.xlsx")
+def pdf_table(rows: list[tuple[str, str]], styles) -> Table:
+    data = [
+        [Paragraph("Field", styles["DemoBody"]), Paragraph("Current evidence", styles["DemoBody"])]
+    ] + [
+        [Paragraph(str(label), styles["DemoBody"]), Paragraph(str(value), styles["DemoBody"])]
+        for label, value in rows
+    ]
+    table = Table(data, colWidths=[2.35 * inch, 4.15 * inch], repeatRows=1, hAlign="LEFT")
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(f"#{LIGHT}")),
+                ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor(f"#{INK}")),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor(f"#{BORDER}")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ]
+        )
+    )
+    return table
 
 
-def build_register(case: dict, folder: Path, kind: str) -> None:
-    wb = Workbook()
-    ws = wb.active
-    if kind == "risk":
-        ws.title = "Risk Register"
-        ws.append(["Risk ID", "Risk Description", "Probability", "Impact", "Severity", "Mitigation Plan", "Owner", "Status"])
-        for row in case["risk_rows"]:
-            ws.append(row)
-        purpose = "Active project risks for executive summary generation"
-        filename = "04_risk_register.xlsx"
-    else:
-        ws.title = "Issue Log"
-        ws.append(["Issue ID", "Issue Description", "Owner", "Due Date", "Status", "Severity", "Current Note"])
-        for row in case["issue_rows"]:
-            ws.append(row)
-        for cell in ws.iter_rows(min_row=2, min_col=4, max_col=4):
-            cell[0].number_format = "yyyy-mm-dd"
-        purpose = "Open project issues and overdue actions for executive summary generation"
-        filename = "05_issue_log.xlsx"
-    style_sheet(ws)
-    meta = wb.create_sheet("Project Metadata")
-    meta.append(["Field", "Value"])
-    meta.append(["Project Name", case["project"]])
-    meta.append(["Reporting Period", case["period"]])
-    meta.append(["Purpose", purpose])
-    style_sheet(meta)
-    wb.save(folder / filename)
+def draw_pdf_footer(canvas, document) -> None:
+    canvas.saveState()
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColor(colors.HexColor(f"#{MUTED}"))
+    canvas.drawString(inch, 0.48 * inch, "X-Assurance demo evidence")
+    canvas.drawRightString(7.5 * inch, 0.48 * inch, f"Page {document.page}")
+    canvas.restoreState()
 
 
-def set_file_dates(folder: Path, case: dict) -> None:
-    date_by_name = {
-        "01_project_baseline.docx": "2026-01-15T09:00:00",
-        "02_monthly_progress_report.docx": "2026-03-20T09:00:00" if "green" in case["folder"] else "2026-05-20T09:00:00" if "amber" in case["folder"] else "2026-06-20T09:00:00",
-        "03_cost_report.xlsx": "2026-03-21T09:00:00" if "green" in case["folder"] else "2026-05-21T09:00:00" if "amber" in case["folder"] else "2026-06-21T09:00:00",
-        "04_risk_register.xlsx": "2026-03-22T09:00:00" if "green" in case["folder"] else "2026-05-22T09:00:00" if "amber" in case["folder"] else "2026-06-22T09:00:00",
-        "05_issue_log.xlsx": "2026-03-23T09:00:00" if "green" in case["folder"] else "2026-05-23T09:00:00" if "amber" in case["folder"] else "2026-06-23T09:00:00",
+def build_previous_progress_pdfs(scenario: dict, folder: Path) -> None:
+    styles = pdf_styles()
+    for index, period in enumerate(scenario["periods"][:-1]):
+        path = folder / f"02{chr(ord('a') + index)}_progress_{period['period'][:7]}.pdf"
+        document = SimpleDocTemplate(
+            str(path),
+            pagesize=letter,
+            rightMargin=inch,
+            leftMargin=inch,
+            topMargin=0.8 * inch,
+            bottomMargin=0.75 * inch,
+            title=f"{scenario['project']} {period['label']} Progress Report",
+            author="X-Assurance PMO Test Evidence",
+        )
+        story = [
+            Paragraph("Monthly Progress Report", styles["DemoTitle"]),
+            Paragraph(scenario["project"], styles["DemoProject"]),
+            Paragraph(
+                f"Reporting period: {period['label']} | Prepared for: {scenario['sponsor']}",
+                styles["DemoMeta"],
+            ),
+            Paragraph("Executive narrative", styles["DemoHeading"]),
+            Paragraph(period["narrative"], styles["DemoBody"]),
+            Paragraph("Current control position", styles["DemoHeading"]),
+            KeepTogether(pdf_table(extraction_rows(scenario, period), styles)),
+            Spacer(1, 8),
+            Paragraph("Management decision", styles["DemoHeading"]),
+            Paragraph(period["decision"], styles["DemoBody"]),
+            Paragraph("Evidence note", styles["DemoHeading"]),
+            Paragraph(
+                "This period is assessed against the approved project baseline. Values belong only to the reporting period shown above.",
+                styles["DemoBody"],
+            ),
+        ]
+        document.build(story, onFirstPage=draw_pdf_footer, onLaterPages=draw_pdf_footer)
+
+
+def write_expected_results(scenario: dict, folder: Path) -> None:
+    expected = {
+        "scenario": scenario["id"],
+        "project": scenario["project"],
+        "expected_final_condition": scenario["expected_final_condition"],
+        "baseline": {
+            "budget": scenario["baseline_budget"],
+            "currency": scenario["currency"],
+            "milestone": scenario["baseline_milestone"],
+        },
+        "periods": [
+            {
+                "period": period["period"],
+                "forecast_cost": period["forecast_cost"],
+                "forecast_milestone_date": period["forecast_milestone_date"],
+                "risk": period["risk"],
+                **period["expected"],
+            }
+            for period in scenario["periods"]
+        ],
+        "answer_quality_checks": [
+            "States the direct project condition.",
+            "Uses the correct budget variance.",
+            "Uses the correct schedule delay.",
+            "Uses the explicit risk counts and control gaps.",
+            "References supplied evidence.",
+            "Separates facts from general guidance.",
+            "Does not invent missing evidence.",
+        ],
     }
-    for name, value in date_by_name.items():
-        timestamp = datetime.fromisoformat(value).timestamp()
-        path = folder / name
-        path.touch(exist_ok=True)
-        import os
-
-        os.utime(path, (timestamp, timestamp))
-
-
-def build_readme() -> None:
-    readme = OUT / "README.md"
-    readme.write_text(
-        """# Realistic PMO Demo Evidence Cases
-
-These evidence packs are structured like general PMO project documents rather than direct test strings.
-Each case contains:
-
-- `01_project_baseline.docx`
-- `02_monthly_progress_report.docx`
-- `03_cost_report.xlsx`
-- `04_risk_register.xlsx`
-- `05_issue_log.xlsx`
-
-Suggested projects:
-
-1. `Riverside Data Hub` from `case_01_green_riverside_data_hub`
-2. `Alpha Infrastructure Program` from `case_02_amber_alpha_infrastructure`
-3. `Orion ERP Recovery` from `case_03_red_orion_erp_recovery`
-
-Upload all five files into a fresh project and leave title, date, and type blank.
-The app should infer title from filename and document date from file modified date.
-""",
+    (folder / "expected-results.json").write_text(
+        json.dumps(expected, indent=2) + "\n",
         encoding="utf-8",
     )
 
 
+def set_fixture_dates(scenario: dict, folder: Path) -> None:
+    baseline_time = datetime.fromisoformat("2026-01-15T09:00:00").timestamp()
+    baseline_path = folder / "01_project_baseline.docx"
+    os.utime(baseline_path, (baseline_time, baseline_time))
+
+    for index, period in enumerate(scenario["periods"][:-1]):
+        path = folder / f"02{chr(ord('a') + index)}_progress_{period['period'][:7]}.pdf"
+        timestamp = datetime.fromisoformat(f"{period['period'][:7]}-20T09:00:00").timestamp()
+        os.utime(path, (timestamp, timestamp))
+
+    latest = scenario["periods"][-1]["period"][:7]
+    latest_time = datetime.fromisoformat(f"{latest}-20T09:00:00").timestamp()
+    current_path = folder / "02_monthly_progress_report.docx"
+    os.utime(current_path, (latest_time, latest_time))
+
+
+def write_readme(scenarios: list[dict]) -> None:
+    case_lines = "\n".join(
+        f"{index}. `{scenario['project']}` from `{scenario['folder']}`. Expected final condition: `{scenario['expected_final_condition']}`."
+        for index, scenario in enumerate(scenarios, start=1)
+    )
+    readme = f"""# Realistic PMO Demo Evidence Cases
+
+These are golden acceptance-test packs for the real document pipeline. Each project contains an approved baseline, three reporting periods, a current cost report, a current risk register, an issue log, and machine-readable expected results.
+
+## Cases
+
+{case_lines}
+
+## Upload files
+
+For each case, upload every DOCX, PDF, and XLSX file into a fresh project. Do not upload `expected-results.json`.
+
+The application must:
+
+1. classify the approved baseline separately from current evidence;
+2. detect all three reporting periods;
+3. save a separate assessment snapshot for each period;
+4. match the final condition in `expected-results.json`;
+5. show source evidence in the Overview, report, and AI Advisor.
+
+The AI response wording may vary. Budget variance, schedule delay, risk counts, conditions, reporting periods, and cited evidence must remain correct.
+"""
+    (OUT / "README.md").write_text(readme, encoding="utf-8")
+
+
 def main() -> None:
+    scenarios = load_scenarios()
     OUT.mkdir(parents=True, exist_ok=True)
-    for case in CASES:
-        folder = OUT / case["folder"]
+    for scenario in scenarios:
+        folder = OUT / scenario["folder"]
         folder.mkdir(parents=True, exist_ok=True)
-        build_baseline(case, folder)
-        build_progress(case, folder)
-        build_cost(case, folder)
-        build_register(case, folder, "risk")
-        build_register(case, folder, "issue")
-        set_file_dates(folder, case)
-    build_readme()
-    print(f"Created {len(CASES)} realistic PMO fixture packs under {OUT}")
+        build_baseline(scenario, folder)
+        build_previous_progress_pdfs(scenario, folder)
+        build_current_progress(scenario, folder)
+        write_expected_results(scenario, folder)
+        set_fixture_dates(scenario, folder)
+    write_readme(scenarios)
+    print(f"Created DOCX and PDF evidence for {len(scenarios)} PMO scenarios under {OUT}")
 
 
 if __name__ == "__main__":
     main()
-

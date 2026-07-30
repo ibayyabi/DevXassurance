@@ -1,8 +1,9 @@
 ---
 title: X-Assurance Experience
-status: final
+status: superseded-for-recovery
 created: 2026-06-08
-updated: 2026-06-08
+updated: 2026-07-21
+superseded_by: ../../product-recovery/phase-3-usable-mvp-spec.md
 sources:
   - ../../prds/prd-x-assistance-2026-06-08/prd.md
   - ../../architecture.md
@@ -11,6 +12,8 @@ design_reference: DESIGN.md
 ---
 
 # X-Assurance Experience
+
+> **Recovery notice:** The authenticated information architecture, page density, module structure, terminology, and workflow in this file are superseded by [`phase-3-usable-mvp-spec.md`](../../product-recovery/phase-3-usable-mvp-spec.md). Retain this file as design history.
 
 ## Foundation
 

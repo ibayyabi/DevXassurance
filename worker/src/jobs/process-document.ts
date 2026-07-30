@@ -28,11 +28,30 @@ export async function processDocumentJob(job: ProcessDocumentJob) {
   const chunks = result.chunks.map((chunk) => chunk.chunkText);
   const snapshotDate = normalizeSnapshotDate(job.documentDate) ?? todayIsoDate();
   const llmOutput = await extractWithLlm(job, chunks);
-  const fallbackFacts = extractPrototypeFacts(job, chunks);
-  const fallbackSummary = buildPrototypeSummary(job, chunks);
-  const fallbackHealth = buildHealthSnapshots(chunks, snapshotDate);
-  const fallbackAlerts = buildAlerts(chunks);
-  const fallbackActions = buildActions(chunks);
+
+  if (!llmOutput) {
+    return {
+      jobId: job.jobId,
+      projectId: job.projectId,
+      documentId: job.documentId,
+      status: "failed" as const,
+      errorCode: "llm_analysis_failed",
+      errorMessage:
+        "The document text was extracted, but the configured AI service did not return a valid structured analysis.",
+    };
+  }
+
+  if (!llmOutput.summary || llmOutput.health_snapshots.length === 0) {
+    return {
+      jobId: job.jobId,
+      projectId: job.projectId,
+      documentId: job.documentId,
+      status: "failed" as const,
+      errorCode: "invalid_analysis_contract",
+      errorMessage:
+        "The AI service responded, but required summary or evidence-status fields were missing.",
+    };
+  }
 
   return {
     jobId: job.jobId,
@@ -46,26 +65,20 @@ export async function processDocumentJob(job: ProcessDocumentJob) {
       section_label: chunk.sectionLabel ?? null,
         parser_metadata: result.parserMetadata,
       })),
-    facts: llmOutput?.facts.length ? llmOutput.facts : fallbackFacts,
-    summary: llmOutput?.summary ?? fallbackSummary,
-    health_snapshots: llmOutput?.health_snapshots.length
-      ? llmOutput.health_snapshots.map((snapshot) => ({
-          ...snapshot,
-          snapshot_date: snapshot.snapshot_date ?? snapshotDate,
-        }))
-      : fallbackHealth,
-    alerts: llmOutput?.alerts.length ? llmOutput.alerts : fallbackAlerts,
-    actions: llmOutput?.actions.length ? llmOutput.actions : fallbackActions,
-    anomalies: buildAnomalies(
-      job,
-      llmOutput?.alerts.length ? llmOutput.alerts : fallbackAlerts,
-      llmOutput?.facts.length ? llmOutput.facts : fallbackFacts,
-    ),
+    facts: llmOutput.facts,
+    summary: llmOutput.summary,
+    health_snapshots: llmOutput.health_snapshots.map((snapshot) => ({
+      ...snapshot,
+      snapshot_date: snapshot.snapshot_date ?? snapshotDate,
+    })),
+    alerts: llmOutput.alerts,
+    actions: llmOutput.actions,
+    anomalies: buildAnomalies(job, llmOutput.alerts, llmOutput.facts),
     parserMetadata: {
       ...result.parserMetadata,
-      llmProvider: llmOutput?.provider ?? "rule_fallback",
-      llmModel: llmOutput?.model ?? null,
-      llmWarning: llmOutput?.warning ?? null,
+      llmProvider: llmOutput.provider,
+      llmModel: llmOutput.model,
+      llmWarning: llmOutput.warning ?? null,
     },
   };
 }
@@ -138,6 +151,7 @@ async function extractWithOllama(
   try {
     const response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/chat`, {
       method: "POST",
+      signal: AbortSignal.timeout(llmTimeoutMs()),
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model,
@@ -195,6 +209,7 @@ async function extractWithOllamaCloud(
   try {
     const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat`, {
       method: "POST",
+      signal: AbortSignal.timeout(llmTimeoutMs()),
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
@@ -262,6 +277,7 @@ async function extractWithOpenAiCompatible(
       `${baseUrl.replace(/\/$/, "")}/chat/completions`,
       {
         method: "POST",
+        signal: AbortSignal.timeout(llmTimeoutMs()),
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
@@ -313,11 +329,12 @@ Rules:
 - Do not invent numbers, owners, dates, or risks.
 - Classify project health primarily with PMO judgment from the supplied text, not keyword matching.
 - Always return one health snapshot for each dimension: overall, schedule, cost, risk, governance, audit_readiness.
-- Use "green" when the document provides limited but meaningful project evidence and no material adverse signal is found.
+- Use "green" only when the document contains explicit evidence that the dimension is on plan or within its approved threshold.
 - Use "amber" when evidence shows manageable concern, uncertainty, weak control, moderate delay, cost pressure, or an item needing management attention.
 - Use "red" only for material adverse signals such as blocked delivery, severe delay, high or critical unresolved risk, major cost overrun, missing critical approval, or failed control.
 - Use "insufficient_evidence" only when the document has no meaningful evidence for that dimension, is unreadable, or is unrelated to project assurance.
-- When evidence is thin but not adverse, prefer a low-confidence green status over insufficient_evidence. Explain the limitation in status_text and source_summary.
+- Absence of an adverse statement is not evidence of good health. When baseline or current evidence is missing, use "insufficient_evidence".
+- A document-level extraction is not a baseline-versus-current comparison. Do not claim improvement, deterioration, or variance unless both values are explicitly present in this document.
 - Return JSON only. No markdown.
 
 Document metadata:
@@ -601,6 +618,7 @@ function normalizeHealthScore(value: unknown, status: string) {
   return null;
 }
 
+/* eslint-disable @typescript-eslint/no-unused-vars -- Legacy prototype helpers remain isolated for migration comparison and are never called by the Phase 4 worker. */
 function extractPrototypeFacts(job: ProcessDocumentJob, chunks: string[]) {
   const facts: {
     fact_type: "risk" | "issue" | "milestone" | "decision" | "owner_action";
@@ -853,6 +871,7 @@ function buildActions(chunks: string[]) {
     status: "open",
   }));
 }
+/* eslint-enable @typescript-eslint/no-unused-vars */
 
 function buildAnomalies(
   job: ProcessDocumentJob,
@@ -913,27 +932,14 @@ function buildAnomalies(
     return anomalies.slice(0, 8);
   }
 
-  return [
-    {
-      category: "governance",
-      missing_field: "review",
-      severity: "medium" as const,
-      title: "Document intelligence review required",
-      affected_item: job.title ?? job.fileName,
-      explanation:
-        "The document was processed, but no explicit anomaly signal was extracted.",
-      impact:
-        "A human reviewer should confirm whether the document introduces assurance concerns.",
-      impact_rating: "Medium",
-      recommended_action:
-        "Review extracted facts and confirm whether any risk, issue, or governance gap should be tracked.",
-      suggested_owners: [],
-      evidence_count: facts.length,
-      absence_type: "not_applicable",
-      rationale:
-        "Generated as a review prompt to keep document processing visible in the anomaly workflow.",
-    },
-  ];
+  return [];
+}
+
+function llmTimeoutMs() {
+  const configured = Number(process.env.XASS_LLM_TIMEOUT_MS ?? 120000);
+
+  if (!Number.isFinite(configured)) return 120000;
+  return Math.max(5000, Math.min(300000, configured));
 }
 
 function shouldFlagMissingOwner(

@@ -36,12 +36,12 @@ async function ProjectShell({
 
 function ProjectShellLoading() {
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-base">
       <div className="flex min-h-screen">
-        <div className="hidden w-64 bg-slate-950 md:block" />
+        <div className="hidden w-64 bg-sidebar md:block" />
         <main className="flex-1 p-6">
-          <div className="h-16 rounded-lg bg-white shadow-sm" />
-          <div className="mt-6 h-56 rounded-lg bg-white shadow-sm" />
+          <div className="h-16 rounded-lg bg-surface shadow-sm" />
+          <div className="mt-6 h-56 rounded-lg bg-surface shadow-sm" />
         </main>
       </div>
     </div>

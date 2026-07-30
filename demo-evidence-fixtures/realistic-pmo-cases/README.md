@@ -1,19 +1,23 @@
 # Realistic PMO Demo Evidence Cases
 
-These evidence packs are structured like general PMO project documents rather than direct test strings.
-Each case contains:
+These are golden acceptance-test packs for the real document pipeline. Each project contains an approved baseline, three reporting periods, a current cost report, a current risk register, an issue log, and machine-readable expected results.
 
-- `01_project_baseline.docx`
-- `02_monthly_progress_report.docx`
-- `03_cost_report.xlsx`
-- `04_risk_register.xlsx`
-- `05_issue_log.xlsx`
+## Cases
 
-Suggested projects:
+1. `Riverside Data Hub` from `case_01_green_riverside_data_hub`. Expected final condition: `on_track`.
+2. `Alpha Infrastructure Program` from `case_02_amber_alpha_infrastructure`. Expected final condition: `needs_attention`.
+3. `Orion ERP Recovery` from `case_03_red_orion_erp_recovery`. Expected final condition: `critical`.
 
-1. `Riverside Data Hub` from `case_01_green_riverside_data_hub`
-2. `Alpha Infrastructure Program` from `case_02_amber_alpha_infrastructure`
-3. `Orion ERP Recovery` from `case_03_red_orion_erp_recovery`
+## Upload files
 
-Upload all five files into a fresh project and leave title, date, and type blank.
-The app should infer title from filename and document date from file modified date.
+For each case, upload every DOCX, PDF, and XLSX file into a fresh project. Do not upload `expected-results.json`.
+
+The application must:
+
+1. classify the approved baseline separately from current evidence;
+2. detect all three reporting periods;
+3. save a separate assessment snapshot for each period;
+4. match the final condition in `expected-results.json`;
+5. show source evidence in the Overview, report, and AI Advisor.
+
+The AI response wording may vary. Budget variance, schedule delay, risk counts, conditions, reporting periods, and cited evidence must remain correct.
