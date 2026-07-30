@@ -791,7 +791,7 @@
           "interval": [
             {
               "field": "seconds",
-              "secondsInterval": 15
+              "secondsInterval": 60
             }
           ]
         }
