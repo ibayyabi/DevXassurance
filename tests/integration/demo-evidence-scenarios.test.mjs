@@ -109,19 +109,3 @@ test("each golden pack contains real uploadable documents and expected results",
   }
 });
 
-test("automatic assessment stores history instead of only the latest month", () => {
-  const action = readFileSync(
-    "src/features/assurance/actions/assurance-actions.ts",
-    "utf8",
-  );
-  const query = readFileSync(
-    "src/features/assurance/lib/queries.ts",
-    "utf8",
-  );
-
-  assert.match(action, /period_assessments/);
-  assert.match(action, /project_document_fingerprint/);
-  assert.match(action, /persistAutomaticReviewPeriod/);
-  assert.match(query, /review: reviews\[0\]/);
-  assert.match(query, /reviews/);
-});

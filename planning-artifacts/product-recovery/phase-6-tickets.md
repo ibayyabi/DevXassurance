@@ -292,3 +292,9 @@ Prove the new workflow with representative artifacts and failure cases before an
 ### Verification
 
 Run the complete browser-based development journey, API authorization/project-isolation checks, worker/provider failure scenarios, and usability session; attach observed results and list any release-blocking gap.
+
+### Current status
+
+**P6-09 is not complete.** The deterministic fixture-mode `npm run test:e2e` passed (1 test, 2.4 minutes), and `npm run test:e2e:live` passed once with strict extraction of generated synthetic evidence. Final checks: `npm test` passed (108/108), `npx tsc --noEmit --incremental false` passed, `npm run lint` reported no issues, and `npm run build` passed.
+
+The human first-time-user usability session remains an explicit external blocker because no participant was available. Automated browser tests and agent walkthroughs are not a substitute. The development runbook exists, but this ticket's evaluation/release gate is still open.

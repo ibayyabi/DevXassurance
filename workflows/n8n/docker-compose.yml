@@ -11,12 +11,9 @@ services:
       - postgres_data:/var/lib/postgresql/data
 
   n8n:
-    image: n8nio/n8n:latest
+    image: n8nio/n8n:2.42.7
     container_name: aisx-n8n
     restart: unless-stopped
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -25,6 +22,7 @@ services:
       N8N_HOST: ${N8N_HOST}
       N8N_PORT: ${N8N_PORT}
       N8N_PROTOCOL: ${N8N_PROTOCOL}
+      N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE}
       WEBHOOK_URL: ${WEBHOOK_URL}
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
@@ -43,7 +41,7 @@ services:
       N8N_BLOCK_ENV_ACCESS_IN_NODE: ${N8N_BLOCK_ENV_ACCESS_IN_NODE}
       EXECUTIONS_DATA_SAVE_ON_ERROR: all
       EXECUTIONS_DATA_SAVE_ON_SUCCESS: none
-      EXECUTIONS_DATA_SAVE_ON_PROGRESS: "false"
+      EXECUTIONS_DATA_SAVE_ON_PROGRESS: "true"
       EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS: "true"
       EXECUTIONS_DATA_PRUNE: "true"
       EXECUTIONS_DATA_MAX_AGE: "168"

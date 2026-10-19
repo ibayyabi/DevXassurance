@@ -14,7 +14,6 @@ import {
   confirmAssuranceFinding,
   createAssuranceReview,
   runAssuranceAnalysis,
-  saveReviewEvidence,
   updateAssuranceAction,
 } from "@/features/assurance/actions/assurance-actions";
 import { ProcessingRefresh } from "@/features/assurance/components/processing-refresh";
@@ -23,8 +22,8 @@ import type {
   AssuranceFinding,
   AssuranceReview,
 } from "@/features/assurance/lib/queries";
-import { documentTypeLabels } from "@/features/documents/lib/constants";
 import { Button } from "@/components/ui/button";
+import { ReviewEvidenceFilters } from "@/features/assurance/components/review-evidence-filters";
 import { Input } from "@/components/ui/input";
 
 const steps = ["Evidence", "Analysis", "Findings", "Actions", "Report"];
@@ -87,35 +86,61 @@ export function AssuranceWorkspace({
       .filter((item) => item.role === "current")
       .map((item) => item.documentId),
   );
-  const readyDocuments = documents.filter(
-    (document) => document.processingStatus === "completed",
-  );
+  const failedCount = documents.filter((document) => document.processingStatus === "failed").length;
+  const selectedIds = new Set([...baselineIds, ...currentIds]);
+  const unavailableSelectedCount = [...selectedIds].filter(
+    (id) => !documents.some((document) => document.id === id && document.processingStatus === "completed"),
+  ).length;
+  const missingBaseline = baselineIds.size === 0;
+  const missingCurrent = currentIds.size === 0;
+  const reviewReady = unavailableSelectedCount === 0 && !missingBaseline && !missingCurrent;
 
   return (
     <div className="space-y-5">
       <ProcessingRefresh active={activeProcessing} />
-      <ReviewHeader review={review} />
+      <ReviewHeader review={review} evidenceReady={reviewReady} />
+      {!reviewReady && (
+        <section className="rounded-xl border border-status-warn bg-status-warn-bg p-4 text-status-warn-text" role="status">
+          <h2 className="font-semibold">Review evidence needs attention</h2>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">
+            {missingBaseline && <li>Choose at least one completed Approved Baseline document.</li>}
+            {missingCurrent && <li>Choose at least one completed Current Period document.</li>}
+          </ul>
+          <Link href={`/app/projects/${projectId}/documents`} className="mt-3 inline-flex items-center gap-1 text-sm font-semibold underline underline-offset-4">
+            Open Evidence Library <ArrowRight className="h-4 w-4" />
+          </Link>
+        </section>
+      )}
+      {unavailableSelectedCount > 0 && (
+        <p className="rounded-lg bg-status-warn-bg p-3 text-sm text-status-warn-text" role="status">
+          {unavailableSelectedCount} selected document(s) are unavailable. Retry or replace them in the Evidence Library.
+        </p>
+      )}
+      {(failedCount > 0 || activeProcessing) && (
+        <p className="rounded-lg bg-status-warn-bg p-3 text-sm text-status-warn-text" role="status">
+          {failedCount > 0 ? `${failedCount} other file(s) failed` : "Some files are still processing"}; completed selected baseline/current evidence can still be reviewed.
+        </p>
+      )}
 
       <section className="grid gap-5 xl:grid-cols-[0.9fr_1.1fr]">
         <EvidenceStep
           projectId={projectId}
           review={review}
           documents={documents}
-          readyDocuments={readyDocuments}
           baselineIds={baselineIds}
           currentIds={currentIds}
         />
         <AnalysisStep
           projectId={projectId}
           review={review}
-          evidenceReady={baselineIds.size > 0 && currentIds.size > 0}
+          evidenceReady={reviewReady}
         />
       </section>
 
-      <FindingsStep projectId={projectId} review={review} />
+      <FindingsStep projectId={projectId} review={review} evidenceReady={reviewReady} />
       <ActionsStep projectId={projectId} review={review} />
 
-      <section className="rounded-2xl border border-ui-border border-l-4 border-l-brand bg-surface p-5 shadow-sm">
+      <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p className="text-sm font-medium text-ink-muted">Step 5, Report</p>
@@ -123,28 +148,32 @@ export function AssuranceWorkspace({
               Prepare the management report
             </h2>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-ink-muted">
-              Continue after reviewing the three conditions and assigning
-              owners to required actions. The report uses this reporting
-              period instead of mixing all project history.
+              Continue after reviewing the three conditions and assigning owners to required actions. The report uses this reporting period instead of mixing all project history.
             </p>
           </div>
-          <Button asChild className="shrink-0 bg-brand text-brand-foreground hover:bg-brand/90">
-            <Link href={`/app/projects/${projectId}/reports?review=${review.id}`}>
-              Continue to report
-              <ArrowRight className="h-4 w-4" />
-            </Link>
-          </Button>
+          {reviewReady ? (
+            <Button asChild className="shrink-0 bg-brand text-brand-foreground hover:bg-brand/90">
+              <Link href={`/app/projects/${projectId}/reports?review=${review.id}`}>
+                Continue to report <ArrowRight className="h-4 w-4" />
+              </Link>
+            </Button>
+          ) : (
+            <Button disabled className="shrink-0">Resolve evidence requirements first</Button>
+          )}
         </div>
       </section>
     </div>
   );
 }
 
-function ReviewHeader({ review }: { review: AssuranceReview }) {
-  const currentIndex = Math.max(
-    0,
-    steps.findIndex((step) => step.toLowerCase() === review.currentStep),
-  );
+
+function ReviewHeader({ review, evidenceReady }: { review: AssuranceReview; evidenceReady: boolean }) {
+  const currentIndex = evidenceReady
+    ? Math.max(
+        0,
+        steps.findIndex((step) => step.toLowerCase() === review.currentStep),
+      )
+    : 0;
 
   return (
     <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
@@ -155,8 +184,8 @@ function ReviewHeader({ review }: { review: AssuranceReview }) {
             {review.title}
           </h2>
         </div>
-        <span className="w-fit rounded-full bg-plan-track px-3 py-1 text-xs font-semibold capitalize text-ink-muted">
-          {review.status.replaceAll("_", " ")}
+        <span className={`w-fit rounded-full px-3 py-1 text-xs font-semibold capitalize ${evidenceReady ? "bg-plan-track text-ink-muted" : "bg-status-warn-bg text-status-warn-text"}`}>
+          {evidenceReady ? review.status.replaceAll("_", " ") : "Needs evidence"}
         </span>
       </div>
       <ol className="mt-5 grid gap-2 sm:grid-cols-5">
@@ -184,14 +213,12 @@ function EvidenceStep({
   projectId,
   review,
   documents,
-  readyDocuments,
   baselineIds,
   currentIds,
 }: {
   projectId: string;
   review: AssuranceReview;
   documents: AssuranceDocument[];
-  readyDocuments: AssuranceDocument[];
   baselineIds: Set<string>;
   currentIds: Set<string>;
 }) {
@@ -206,6 +233,7 @@ function EvidenceStep({
         reporting month. Only completed documents can be selected.
       </p>
 
+
       {documents.length === 0 ? (
         <Link
           href={`/app/projects/${projectId}/documents`}
@@ -214,99 +242,23 @@ function EvidenceStep({
           Upload evidence before starting this review →
         </Link>
       ) : (
-        <form action={saveReviewEvidence} className="mt-4 space-y-4">
-          <input type="hidden" name="projectId" value={projectId} />
-          <input type="hidden" name="reviewId" value={review.id} />
-          <div className="grid gap-4 sm:grid-cols-2">
-            <EvidenceChoice
-              title="Approved baseline"
-              name="baselineDocumentIds"
-              documents={readyDocuments}
-              selectedIds={baselineIds}
-              disabledIds={currentIds}
-            />
-            <EvidenceChoice
-              title="Current period"
-              name="currentDocumentIds"
-              documents={readyDocuments}
-              selectedIds={currentIds}
-              disabledIds={baselineIds}
-            />
-          </div>
-          {documents.some(
-            (document) => document.processingStatus !== "completed",
-          ) && (
-            <div className="rounded-lg bg-status-warn-bg p-3 text-xs leading-5 text-status-warn-text">
-              {documents.filter(
-                (document) => document.processingStatus !== "completed",
-              ).length} document(s) are unavailable because processing is not
-              complete. Open the Evidence Library to see the reason or retry.
-            </div>
-          )}
-          <div className="flex flex-wrap gap-2">
-            <Button type="submit" variant="outline" className="border-ui-border bg-surface text-ink hover:bg-plan-track">
-              Save evidence selection
-            </Button>
-            <Button asChild type="button" variant="outline">
-              <Link href={`/app/projects/${projectId}/documents`}>
-                Open Evidence Library
-              </Link>
-            </Button>
-          </div>
-        </form>
+        <div className="mt-4 space-y-4">
+          <ReviewEvidenceFilters
+            projectId={projectId}
+            review={review}
+            documents={documents}
+            baselineIds={baselineIds}
+            currentIds={currentIds}
+          />
+          <Button asChild type="button" variant="outline">
+            <Link href={`/app/projects/${projectId}/documents`}>Open Evidence Library</Link>
+          </Button>
+        </div>
       )}
     </section>
   );
 }
 
-function EvidenceChoice({
-  title,
-  name,
-  documents,
-  selectedIds,
-  disabledIds,
-}: {
-  title: string;
-  name: string;
-  documents: AssuranceDocument[];
-  selectedIds: Set<string>;
-  disabledIds: Set<string>;
-}) {
-  return (
-    <fieldset className="rounded-xl border border-ui-border bg-base p-3">
-      <legend className="px-1 text-sm font-semibold text-ink">{title}</legend>
-      <div className="mt-1 max-h-56 space-y-2 overflow-auto">
-        {documents.length === 0 ? (
-          <p className="p-2 text-xs text-ink-muted">No completed documents yet.</p>
-        ) : (
-          documents.map((document) => (
-            <label
-              key={document.id}
-              className="flex cursor-pointer items-start gap-2 rounded-lg border border-ui-border bg-surface p-2.5 text-sm has-[:checked]:border-status-ok has-[:checked]:bg-status-ok-bg"
-            >
-              <input
-                type="checkbox"
-                name={name}
-                value={document.id}
-                defaultChecked={selectedIds.has(document.id)}
-                disabled={disabledIds.has(document.id)}
-                className="mt-1"
-              />
-              <span className="min-w-0">
-                <span className="block truncate font-medium text-ink">
-                  {document.title}
-                </span>
-                <span className="mt-0.5 block text-xs text-ink-muted">
-                  {documentTypeLabels[document.documentType]}, {document.documentDate ?? "No date"}
-                </span>
-              </span>
-            </label>
-          ))
-        )}
-      </div>
-    </fieldset>
-  );
-}
 
 function AnalysisStep({
   projectId,
@@ -383,9 +335,11 @@ function AnalysisDomain({
 function FindingsStep({
   projectId,
   review,
+  evidenceReady,
 }: {
   projectId: string;
   review: AssuranceReview;
+  evidenceReady: boolean;
 }) {
   return (
     <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
@@ -399,14 +353,18 @@ function FindingsStep({
             No health percentage. Missing evidence remains visibly incomplete.
           </p>
         </div>
-        {review.findings.length > 0 && (
+        {evidenceReady && review.findings.length > 0 && (
           <span className={`w-fit rounded-full px-3 py-1 text-xs font-semibold ${overallTone(review.findings)}`}>
             {overallLabel(review.findings)}
           </span>
         )}
       </div>
 
-      {review.findings.length === 0 ? (
+      {!evidenceReady ? (
+        <div className="mt-4 rounded-xl border border-dashed border-ui-border p-6 text-sm text-ink-muted">
+          Findings are not current until completed Approved Baseline and Current Period evidence is available.
+        </div>
+      ) : review.findings.length === 0 ? (
         <div className="mt-4 rounded-xl border border-dashed border-ui-border p-6 text-sm text-ink-muted">
           Save evidence and run the analysis to create findings.
         </div>
@@ -462,6 +420,23 @@ function FindingCard({
             {finding.sourceExcerpts.map((source, index) => (
               <p key={`${source.role}-${index}`}>
                 <span className="font-semibold capitalize text-ink">{source.role}:</span>{" "}
+                {source.documentId ? (
+                  <a
+                    className="font-semibold text-brand underline"
+                    href={`/app/projects/${projectId}/documents?document=${source.documentId}#document-${source.documentId}`}
+                  >
+                    {source.documentTitle ?? "Source document"}
+                  </a>
+                ) : null}
+                {(source.pageNumber || source.sectionLabel) && (
+                  <span>
+                    {" · "}
+                    {[source.pageNumber ? `page ${source.pageNumber}` : null, source.sectionLabel]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </span>
+                )}
+                <br />
                 {source.excerpt}
               </p>
             ))}

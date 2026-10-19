@@ -3,7 +3,7 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## Supabase job polling\nRuns every 15 seconds and processes the oldest queued parse_document job.\n\nRequired env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, XASS_DOCUMENT_WORKER_URL, XASS_WORKER_SECRET.",
+        "content": "## Supabase job polling\nRuns every 60 seconds. The atomic database claim returns at most one queued parse_document job per poll and caps active jobs at two.\n\nRequired env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, XASS_DOCUMENT_WORKER_URL, XASS_WORKER_SECRET.",
         "height": 260,
         "width": 380
       },
@@ -18,7 +18,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const input = $input.first()?.json;\nif (!input) return [];\n\nconst rows = Array.isArray(input)\n  ? input\n  : Array.isArray(input.body)\n    ? input.body\n    : input.id\n      ? [input]\n      : [];\n\nconst record = rows[0];\nif (!record) return [];\n\nreturn [{\n  json: {\n    job_id: record.id,\n    project_id: record.project_id,\n    document_id: record.document_id,\n    job_type: record.job_type,\n    status: record.status,\n    metadata: record.metadata ?? {},\n    valid: Boolean(\n      record.id &&\n      record.project_id &&\n      record.document_id &&\n      record.job_type === 'parse_document' &&\n      record.status === 'queued'\n    )\n  }\n}];"
+        "jsCode": "const input = $input.first()?.json;\nif (!input) return [];\nconst rows = Array.isArray(input) ? input : Array.isArray(input.body) ? input.body : input.id ? [input] : [];\nreturn rows.filter((record) => record?.status === 'processing' && record.job_type === 'parse_document').map((record) => ({ json: { job_id: record.id, project_id: record.project_id, document_id: record.document_id, job_type: record.job_type, status: record.status, metadata: record.metadata ?? {}, valid: Boolean(record.id && record.project_id && record.document_id) } }));"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -60,85 +60,7 @@
         80
       ],
       "id": "86445153-b770-43af-b32b-5e4da9b834cf",
-      "name": "Is Queued Parse Job"
-    },
-    {
-      "parameters": {
-        "method": "PATCH",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/ai_jobs?id=eq.' + $json.job_id + '&status=eq.queued' }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            },
-            {
-              "name": "Prefer",
-              "value": "return=representation"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ { status: 'processing', attempt_count: Number($json.metadata?.attempt_count ?? 0) + 1, claimed_at: new Date().toISOString(), lease_expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(), error_code: null, error_message: null, updated_at: new Date().toISOString(), metadata: { ...($json.metadata ?? {}), attempt_count: Number($json.metadata?.attempt_count ?? 0) + 1, claimed_by: 'n8n', claimed_at: new Date().toISOString() } } }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        40,
-        -40
-      ],
-      "id": "29e3cc0a-10e4-4012-9f43-4ec56d0f1ad5",
-      "name": "Claim Job"
-    },
-    {
-      "parameters": {
-        "method": "PATCH",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/documents?id=eq.' + $node['Normalize Job Payload'].json.document_id }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            },
-            {
-              "name": "Prefer",
-              "value": "return=representation"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ { processing_status: 'processing', processing_error: null } }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        280,
-        -40
-      ],
-      "id": "da4e3092-1c9a-42e3-b416-1cf9bec5f0c3",
-      "name": "Mark Document Processing"
+      "name": "Is Claimed Parse Job"
     },
     {
       "parameters": {
@@ -200,7 +122,7 @@
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ $json.worker_request }}",
-        "options": {}
+        "options": { "timeout": 10800000 }
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
@@ -209,10 +131,7 @@
         -40
       ],
       "id": "2f0b3d29-20fb-448f-bb3a-8703f90b4e99",
-      "name": "Call Document Worker",
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 5000
+      "name": "Call Document Worker"
     },
     {
       "parameters": {
@@ -231,7 +150,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const result = $input.first().json;\nconst requestContext = $node['Build Worker Request'].json;\nconst { project_id, document_id, job_id, document } = requestContext;\n\nconst chunks = (result.chunks ?? []).map((chunk, index) => ({\n  project_id,\n  document_id,\n  chunk_index: Number.isInteger(chunk.chunk_index) ? chunk.chunk_index : index,\n  chunk_text: String(chunk.chunk_text ?? chunk.text ?? '').trim(),\n  page_number: chunk.page_number ?? null,\n  section_label: chunk.section_label ?? null,\n  parser_metadata: chunk.parser_metadata ?? { source: 'document_worker' }\n})).filter((chunk) => chunk.chunk_text.length > 0);\n\nconst facts = (result.facts ?? []).map((fact, index) => ({\n  fact_index: index,\n  project_id,\n  fact_type: fact.fact_type,\n  extracted_text: String(fact.extracted_text ?? fact.text ?? '').trim(),\n  original_value: String(fact.original_value ?? fact.extracted_text ?? fact.text ?? '').trim(),\n  confidence: Math.max(0, Math.min(1, Number(fact.confidence ?? 0.65))),\n  confirmation_state: 'ai_extracted',\n  evidence_excerpt: fact.excerpt ?? fact.evidence_excerpt ?? null,\n  evidence_chunk_index: Number.isInteger(fact.evidence_chunk_index) ? fact.evidence_chunk_index : null\n})).filter((fact) => ['risk', 'issue', 'milestone', 'decision', 'owner_action'].includes(fact.fact_type) && fact.extracted_text.length > 0);\n\nconst summary = result.summary?.summary_text ? {\n  project_id,\n  summary_text: String(result.summary.summary_text),\n  confidence: Math.max(0, Math.min(1, Number(result.summary.confidence ?? 0.65))),\n  quality_warning: result.summary.quality_warning ?? null,\n  selected_document_ids: [document_id],\n  metadata: {\n    generated_by: 'n8n_document_worker',\n    job_id,\n    document_title: document.title,\n    evidence_count: chunks.length\n  }\n} : null;\n\nconst healthSnapshots = (result.health_snapshots ?? []).map((snapshot) => ({\n  project_id,\n  dimension: snapshot.dimension,\n  score: snapshot.score ?? null,\n  status: snapshot.status ?? 'insufficient_evidence',\n  evidence_coverage: snapshot.evidence_coverage ?? null,\n  status_text: String(snapshot.status_text ?? snapshot.status ?? 'Insufficient evidence'),\n  snapshot_date: snapshot.snapshot_date ?? document.document_date ?? document.created_at?.slice(0, 10) ?? new Date().toISOString().slice(0, 10),\n  source_summary: snapshot.source_summary ?? document.title\n})).filter((snapshot) => ['overall', 'schedule', 'cost', 'risk', 'governance', 'audit_readiness'].includes(snapshot.dimension));\n\nconst alerts = (result.alerts ?? []).map((alert) => ({\n  project_id,\n  severity: alert.severity ?? 'medium',\n  impacted_area: String(alert.impacted_area ?? alert.area ?? 'Document intelligence'),\n  explanation: String(alert.explanation ?? alert.title ?? ''),\n  evidence_count: Number(alert.evidence_count ?? 1),\n  recommended_action: String(alert.recommended_action ?? 'Review the source document and assign an owner.'),\n  source_path: alert.source_path ?? `/app/projects/${project_id}/documents?document=${document_id}`\n})).filter((alert) => ['low', 'medium', 'high', 'critical'].includes(alert.severity) && alert.explanation.length > 0);\n\nconst actions = (result.actions ?? result.recommended_actions ?? []).map((action) => ({\n  project_id,\n  title: String(action.title ?? action.action ?? '').trim(),\n  owner_name: action.owner_name ?? action.owner_or_function ?? null,\n  due_date: action.due_date ?? null,\n  priority: action.priority ?? 'medium',\n  status: action.status ?? 'open',\n  source_path: action.source_path ?? `/app/projects/${project_id}/anomalies`\n})).filter((action) => ['low', 'medium', 'high'].includes(action.priority) && action.title.length > 0);\n\nconst anomalies = (result.anomalies ?? []).map((anomaly) => ({\n  project_id,\n  category: anomaly.category ?? 'risk',\n  missing_field: anomaly.missing_field ?? null,\n  severity: anomaly.severity ?? 'medium',\n  status: anomaly.status ?? 'open',\n  title: String(anomaly.title ?? '').trim(),\n  affected_item: String(anomaly.affected_item ?? anomaly.affectedItem ?? document.title ?? '').trim(),\n  explanation: String(anomaly.explanation ?? '').trim(),\n  impact: String(anomaly.impact ?? 'Evidence requires project assurance review.').trim(),\n  impact_rating: String(anomaly.impact_rating ?? anomaly.impactRating ?? 'Medium').trim(),\n  recommended_action: String(anomaly.recommended_action ?? anomaly.recommendedAction ?? 'Review the source evidence and assign an owner.').trim(),\n  suggested_owners: Array.isArray(anomaly.suggested_owners) ? anomaly.suggested_owners : [],\n  evidence_count: Number(anomaly.evidence_count ?? 1),\n  absence_type: anomaly.absence_type ?? 'not_applicable',\n  rationale: String(anomaly.rationale ?? 'Generated from document processing output.').trim(),\n  source_path: anomaly.source_path ?? `/app/projects/${project_id}/documents?document=${document_id}`\n})).filter((anomaly) =>\n  ['cost', 'schedule', 'risk', 'governance', 'scope', 'accountability'].includes(anomaly.category) &&\n  ['low', 'medium', 'high', 'critical'].includes(anomaly.severity) &&\n  ['not_found_in_evidence', 'confirmed_missing', 'not_applicable'].includes(anomaly.absence_type) &&\n  anomaly.title.length > 0 &&\n  anomaly.affected_item.length > 0 &&\n  anomaly.explanation.length > 0\n);\n\nreturn [\n  {\n    json: {\n      project_id,\n      document_id,\n      job_id,\n      document,\n      chunks,\n      extraction_run: {\n        project_id,\n        document_id,\n        ai_job_id: job_id,\n        status: 'processing',\n        metadata: {\n          source: 'n8n_document_processing',\n          worker: result.worker ?? 'external',\n          chunk_count: chunks.length,\n          fact_count: facts.length\n        }\n      },\n      facts,\n      summary,\n      summary_sources: summary ? chunks.slice(0, 5).map((chunk) => ({\n        project_id,\n        document_id,\n        excerpt: chunk.chunk_text.slice(0, 280),\n        confidence: summary.confidence\n      })) : [],\n      health_snapshots: healthSnapshots,\n      alerts,\n      actions,\n      anomalies\n    }\n  }\n];"
+        "jsCode": "const result = $input.first().json;\nconst { project_id, document_id, job_id, document } = $node['Build Worker Request'].json;\nconst chunks = (result.chunks ?? []).map((chunk, index) => ({ project_id, document_id, chunk_index: Number.isInteger(chunk.chunk_index) ? chunk.chunk_index : index, chunk_text: String(chunk.chunk_text ?? chunk.text ?? '').trim(), page_number: chunk.page_number ?? null, section_label: chunk.section_label ?? null, parser_metadata: chunk.parser_metadata ?? { source: 'document_worker' } })).filter((chunk) => chunk.chunk_text.length > 0);\nconst facts = (result.facts ?? []).map((fact, fact_index) => ({ fact_index, project_id, fact_type: fact.fact_type, extracted_text: String(fact.extracted_text ?? fact.text ?? '').trim(), original_value: String(fact.original_value ?? fact.extracted_text ?? fact.text ?? '').trim(), confidence: Math.max(0, Math.min(1, Number(fact.confidence))), confirmation_state: 'ai_extracted', evidence_excerpt: fact.excerpt ?? fact.evidence_excerpt, evidence_chunk_index: fact.evidence_chunk_index }));\nconst summary = result.summary?.summary_text ? { project_id, summary_text: String(result.summary.summary_text), confidence: Number(result.summary.confidence), quality_warning: result.summary.quality_warning ?? null, selected_document_ids: [document_id], metadata: { generated_by: 'n8n_document_worker', job_id, document_title: document.title, evidence_count: chunks.length } } : null;\nconst dimensions = ['overall', 'schedule', 'cost', 'risk', 'governance', 'audit_readiness'];\nconst health_snapshots = (result.health_snapshots ?? []).map((snapshot) => ({ project_id, dimension: snapshot.dimension, score: snapshot.score ?? null, status: snapshot.status, evidence_coverage: snapshot.evidence_coverage ?? null, status_text: snapshot.status_text, snapshot_date: snapshot.snapshot_date, source_summary: snapshot.source_summary })).filter((snapshot) => dimensions.includes(snapshot.dimension) && snapshot.snapshot_date && snapshot.source_summary);\nconst alerts = (result.alerts ?? []).map((alert) => ({ project_id, severity: alert.severity, impacted_area: String(alert.impacted_area ?? alert.area ?? ''), explanation: String(alert.explanation ?? alert.title ?? ''), evidence_count: Number(alert.evidence_count ?? 1), recommended_action: String(alert.recommended_action ?? ''), source_path: alert.source_path ?? `/app/projects/${project_id}/documents?document=${document_id}` })).filter((alert) => ['low', 'medium', 'high', 'critical'].includes(alert.severity) && alert.explanation.length > 0);\nconst actions = (result.actions ?? result.recommended_actions ?? []).map((action) => ({ project_id, title: String(action.title ?? action.action ?? '').trim(), owner_name: action.owner_name ?? action.owner_or_function ?? null, due_date: action.due_date ?? null, priority: action.priority, status: action.status ?? 'open', source_path: action.source_path ?? `/app/projects/${project_id}/anomalies` })).filter((action) => ['low', 'medium', 'high'].includes(action.priority) && action.title.length > 0);\nconst anomalies = (result.anomalies ?? []).map((anomaly) => ({ project_id, category: anomaly.category, missing_field: anomaly.missing_field ?? null, severity: anomaly.severity, status: anomaly.status ?? 'open', title: String(anomaly.title ?? '').trim(), affected_item: String(anomaly.affected_item ?? anomaly.affectedItem ?? '').trim(), explanation: String(anomaly.explanation ?? '').trim(), impact: String(anomaly.impact ?? '').trim(), impact_rating: String(anomaly.impact_rating ?? anomaly.impactRating ?? '').trim(), recommended_action: String(anomaly.recommended_action ?? anomaly.recommendedAction ?? '').trim(), suggested_owners: Array.isArray(anomaly.suggested_owners) ? anomaly.suggested_owners : [], evidence_count: Number(anomaly.evidence_count ?? 1), absence_type: anomaly.absence_type, rationale: String(anomaly.rationale ?? '').trim(), source_path: anomaly.source_path ?? `/app/projects/${project_id}/documents?document=${document_id}` })).filter((anomaly) => ['cost', 'schedule', 'risk', 'governance', 'scope', 'accountability'].includes(anomaly.category) && ['low', 'medium', 'high', 'critical'].includes(anomaly.severity) && ['not_found_in_evidence', 'confirmed_missing', 'not_applicable'].includes(anomaly.absence_type) && anomaly.title.length > 0 && anomaly.affected_item.length > 0 && anomaly.explanation.length > 0);\nreturn [{ json: { project_id, document_id, job_id, document, processing_status: result.processing_status, processing_error: result.processing_error ?? null, chunks, facts, summary, summary_sources: (result.summary_sources ?? []).map((source) => ({ project_id, document_id, evidence_chunk_index: source.evidence_chunk_index, excerpt: source.excerpt, confidence: source.confidence })), health_snapshots, alerts, actions, anomalies, extraction_run: { project_id, document_id, ai_job_id: job_id, status: 'processing', metadata: { source: 'n8n_document_processing', worker: result.worker ?? 'external', chunk_count: chunks.length, fact_count: facts.length } } } }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -244,8 +163,8 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/document_chunks?on_conflict=document_id,chunk_index' }}",
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/document_chunks?document_id=eq.' + $node['Build Supabase Rows'].json.document_id + '&select=id,chunk_index,chunk_text' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -260,16 +179,10 @@
             {
               "name": "Content-Type",
               "value": "application/json"
-            },
-            {
-              "name": "Prefer",
-              "value": "resolution=merge-duplicates,return=representation"
             }
           ]
         },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ $json.chunks }}",
+        "sendBody": false,
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -279,7 +192,7 @@
         -40
       ],
       "id": "2195daef-eb49-4c8a-8dff-b78d61315f8e",
-      "name": "Upsert Document Chunks"
+      "name": "Get Persisted Document Chunks"
     },
     {
       "parameters": {
@@ -387,7 +300,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const insertedFacts = $input.all().map((item) => item.json);\nconst rows = $items('Build Supabase Rows')[0].json;\nconst chunks = $items('Upsert Document Chunks').map(item => item.json);\nconst factEvidence = $items('Build Fact Inserts')[0].json.fact_evidence ?? [];\n\nconst links = insertedFacts.map((fact, index) => {\n  const evidence = factEvidence[index] ?? {};\n  const chunk = Number.isInteger(evidence.evidence_chunk_index)\n    ? chunks.find((candidate) => candidate.chunk_index === evidence.evidence_chunk_index)\n    : null;\n\n  return {\n    project_id: rows.project_id,\n    extracted_fact_id: fact.id,\n    document_id: rows.document_id,\n    document_chunk_id: chunk?.id ?? null,\n    excerpt: evidence.evidence_excerpt ?? chunk?.chunk_text?.slice(0, 280) ?? null,\n    confidence: fact.confidence ?? 0.65\n  };\n});\n\nreturn [{ json: { links } }];"
+        "jsCode": "const insertedFacts = $input.all().map((item) => item.json);\nconst rows = $items('Build Supabase Rows')[0].json;\nconst chunks = $items('Get Persisted Document Chunks').map(item => item.json);\nconst factEvidence = $items('Build Fact Inserts')[0].json.fact_evidence ?? [];\n\nconst links = insertedFacts.map((fact, index) => {\n  const evidence = factEvidence[index];\n  const chunk = Number.isInteger(evidence?.evidence_chunk_index)\n    ? chunks.find((candidate) => candidate.chunk_index === evidence.evidence_chunk_index)\n    : null;\n  const confidence = fact.confidence;\n  if (\n    !chunk?.id ||\n    typeof evidence?.evidence_excerpt !== 'string' ||\n    !evidence.evidence_excerpt ||\n    typeof chunk.chunk_text !== 'string' ||\n    !chunk.chunk_text.includes(evidence.evidence_excerpt) ||\n    typeof confidence !== 'number' ||\n    !Number.isFinite(confidence) ||\n    confidence < 0 ||\n    confidence > 1\n  ) {\n    throw new Error('No verified source citation or valid confidence for an extracted fact.');\n  }\n\n  return {\n    project_id: rows.project_id,\n    extracted_fact_id: fact.id,\n    document_id: rows.document_id,\n    document_chunk_id: chunk.id,\n    excerpt: evidence.evidence_excerpt,\n    confidence\n  };\n});\n\nreturn [{ json: { links } }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -474,7 +387,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const rawSummary = $input.first().json;\nconst summary = Array.isArray(rawSummary) ? rawSummary[0] : rawSummary;\nconst rows = $items('Build Supabase Rows')[0].json;\nconst chunks = $items('Upsert Document Chunks').map(item => item.json);\n\nif (!summary?.id) {\n  return [{ json: { sources: [] } }];\n}\n\nconst sources = rows.summary_sources.map((source, index) => ({\n  project_id: rows.project_id,\n  summary_id: summary.id,\n  document_id: rows.document_id,\n  document_chunk_id: chunks[index]?.id ?? null,\n  excerpt: source.excerpt,\n  confidence: source.confidence\n}));\n\nreturn [{ json: { sources } }];"
+        "jsCode": "const rawSummary = $input.first().json;\nconst summary = Array.isArray(rawSummary) ? rawSummary[0] : rawSummary;\nconst rows = $items('Build Supabase Rows')[0].json;\nconst chunks = $items('Get Persisted Document Chunks').map(item => item.json);\n\nif (!summary?.id) {\n  return [{ json: { sources: [] } }];\n}\n\nconst sources = rows.summary_sources.map((source) => {\n  const chunk = chunks.find((candidate) => candidate.chunk_index === source.evidence_chunk_index);\n  if (!chunk?.id) throw new Error('Validated summary source chunk was not returned by storage.');\n  return {\n    project_id: rows.project_id,\n    summary_id: summary.id,\n    document_id: rows.document_id,\n    document_chunk_id: chunk.id,\n    excerpt: source.excerpt,\n    confidence: source.confidence\n  };\n});\n\nreturn [{ json: { sources } }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -722,7 +635,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { processing_status: 'completed', processing_error: null } }}",
+        "jsonBody": "={{ { processing_status: $items('Build Supabase Rows')[0].json.processing_status, processing_error: $items('Build Supabase Rows')[0].json.processing_error } }}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -803,12 +716,12 @@
         80
       ],
       "id": "caa7a203-53db-45fa-af23-60895f6ef101",
-      "name": "Poll Every 15 Seconds"
+      "name": "Poll Every 60 Seconds"
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/rpc/recover_and_fetch_document_job' }}",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/rpc/claim_next_available_document_job' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -842,11 +755,11 @@
         80
       ],
       "id": "b44fd096-da89-4fb2-953e-68d248138a43",
-      "name": "Fetch Oldest Queued Job"
+      "name": "Claim Available Document Job"
     },
     {
       "parameters": {
-        "jsCode": "const input = $input.first()?.json;\nconst rows = Array.isArray(input)\n  ? input\n  : Array.isArray(input?.body)\n    ? input.body\n    : input?.id\n      ? [input]\n      : [];\n\nconst claimed = rows[0];\nif (!claimed?.id || claimed.status !== 'processing') return [];\n\nreturn [{ json: claimed }];"
+        "jsCode": "const input = $input.first()?.json;\nconst rows = Array.isArray(input) ? input : Array.isArray(input?.body) ? input.body : input?.id ? [input] : [];\nreturn rows.filter((claimed) => claimed?.id && claimed.status === 'processing').map((claimed) => ({ json: { job_id: claimed.id, project_id: claimed.project_id, document_id: claimed.document_id, job_type: claimed.job_type, status: claimed.status, metadata: claimed.metadata ?? {} } }));"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -900,26 +813,14 @@
       "main": [
         [
           {
-            "node": "Is Queued Parse Job",
+            "node": "Is Claimed Parse Job",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Is Queued Parse Job": {
-      "main": [
-        [
-          {
-            "node": "Claim Job",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        []
-      ]
-    },
-    "Claim Job": {
+    "Is Claimed Parse Job": {
       "main": [
         [
           {
@@ -927,18 +828,8 @@
             "type": "main",
             "index": 0
           }
-        ]
-      ]
-    },
-    "Mark Document Processing": {
-      "main": [
-        [
-          {
-            "node": "Get Document",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        ],
+        []
       ]
     },
     "Get Document": {
@@ -978,14 +869,14 @@
       "main": [
         [
           {
-            "node": "Upsert Document Chunks",
+            "node": "Get Persisted Document Chunks",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Upsert Document Chunks": {
+    "Get Persisted Document Chunks": {
       "main": [
         [
           {
@@ -1132,7 +1023,7 @@
       "main": [
         [
           {
-            "node": "Complete Job",
+            "node": "Mark Document Complete",
             "type": "main",
             "index": 0
           }
@@ -1141,18 +1032,18 @@
     },
     "Complete Job": {
       "main": [
-        [
-          {
-            "node": "Mark Document Complete",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        []
       ]
     },
     "Mark Document Complete": {
       "main": [
-        []
+        [
+          {
+            "node": "Complete Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Insert Anomalies": {
@@ -1166,18 +1057,18 @@
         ]
       ]
     },
-    "Poll Every 15 Seconds": {
+    "Poll Every 60 Seconds": {
       "main": [
         [
           {
-            "node": "Fetch Oldest Queued Job",
+            "node": "Claim Available Document Job",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Fetch Oldest Queued Job": {
+    "Claim Available Document Job": {
       "main": [
         [
           {
@@ -1203,7 +1094,7 @@
       "main": [
         [
           {
-            "node": "Mark Document Processing",
+            "node": "Get Document",
             "type": "main",
             "index": 0
           }

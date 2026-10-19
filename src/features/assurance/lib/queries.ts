@@ -1,3 +1,4 @@
+import { resolveDocumentMetadata } from "@/features/documents/lib/metadata";
 import type {
   ReviewCondition,
   ReviewDomain,
@@ -12,13 +13,25 @@ export type AssuranceDocument = {
   id: string;
   title: string;
   documentType: DocumentType;
+  documentTypeHint: DocumentType | null;
+  suggestedDocumentType: DocumentType | null;
+  confirmedDocumentType: DocumentType | null;
   documentDate: string | null;
+  suggestedDocumentDate: string | null;
+  confirmedDocumentDate: string | null;
   processingStatus: ProcessingStatus;
   processingError: string | null;
   evidenceRole: "baseline" | "current" | "supporting" | null;
+  suggestedEvidenceRole: "baseline" | "current" | "supporting" | null;
+  confirmedEvidenceRole: "baseline" | "current" | "supporting" | null;
   classificationConfidence: number | null;
   classificationReason: string | null;
   detectedReportingPeriod: string | null;
+  confirmedReportingPeriod: string | null;
+  workstreamHint: string | null;
+  suggestedWorkstream: string | null;
+  workstream: string | null;
+  confirmedWorkstream: string | null;
 };
 
 export type AssuranceReview = {
@@ -45,7 +58,15 @@ export type AssuranceFinding = {
   currentValue: Record<string, unknown> | null;
   variance: Record<string, unknown> | null;
   requiredEvidence: string[];
-  sourceExcerpts: { role: "baseline" | "current"; excerpt: string }[];
+  sourceExcerpts: {
+    role: "baseline" | "current";
+    excerpt: string;
+    documentId?: string;
+    documentTitle?: string;
+    pageNumber?: number | null;
+    sectionLabel?: string | null;
+    sourceLocation?: Record<string, string | number> | null;
+  }[];
   confidence: number | null;
   confirmationState: string;
 };
@@ -110,7 +131,7 @@ export async function getAssuranceWorkspace(projectId: string) {
     supabase
       .from("documents")
       .select(
-        "id, title, document_type, document_date, processing_status, processing_error, evidence_role, classification_confidence, classification_reason, detected_reporting_period",
+        "id, title, document_type, document_type_hint, suggested_document_type, confirmed_document_type, document_date, document_date_hint, suggested_document_date, confirmed_document_date, processing_status, processing_error, evidence_role, suggested_evidence_role, confirmed_evidence_role, classification_confidence, classification_reason, detected_reporting_period, reporting_period_hint, confirmed_reporting_period, workstream_hint, suggested_workstream, workstream, confirmed_workstream",
       )
       .eq("project_id", projectId)
       .order("document_date", { ascending: false, nullsFirst: false })
@@ -128,18 +149,33 @@ export async function getAssuranceWorkspace(projectId: string) {
   if (reviewsResult.error) throw new Error(reviewsResult.error.message);
 
   const documents: AssuranceDocument[] = (documentsResult.data ?? []).map(
-    (row) => ({
-      id: row.id,
-      title: row.title,
-      documentType: row.document_type,
-      documentDate: row.document_date,
-      processingStatus: row.processing_status,
-      processingError: row.processing_error,
-      evidenceRole: row.evidence_role,
-      classificationConfidence: row.classification_confidence,
-      classificationReason: row.classification_reason,
-      detectedReportingPeriod: row.detected_reporting_period,
-    }),
+    (row) => {
+      const effective = resolveDocumentMetadata(row);
+      return {
+        id: row.id,
+        title: row.title,
+        documentType: effective.documentType,
+        documentTypeHint: row.document_type_hint,
+        suggestedDocumentType: row.suggested_document_type,
+        confirmedDocumentType: row.confirmed_document_type,
+        documentDate: effective.documentDate,
+        suggestedDocumentDate: row.suggested_document_date,
+        confirmedDocumentDate: row.confirmed_document_date,
+        processingStatus: row.processing_status,
+        processingError: row.processing_error,
+        evidenceRole: effective.evidenceRole,
+        suggestedEvidenceRole: row.suggested_evidence_role,
+        confirmedEvidenceRole: row.confirmed_evidence_role,
+        classificationConfidence: row.classification_confidence,
+        classificationReason: row.classification_reason,
+        detectedReportingPeriod: effective.reportingPeriod,
+        confirmedReportingPeriod: row.confirmed_reporting_period,
+        workstreamHint: row.workstream_hint,
+        suggestedWorkstream: row.suggested_workstream,
+        workstream: effective.workstream,
+        confirmedWorkstream: row.confirmed_workstream,
+      };
+    },
   );
 
   const reviewRows = (reviewsResult.data ?? []) as ReviewRow[];

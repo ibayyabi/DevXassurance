@@ -1,7 +1,7 @@
 import { Suspense } from "react";
 
+import { loadLatestAssistantConversation } from "@/features/assistant/actions/assistant-actions";
 import { AssistantChat } from "@/features/assistant/components/assistant-chat";
-import { requireProjectMembership } from "@/features/projects/lib/queries";
 
 export default function AssistantPage({
   params,
@@ -21,9 +21,9 @@ async function AssistantContent({
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = await params;
-  await requireProjectMembership(projectId);
+  const initialState = await loadLatestAssistantConversation(projectId);
 
-  return <AssistantChat projectId={projectId} />;
+  return <AssistantChat projectId={projectId} initialState={initialState} />;
 }
 
 function AssistantLoading() {

@@ -1,295 +1,98 @@
 "use server";
 
+import {
+  parseDocumentTypeHint,
+  parseOptionalDate,
+  parseOptionalReportingPeriod,
+  parseOptionalWorkstream,
+  persistConfirmedDocumentMetadata,
+  type ConfirmedMetadataChanges,
+} from "@/features/documents/lib/metadata";
+import { shouldPromoteReviewedDocument } from "@/features/assurance/lib/evidence-readiness";
+
 import { revalidatePath } from "next/cache";
 
 import { requireProjectMembership } from "@/features/projects/lib/queries";
 import { canManageProject } from "@/features/projects/lib/roles";
-import {
-  documentTypes,
-  type DocumentType,
-} from "@/features/documents/lib/constants";
-import {
-  isProcessableEvidenceFile,
-  isSupportedEvidenceFile,
-  normalizedMimeType,
-} from "@/features/documents/lib/file-types";
+import { documentTypes } from "@/features/documents/lib/constants";
 import { runOllamaChat } from "@/lib/ai/ollama";
 
-export type ActionState = {
-  ok: boolean;
-  message: string;
-};
 
-const defaultFailure =
-  "The document could not be uploaded. Check the file and try again.";
-
-export async function uploadDocument(
-  _previousState: ActionState,
-  formData: FormData,
-): Promise<ActionState> {
-  const projectId = String(formData.get("projectId") ?? "");
-  const requestedTitle = String(formData.get("title") ?? "").trim();
-  const documentDate = String(formData.get("documentDate") ?? "").trim();
-  const documentType = String(formData.get("documentType") ?? "");
-  const files = formData
-    .getAll("file")
-    .filter((file): file is File => file instanceof File && file.size > 0);
-  const fileLastModifiedValues = formData.getAll("fileLastModified").map(String);
-  const effectiveDocumentType = isDocumentType(documentType)
-    ? documentType
-    : "progress_report";
-
-  if (!projectId) {
-    return { ok: false, message: "Project is required for evidence upload." };
-  }
-
-  if (files.length === 0) {
-    return { ok: false, message: "Choose at least one evidence file to upload." };
-  }
-
-  const unsupportedFiles = files.filter((file) => !isSupportedEvidenceFile(file));
-
-  if (unsupportedFiles.length > 0) {
-    return {
-      ok: false,
-      message:
-        `Unsupported file type: ${unsupportedFiles
-          .map((file) => file.name)
-          .join(", ")}. Supported evidence files: PDF, DOCX, XLSX, CSV, TXT, PowerPoint, PNG, JPG, or WebP.`,
-    };
-  }
-
-  const { supabase, user, membership } = await requireProjectMembership(projectId);
-
-  if (!canManageProject(membership.role)) {
-    return {
-      ok: false,
-      message: "Your project role cannot upload evidence documents.",
-    };
-  }
-
-  const results = await Promise.all(
-    files.map((file, index) =>
-      uploadEvidenceFile({
-        projectId,
-        uploaderId: user.id,
-        file,
-        title:
-          files.length === 1
-            ? requestedTitle || titleFromFileName(file.name)
-            : titleFromFileName(file.name),
-        documentDate:
-          documentDate ||
-          timestampIsoDate(fileLastModifiedValues[index]) ||
-          fileLastModifiedIsoDate(file) ||
-          todayIsoDate(),
-        documentType: effectiveDocumentType,
-        supabase,
-      }),
-    ),
-  );
-
-  revalidatePath(`/app/projects/${projectId}/documents`);
-
-  const uploaded = results.filter((result) => result.ok);
-  const failed = results.filter((result) => !result.ok);
-
-  if (uploaded.length === 0) {
-    return {
-      ok: false,
-      message:
-        failed[0]?.message ??
-        "No files were uploaded. Check the files and try again.",
-    };
-  }
-
-  const queuedCount = uploaded.filter((result) => result.queued).length;
-  const reviewCount = uploaded.length - queuedCount;
-  const failureNote =
-    failed.length > 0 ? ` ${failed.length} file(s) need retry.` : "";
-
-  return {
-    ok: true,
-    message:
-      `${uploaded.length} file(s) uploaded. ${queuedCount} queued for processing, ${reviewCount} stored for review.` +
-      failureNote,
-  };
-}
-
-type UploadEvidenceFileInput = {
-  projectId: string;
-  uploaderId: string;
-  file: File;
-  title: string;
-  documentDate: string;
-  documentType: DocumentType;
-  supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"];
-};
-
-type UploadEvidenceFileResult =
-  | {
-      ok: true;
-      queued: boolean;
-    }
-  | {
-      ok: false;
-      message: string;
-    };
-
-async function uploadEvidenceFile({
-  projectId,
-  uploaderId,
-  file,
-  title,
-  documentDate,
-  documentType,
-  supabase,
-}: UploadEvidenceFileInput): Promise<UploadEvidenceFileResult> {
-  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "-").toLowerCase();
-  const storagePath = `${projectId}/${crypto.randomUUID()}-${safeName}`;
-  const mimeType = normalizedMimeType(file);
-  const canProcessAutomatically = isProcessableEvidenceFile(file);
-
-  const { error: uploadError } = await supabase.storage
-    .from("project-evidence")
-    .upload(storagePath, file, {
-      contentType: mimeType,
-      upsert: false,
-    });
-
-  if (uploadError) {
-    return { ok: false, message: defaultFailure };
-  }
-
-  const { data: documentRecord, error: documentError } = await supabase
-    .from("documents")
-    .insert({
-      project_id: projectId,
-      uploader_id: uploaderId,
-      document_type: documentType,
-      title,
-      file_name: file.name,
-      file_size: file.size,
-      mime_type: mimeType,
-      storage_path: storagePath,
-      document_date: documentDate,
-      processing_status: canProcessAutomatically ? "uploaded" : "needs_review",
-      processing_error: canProcessAutomatically
-        ? null
-        : "File stored as reference evidence. Automated extraction supports PDF, TXT, CSV, DOCX, and XLSX files.",
-    })
-    .select("id")
-    .single();
-
-  if (documentError || !documentRecord) {
-    await supabase.storage.from("project-evidence").remove([storagePath]);
-
-    return { ok: false, message: defaultFailure };
-  }
-
-  if (!canProcessAutomatically) {
-    return { ok: true, queued: false };
-  }
-
-  const { error: jobError } = await supabase.from("ai_jobs").insert({
-    project_id: projectId,
-    document_id: documentRecord.id,
-    job_type: "parse_document",
-    status: "queued",
-    metadata: { source: "upload" },
-  });
-
-  if (jobError) {
-    await supabase
-      .from("documents")
-      .update({
-        processing_status: "needs_review",
-        processing_error:
-          "Document uploaded but processing could not be queued.",
-      })
-      .eq("id", documentRecord.id);
-
-    return { ok: true, queued: false };
-  }
-
-  await supabase
-    .from("documents")
-    .update({ processing_status: "queued" })
-    .eq("id", documentRecord.id);
-
-  return { ok: true, queued: true };
-}
-
-function titleFromFileName(fileName: string) {
-  return fileName.replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ").trim() || fileName;
-}
-
-function todayIsoDate() {
-  const parts = new Intl.DateTimeFormat("en", {
-    day: "2-digit",
-    month: "2-digit",
-    timeZone: process.env.TZ ?? "Asia/Jakarta",
-    year: "numeric",
-  }).formatToParts(new Date());
-  const valueByType = Object.fromEntries(
-    parts.map((part) => [part.type, part.value]),
-  );
-
-  return `${valueByType.year}-${valueByType.month}-${valueByType.day}`;
-}
-
-function fileLastModifiedIsoDate(file: File) {
-  return timestampIsoDate(file.lastModified);
-}
-
-function timestampIsoDate(value: unknown) {
-  const lastModified = Number(value);
-
-  if (!Number.isFinite(lastModified) || lastModified <= 0) {
-    return null;
-  }
-
-  return formatIsoDate(new Date(lastModified));
-}
-
-function formatIsoDate(date: Date) {
-  const parts = new Intl.DateTimeFormat("en", {
-    day: "2-digit",
-    month: "2-digit",
-    timeZone: process.env.TZ ?? "Asia/Jakarta",
-    year: "numeric",
-  }).formatToParts(date);
-  const valueByType = Object.fromEntries(
-    parts.map((part) => [part.type, part.value]),
-  );
-
-  return `${valueByType.year}-${valueByType.month}-${valueByType.day}`;
-}
 
 export async function updateDocumentClassification(
   formData: FormData,
 ): Promise<void> {
   const projectId = String(formData.get("projectId") ?? "");
   const documentId = String(formData.get("documentId") ?? "");
-  const documentType = String(formData.get("documentType") ?? "");
+  const documentType = parseDocumentTypeHint(
+    formData.get("documentType"),
+    documentTypes,
+  );
+  const evidenceRole = String(formData.get("evidenceRole") ?? "");
+  const dateProvided = formData.has("documentDate");
+  const periodProvided = formData.has("reportingPeriod");
+  const workstreamProvided = formData.has("workstream");
 
-  if (!projectId || !documentId || !isDocumentType(documentType)) {
+  if (
+    !projectId ||
+    !documentId ||
+    (!documentType &&
+      !["baseline", "current", "supporting"].includes(evidenceRole) &&
+      !dateProvided &&
+      !periodProvided &&
+      !workstreamProvided)
+  ) {
     return;
   }
 
-  const { supabase, membership } = await requireProjectMembership(projectId);
+  const { supabase, user, membership } = await requireProjectMembership(projectId);
 
   if (!canManageProject(membership.role)) {
     return;
   }
 
-  await supabase
-    .from("documents")
-    .update({ document_type: documentType })
-    .eq("id", documentId)
-    .eq("project_id", projectId);
-
+  const values: ConfirmedMetadataChanges["values"] = {};
+  if (documentType) values.documentType = documentType;
+  if (["baseline", "current", "supporting"].includes(evidenceRole)) {
+    values.evidenceRole = evidenceRole as ConfirmedMetadataChanges["values"]["evidenceRole"];
+  }
+  if (dateProvided) {
+    values.documentDate = parseOptionalDate(formData.get("documentDate"));
+  }
+  if (periodProvided) {
+    values.reportingPeriod = parseOptionalReportingPeriod(
+      formData.get("reportingPeriod"),
+    );
+  }
+  if (workstreamProvided) {
+    values.workstream = parseOptionalWorkstream(formData.get("workstream"));
+  }
+  const { data: updatedDocument, error: metadataError } = await persistConfirmedDocumentMetadata(supabase, {
+    projectId,
+    documentId,
+    userId: user.id,
+    values,
+  });
+  if (metadataError) throw new Error(metadataError.message);
+  if (!updatedDocument) throw new Error("Document metadata could not be saved. Refresh and try again.");
+  const [{ data: document }, { data: completedExtraction }] = await Promise.all([
+    supabase.from("documents").select("processing_status").eq("id", documentId).eq("project_id", projectId).maybeSingle(),
+    supabase.from("extraction_runs").select("id").eq("document_id", documentId).eq("project_id", projectId).eq("status", "completed").limit(1).maybeSingle(),
+  ]);
+  if (shouldPromoteReviewedDocument(
+    document?.processing_status ?? "",
+    Boolean(completedExtraction),
+    Boolean(values.documentType || values.evidenceRole),
+  )) {
+    const { error: promoteError } = await supabase.from("documents")
+      .update({ processing_status: "completed", processing_error: null })
+      .eq("id", documentId)
+      .eq("project_id", projectId)
+      .eq("processing_status", "needs_review");
+    if (promoteError) throw new Error(promoteError.message);
+  }
   revalidatePath(`/app/projects/${projectId}/documents`);
+  revalidatePath(`/app/projects/${projectId}/assurance`);
 }
 
 export async function retryDocumentProcessing(formData: FormData): Promise<void> {
@@ -450,133 +253,387 @@ export async function generateDocumentSummary(
   formData: FormData,
 ): Promise<void> {
   const projectId = String(formData.get("projectId") ?? "");
-  const selectedDocumentIds = formData
-    .getAll("documentIds")
-    .map(String)
-    .filter(Boolean);
+  const selectedDocumentIds = [...new Set(formData.getAll("documentIds").map(String).filter(Boolean))];
 
-  if (!projectId || selectedDocumentIds.length === 0) {
-    return;
-  }
+  if (!projectId || selectedDocumentIds.length === 0) return;
 
   const { supabase, membership } = await requireProjectMembership(projectId);
+  if (!canManageProject(membership.role)) return;
 
-  if (!canManageProject(membership.role)) {
-    return;
-  }
-
-  const { data: documents } = await supabase
+  const { data: documents, error: documentsError } = await supabase
     .from("documents")
-    .select("id, title, processing_status")
+    .select("id, processing_status")
     .eq("project_id", projectId)
     .in("id", selectedDocumentIds);
+  if (documentsError) throw new Error("Selected document status could not be read.");
 
-  const completedDocumentIds = (documents ?? [])
-    .filter((document) => document.processing_status === "completed")
-    .map((document) => document.id);
-
-  if (completedDocumentIds.length === 0) {
-    await supabase.from("document_summaries").insert({
-      project_id: projectId,
-      summary_text:
-        "No grounded summary was generated because the selected documents have not completed processing.",
-      confidence: 0.1,
-      quality_warning:
-        "Selected evidence is incomplete. Process documents before generating an assurance summary.",
-      selected_document_ids: selectedDocumentIds,
-      metadata: { generated_by: "app_guardrail", inferred_content: false },
-    });
-    revalidatePath(`/app/projects/${projectId}/documents`);
-    return;
+  const pageSize = 500;
+  const chunks: { id: string; document_id: string; chunk_index: number; section_label: string | null; chunk_text: string }[] = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await supabase
+      .from("document_chunks")
+      .select("id, document_id, chunk_index, section_label, chunk_text")
+      .eq("project_id", projectId)
+      .in("document_id", selectedDocumentIds)
+      .order("document_id")
+      .order("chunk_index")
+      .range(offset, offset + pageSize - 1);
+    if (error) throw new Error("Selected document source chunks could not be read.");
+    chunks.push(...(data ?? []));
+    if ((data ?? []).length < pageSize) break;
   }
 
-  const { data: chunks } = await supabase
-    .from("document_chunks")
-    .select("id, document_id, chunk_text")
-    .eq("project_id", projectId)
-    .in("document_id", completedDocumentIds)
-    .limit(5);
+  const documentsById = new Map((documents ?? []).map((document) => [document.id, document]));
+  const chunksByDocument = new Map<string, number>();
+  for (const chunk of chunks) {
+    chunksByDocument.set(chunk.document_id, (chunksByDocument.get(chunk.document_id) ?? 0) + 1);
+  }
+  const documentCoverage = selectedDocumentIds.map((id, document_index) => {
+    const document = documentsById.get(id);
+    return {
+      document_index,
+      status: document?.processing_status ?? "not_found",
+      source_chunk_count: chunksByDocument.get(id) ?? 0,
+    };
+  });
+  const coverageWarnings: string[] = [];
+  const missingDocuments = documentCoverage.filter((document) => document.status === "not_found").length;
+  const reviewDocuments = documentCoverage.filter((document) => document.status === "needs_review").length;
+  const incompleteDocuments = documentCoverage.filter((document) =>
+    document.status !== "not_found" &&
+    document.status !== "completed" &&
+    document.status !== "needs_review",
+  ).length;
+  const documentsWithoutChunks = documentCoverage.filter((document) =>
+    document.status !== "not_found" && document.source_chunk_count === 0,
+  ).length;
+  if (missingDocuments) coverageWarnings.push(`${missingDocuments} selected document(s) were not found.`);
+  if (reviewDocuments) coverageWarnings.push(`${reviewDocuments} selected document(s) are marked needs_review; their available source chunks are included.`);
+  if (incompleteDocuments) coverageWarnings.push(`${incompleteDocuments} selected document(s) are not completed; available source coverage is partial.`);
+  if (documentsWithoutChunks) coverageWarnings.push(`${documentsWithoutChunks} selected document(s) have no parsed source chunks.`);
 
-  const evidence = chunks ?? [];
-  const llmSummary =
-    evidence.length > 0
-      ? await generateGroundedSummary(completedDocumentIds.length, evidence)
-      : null;
-  const summaryText =
-    llmSummary ??
-    (evidence.length > 0
-      ? `Grounded summary from ${completedDocumentIds.length} processed document(s): ${evidence
-          .map((chunk) => chunk.chunk_text)
-          .join(" ")
-          .slice(0, 700)}`
-      : "Processed documents exist, but no source chunks are available for a grounded summary.");
-
-  const { data: summary } = await supabase
+  const evidence = chunks;
+  const generated = evidence.length
+    ? await generateGroundedSummary(evidence, documentCoverage, selectedDocumentIds)
+    : {
+        summary_text: "No grounded summary was generated because no selected source chunks are available.",
+        confidence: 0,
+        sources: [],
+        provider: null,
+        model: null,
+        qualityWarnings: ["No selected source chunks are available for a grounded summary."],
+      };
+  const qualityWarning = [...new Set([...coverageWarnings, ...generated.qualityWarnings])].join(" ") || null;
+  const citedChunksByDocument = new Map<string, number>();
+  for (const source of generated.sources) {
+    citedChunksByDocument.set(
+      source.document_id,
+      (citedChunksByDocument.get(source.document_id) ?? 0) + 1,
+    );
+  }
+  const persistedDocumentCoverage = documentCoverage.map((document) => {
+    const documentId = selectedDocumentIds[document.document_index];
+    return {
+      document_id: documentId,
+      status: document.status,
+      source_chunk_count: document.source_chunk_count,
+      cited_chunk_count: citedChunksByDocument.get(documentId) ?? 0,
+    };
+  });
+  const { data: summary, error: summaryError } = await supabase
     .from("document_summaries")
     .insert({
       project_id: projectId,
-      summary_text: summaryText,
-      confidence: evidence.length > 0 ? 0.72 : 0.25,
-      quality_warning:
-        llmSummary
-          ? null
-          : evidence.length > 0
-            ? "Generated with grounded fallback logic because the configured LLM response was unavailable."
-            : "No source chunks were available, so confidence is low.",
+      summary_text: generated.summary_text,
+      confidence: generated.confidence,
+      quality_warning: qualityWarning,
       selected_document_ids: selectedDocumentIds,
       metadata: {
-        generated_by: llmSummary ? (process.env.XASS_LLM_PROVIDER ?? "ollama") : "app_guardrail",
-        model: llmSummary ? configuredLlmModel() : null,
+        generated_by: generated.sources.length ? generated.provider : "app_guardrail",
+        model: generated.model,
         inferred_content: false,
+        selected_document_count: selectedDocumentIds.length,
+        source_chunk_count: evidence.length,
+        cited_chunk_count: generated.sources.length,
+        document_coverage: persistedDocumentCoverage,
       },
     })
     .select("id")
     .single();
+  if (summaryError || !summary) throw new Error("The grounded document summary could not be saved.");
 
-  if (summary && evidence.length > 0) {
-    await supabase.from("document_summary_sources").insert(
-      evidence.map((chunk) => ({
+  if (generated.sources.length) {
+    const { error: sourcesError } = await supabase.from("document_summary_sources").insert(
+      generated.sources.map((source) => ({
         project_id: projectId,
         summary_id: summary.id,
-        document_id: chunk.document_id,
-        document_chunk_id: chunk.id,
-        excerpt: chunk.chunk_text.slice(0, 280),
-        confidence: 0.72,
+        document_id: source.document_id,
+        document_chunk_id: source.chunk_id,
+        excerpt: source.excerpt,
+        confidence: generated.confidence,
       })),
     );
+    if (sourcesError) throw new Error("Grounded summary citations could not be saved.");
   }
 
   revalidatePath(`/app/projects/${projectId}/documents`);
 }
 
+
 async function generateGroundedSummary(
-  completedDocumentCount: number,
-  evidence: { chunk_text: string }[],
+  evidence: { id: string; document_id: string; chunk_index: number; section_label: string | null; chunk_text: string }[],
+  documentCoverage: { document_index: number; status: string; source_chunk_count: number }[],
+  selectedDocumentIds: string[],
 ) {
-  const sourceText = evidence
-    .map((chunk, index) => `Evidence ${index + 1}: ${chunk.chunk_text}`)
-    .join("\n\n")
-    .slice(0, 12000);
+  const MAX_BATCH_SOURCES = 8;
+  const MAX_BATCH_CHARACTERS = 18_000;
+  const MAX_HIERARCHY_CHILDREN = 3;
+  const MAX_HIERARCHY_CHARACTERS = 15_000;
+  const documentIndexById = new Map(selectedDocumentIds.map((id, index) => [id, index]));
+  const sourceRows = evidence.map((source, evidence_index) => ({
+    evidence_index,
+    document_index: documentIndexById.get(source.document_id) ?? null,
+    document_id: source.document_id,
+    chunk_id: source.id,
+    chunk_index: source.chunk_index,
+    section_label: source.section_label,
+    text: source.chunk_text,
+  }));
+  const batches: typeof sourceRows[] = [];
+  const qualityWarnings: string[] = [];
+  let currentBatch: typeof sourceRows = [];
+  let oversizedSources = 0;
+  for (const source of sourceRows) {
+    const encodedSource = (source_index: number) => ({ ...source, source_index });
+    const singletonLength = JSON.stringify([encodedSource(0)]).length;
+    if (singletonLength > MAX_BATCH_CHARACTERS) {
+      oversizedSources += 1;
+      continue;
+    }
+    const candidate = [...currentBatch, source].map((item, source_index) => ({ ...item, source_index }));
+    if (
+      currentBatch.length &&
+      (candidate.length > MAX_BATCH_SOURCES ||
+        JSON.stringify(candidate).length > MAX_BATCH_CHARACTERS)
+    ) {
+      batches.push(currentBatch);
+      currentBatch = [];
+    }
+    currentBatch.push(source);
+  }
+  if (currentBatch.length) batches.push(currentBatch);
+  if (oversizedSources) {
+    qualityWarnings.push(
+      `${oversizedSources} source chunk(s) exceeded the bounded summary request size and were not sent; the summary is incomplete.`,
+    );
+  }
 
-  const response = await runOllamaChat({
-    system:
-      "You are X-Assurance, an AI project assurance analyst. Summarize only from supplied source evidence. Do not invent project status, dates, owners, or metrics.",
-    user: `Create a concise grounded document summary for ${completedDocumentCount} processed document(s). Mention material risks, issues, decisions, and actions only when supported by the evidence.\n\n${sourceText}`,
-  });
+  const validSources: {
+    evidence_index: number;
+    document_id: string;
+    chunk_id: string;
+    excerpt: string;
+  }[] = [];
+  const summaryNodes: {
+    summary_text: string;
+    confidence: number;
+    document_indexes: number[];
+  }[] = [];
+  let provider: string | null = null;
+  let model: string | null = null;
+  let failedBatches = oversizedSources;
+  const system =
+    "You are X-Assurance, an evidence-grounded project assurance analyst. Summarize only supplied source material; do not invent facts, dates, owners, or metrics. Return one JSON object only.";
+  const parseOutput = (content: string): Record<string, unknown> | null => {
+    try {
+      const parsed: unknown = JSON.parse(content);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  const validSummaryFields = (output: Record<string, unknown> | null) => {
+    const summaryText = output?.summary_text;
+    const confidence = output?.confidence;
+    return typeof summaryText === "string" &&
+      Boolean(summaryText.trim()) &&
+      summaryText.length <= 5000 &&
+      typeof confidence === "number" &&
+      Number.isFinite(confidence) &&
+      confidence >= 0 &&
+      confidence <= 1;
+  };
 
-  return response.ok ? response.content : null;
-}
+  for (const [batchIndex, batch] of batches.entries()) {
+    const batchSources = batch.map((source, source_index) => ({ ...source, source_index }));
+    const batchDocumentIndexes = [...new Set(batch.map((source) => source.document_index))]
+      .filter((index): index is number => index !== null);
+    const batchCoverage = batchDocumentIndexes.map((index) => documentCoverage[index]);
+    const response = await runOllamaChat({
+      system,
+      user: `Summarize every supplied source chunk in this bounded batch. Identify material risks, issues, decisions, or actions only when directly supported. Cite every source_index with an exact contiguous excerpt of 1-500 characters from that source text. Return {"summary_text":"...","confidence":0.0,"sources":[{"source_index":0,"excerpt":"exact source excerpt"}]}.\n\nBATCH_COVERAGE_JSON=${JSON.stringify(batchCoverage)}\nBATCH_SOURCES_JSON=${JSON.stringify(batchSources)}`,
+      temperature: 0,
+      format: "json",
+    });
+    provider ??= response.provider;
+    model ??= response.model;
+    if (!response.ok) {
+      failedBatches += 1;
+      qualityWarnings.push(`Summary batch ${batchIndex + 1} failed: ${response.warning}`);
+      continue;
+    }
+    const output = parseOutput(response.content);
+    if (!output || !validSummaryFields(output) || !Array.isArray(output.sources)) {
+      failedBatches += 1;
+      qualityWarnings.push(`Summary batch ${batchIndex + 1} returned an invalid summary schema.`);
+      continue;
+    }
 
-function configuredLlmModel() {
-  const provider = process.env.XASS_LLM_PROVIDER ?? "ollama";
+    const citedSourceIndexes = new Set<number>();
+    let invalidCitationCount = 0;
+    for (const candidate of output.sources) {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+        invalidCitationCount += 1;
+        continue;
+      }
+      const citation = candidate as Record<string, unknown>;
+      const sourceIndex = citation.source_index;
+      const excerpt = typeof citation.excerpt === "string" ? citation.excerpt : "";
+      if (
+        !Number.isInteger(sourceIndex) ||
+        Number(sourceIndex) < 0 ||
+        Number(sourceIndex) >= batchSources.length ||
+        !excerpt.trim() ||
+        excerpt.length > 500 ||
+        !batchSources[Number(sourceIndex)].text.includes(excerpt) ||
+        citedSourceIndexes.has(Number(sourceIndex))
+      ) {
+        invalidCitationCount += 1;
+        continue;
+      }
+      const cited = batchSources[Number(sourceIndex)];
+      citedSourceIndexes.add(Number(sourceIndex));
+      validSources.push({
+        evidence_index: cited.evidence_index,
+        document_id: cited.document_id,
+        chunk_id: cited.chunk_id,
+        excerpt,
+      });
+    }
+    if (invalidCitationCount) {
+      qualityWarnings.push(`Summary batch ${batchIndex + 1} contained ${invalidCitationCount} invalid citation row(s).`);
+    }
+    if (citedSourceIndexes.size !== batchSources.length) {
+      qualityWarnings.push(
+        `Summary batch ${batchIndex + 1} citations cover ${citedSourceIndexes.size} of ${batchSources.length} source chunks.`,
+      );
+    }
+    if (!citedSourceIndexes.size) {
+      failedBatches += 1;
+      qualityWarnings.push(`Summary batch ${batchIndex + 1} supplied no valid source citations.`);
+      continue;
+    }
+    summaryNodes.push({
+      summary_text: (output.summary_text as string).trim(),
+      confidence: output.confidence as number,
+      document_indexes: batchDocumentIndexes,
+    });
+  }
 
-  return provider === "ollama"
-    ? (process.env.OLLAMA_MODEL ?? "qwen2.5:3b")
-    : provider === "ollama_cloud"
-      ? (process.env.OLLAMA_CLOUD_MODEL ?? "gpt-oss:20b")
-      : (process.env.XASS_CLOUD_LLM_MODEL ?? "gpt-oss:20b");
-}
+  const citedEvidence = new Set(validSources.map((source) => source.evidence_index));
+  if (citedEvidence.size !== evidence.length) {
+    const missing = sourceRows.filter((source) => !citedEvidence.has(source.evidence_index));
+    qualityWarnings.push(
+      `Summary citations cover ${citedEvidence.size} of ${evidence.length} source chunks; ${new Set(missing.map((source) => source.document_id)).size} document(s) have incomplete citation coverage.`,
+    );
+  }
+  if (failedBatches) {
+    return {
+      summary_text: "No grounded summary was generated because one or more bounded source batches could not be validated.",
+      confidence: 0,
+      sources: validSources,
+      provider,
+      model,
+      qualityWarnings,
+    };
+  }
 
-function isDocumentType(value: string): value is DocumentType {
-  return documentTypes.includes(value as DocumentType);
+  const hierarchyConfidences = summaryNodes.map((node) => node.confidence);
+  while (summaryNodes.length > 1) {
+    const hierarchyBatches: typeof summaryNodes[] = [];
+    let hierarchyBatch: typeof summaryNodes = [];
+    for (const node of summaryNodes) {
+      const candidate = [...hierarchyBatch, node];
+      const encoded = candidate.map(({ summary_text, document_indexes }) => ({
+        summary_text,
+        document_indexes,
+      }));
+      if (
+        hierarchyBatch.length &&
+        (candidate.length > MAX_HIERARCHY_CHILDREN ||
+          JSON.stringify(encoded).length > MAX_HIERARCHY_CHARACTERS)
+      ) {
+        hierarchyBatches.push(hierarchyBatch);
+        hierarchyBatch = [];
+      }
+      hierarchyBatch.push(node);
+    }
+    if (hierarchyBatch.length) hierarchyBatches.push(hierarchyBatch);
+
+    const nextLevel: typeof summaryNodes = [];
+    for (const [batchIndex, batch] of hierarchyBatches.entries()) {
+      if (batch.length === 1) {
+        nextLevel.push(batch[0]);
+        continue;
+      }
+      const hierarchy = batch.map(({ summary_text, document_indexes }) => ({
+        summary_text,
+        document_indexes,
+      }));
+      const response = await runOllamaChat({
+        system,
+        user: `Synthesize these bounded, source-grounded summaries into one concise assurance summary. Use only claims supported by the child summaries and preserve their full document-index coverage. Return {"summary_text":"...","confidence":0.0}.\n\nHIERARCHY_JSON=${JSON.stringify(hierarchy)}`,
+        temperature: 0,
+        format: "json",
+      });
+      provider ??= response.provider;
+      model ??= response.model;
+      const output = response.ok ? parseOutput(response.content) : null;
+      if (!response.ok || !output || !validSummaryFields(output)) {
+        qualityWarnings.push(
+          response.ok
+            ? `Summary hierarchy batch ${batchIndex + 1} returned an invalid summary schema.`
+            : `Summary hierarchy batch ${batchIndex + 1} failed: ${response.warning}`,
+        );
+        return {
+          summary_text: "No complete grounded summary was generated because hierarchical synthesis could not be validated.",
+          confidence: 0,
+          sources: validSources,
+          provider,
+          model,
+          qualityWarnings,
+        };
+      }
+      const documentIndexes = [...new Set(batch.flatMap((item) => item.document_indexes))].sort((a, b) => a - b);
+      const confidence = output.confidence as number;
+      hierarchyConfidences.push(confidence);
+      nextLevel.push({
+        summary_text: (output.summary_text as string).trim(),
+        confidence,
+        document_indexes: documentIndexes,
+      });
+    }
+    summaryNodes.splice(0, summaryNodes.length, ...nextLevel);
+  }
+
+  return {
+    summary_text: summaryNodes[0]?.summary_text ?? "No grounded summary was generated.",
+    confidence: hierarchyConfidences.length ? Math.min(...hierarchyConfidences) : 0,
+    sources: validSources,
+    provider,
+    model,
+    qualityWarnings,
+  };
 }

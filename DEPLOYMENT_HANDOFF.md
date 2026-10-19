@@ -31,7 +31,7 @@ TLS, restricted n8n access, and rotated secrets.
 Browser
   -> Next.js upload
   -> Supabase Storage + documents row + queued ai_jobs row
-  -> n8n polls ai_jobs every 15 seconds
+  -> n8n polls ai_jobs every 60 seconds
   -> n8n atomically changes one job from queued to processing
   -> n8n calls the Next.js document worker
   -> worker downloads and parses the source file

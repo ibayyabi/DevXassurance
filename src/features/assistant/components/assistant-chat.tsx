@@ -10,13 +10,7 @@ import {
   Send,
   UserRound,
 } from "lucide-react";
-import {
-  useActionState,
-  useEffect,
-  useRef,
-  useState,
-  useTransition,
-} from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 
 import {
   askAssistant,
@@ -33,15 +27,19 @@ const suggestedPrompts = [
   "What evidence is still missing?",
 ];
 
-const initialState: AssistantActionState = { messages: [] };
-
-export function AssistantChat({ projectId }: { projectId: string }) {
-  const [state, formAction, pending] = useActionState(askAssistant, initialState);
+export function AssistantChat({
+  projectId,
+  initialState,
+}: {
+  projectId: string;
+  initialState: AssistantActionState;
+}) {
+  const [state, setState] = useState(initialState);
   const [transitionPending, startTransition] = useTransition();
   const [question, setQuestion] = useState("");
   const [pendingQuestion, setPendingQuestion] = useState("");
   const conversationRef = useRef<HTMLDivElement>(null);
-  const isThinking = pending || transitionPending;
+  const isThinking = transitionPending;
   const latest = state.messages.at(-1);
 
   useEffect(() => {
@@ -66,7 +64,21 @@ export function AssistantChat({ projectId }: { projectId: string }) {
     const formData = new FormData(event.currentTarget);
     setPendingQuestion(submittedQuestion);
     setQuestion("");
-    startTransition(() => formAction(formData));
+    startTransition(async () => {
+      setState(await askAssistant(state, formData));
+      setPendingQuestion("");
+    });
+  }
+
+  function handleNewConversation() {
+    if (isThinking) return;
+    setState({
+      conversationId: crypto.randomUUID(),
+      activeReviewId: state.activeReviewId,
+      messages: [],
+    });
+    setPendingQuestion("");
+    setQuestion("");
   }
 
   return (
@@ -76,14 +88,19 @@ export function AssistantChat({ projectId }: { projectId: string }) {
         aria-busy={isThinking}
       >
         <div className="border-b border-ui-border p-5">
-          <div className="flex items-center gap-3">
-            <span className="rounded-xl bg-plan-track p-2.5 text-ink-muted">
-              <Bot className="h-5 w-5" />
-            </span>
-            <div>
-              <h2 className="font-semibold text-ink">Ask about this project</h2>
-              <p className="text-sm text-ink-muted">Clear answers, grounded in uploaded evidence</p>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <span className="rounded-xl bg-plan-track p-2.5 text-ink-muted">
+                <Bot className="h-5 w-5" />
+              </span>
+              <div>
+                <h2 className="font-semibold text-ink">Ask about this project</h2>
+                <p className="text-sm text-ink-muted">Clear answers, grounded in uploaded evidence</p>
+              </div>
             </div>
+            <Button type="button" variant="outline" size="sm" disabled={isThinking} onClick={handleNewConversation}>
+              New conversation
+            </Button>
           </div>
         </div>
 
@@ -92,7 +109,7 @@ export function AssistantChat({ projectId }: { projectId: string }) {
           className="flex-1 space-y-5 overflow-auto bg-base/70 p-4 md:p-5"
         >
           {state.messages.length === 0 && !isThinking ? (
-            <WelcomeMessage />
+            <WelcomeMessage activeReview={state.activeReviewId !== null} />
           ) : (
             state.messages.map((message, index) => (
               <div key={`${message.question}-${index}`} className="space-y-3">
@@ -104,7 +121,7 @@ export function AssistantChat({ projectId }: { projectId: string }) {
           {isThinking && pendingQuestion ? (
             <div className="space-y-3">
               <UserBubble question={pendingQuestion} />
-              <ThinkingBubble />
+              <ThinkingBubble activeReview={state.activeReviewId !== null} />
             </div>
           ) : null}
         </div>
@@ -114,12 +131,15 @@ export function AssistantChat({ projectId }: { projectId: string }) {
           className="border-t border-ui-border bg-surface p-4"
         >
           <input type="hidden" name="projectId" value={projectId} />
+          <input type="hidden" name="conversationId" value={state.conversationId} />
+          <input type="hidden" name="activeReviewId" value={state.activeReviewId ?? ""} />
           <label htmlFor="advisor-question" className="sr-only">Ask the AI Advisor</label>
           <div className="flex gap-2">
             <Input
               id="advisor-question"
               name="question"
               value={question}
+              maxLength={1000}
               onChange={(event) => setQuestion(event.target.value)}
               placeholder="Ask about budget, deadlines, risk, or next actions"
               readOnly={isThinking}
@@ -151,7 +171,7 @@ export function AssistantChat({ projectId }: { projectId: string }) {
   );
 }
 
-function ThinkingBubble() {
+function ThinkingBubble({ activeReview }: { activeReview: boolean }) {
   return (
     <div
       role="status"
@@ -167,13 +187,15 @@ function ThinkingBubble() {
         <span>Thinking</span>
       </div>
       <p className="mt-2 text-xs leading-5 text-ink-muted">
-        Reviewing the latest assessment and source documents.
+        {activeReview
+          ? "Searching fresh project evidence in the active review."
+          : "Searching fresh project evidence across this project."}
       </p>
     </div>
   );
 }
 
-function WelcomeMessage() {
+function WelcomeMessage({ activeReview }: { activeReview: boolean }) {
   return (
     <div className="rounded-2xl border border-ui-border bg-surface p-6 shadow-sm">
       <p className="text-xs font-semibold uppercase tracking-[0.15em] text-brand">
@@ -183,9 +205,13 @@ function WelcomeMessage() {
         Ask one plain-language question.
       </h3>
       <p className="mt-3 max-w-2xl text-sm leading-6 text-ink-muted">
-        The answer will use the latest automatic assessment and its source
-        documents. If the evidence is not strong enough, the advisor will say
-        what is missing instead of inventing an answer.
+        The Advisor searches fresh project evidence and cites its source
+        locations. {activeReview
+          ? "The active review scopes this search."
+          : "No active review is selected, so the search uses project scope."}
+        {" "}Historical and comparative questions can search relevant periods.
+        If the evidence is not strong enough, the advisor will say what is
+        missing instead of inventing an answer.
       </p>
     </div>
   );
@@ -321,14 +347,20 @@ function EvidencePanel({ answer }: { answer?: AssistantAnswer }) {
       {answer?.sources.length ? (
         <div className="mt-4 grid gap-3">
           {answer.sources.map((source, index) => (
-            <details key={`${source.documentTitle}-${index}`} className="rounded-xl border border-ui-border p-3">
+            <details key={source.id} className="rounded-xl border border-ui-border p-3">
               <summary className="cursor-pointer text-sm font-medium text-ink">
-                {source.documentTitle}
+                S{index + 1} · {source.documentTitle} · Chunk {source.chunkIndex + 1}
               </summary>
               <p className="mt-2 text-xs leading-5 text-ink-muted">{source.excerpt}</p>
-              <p className="mt-2 text-xs text-ink-muted/70">
-                {source.pageNumber ? `Page ${source.pageNumber}` : "Page not available"}
-              </p>
+              <p className="mt-2 text-xs text-ink-muted/70">{formatSourceLocation(source)}</p>
+              <p className="mt-1 text-[11px] text-ink-muted/60">Source ID: {source.id}</p>
+              {source.reportingPeriod || source.evidenceRole ? (
+                <p className="mt-1 text-[11px] text-ink-muted/60">
+                  {source.reportingPeriod ? `Confirmed period: ${source.reportingPeriod}` : ""}
+                  {source.reportingPeriod && source.evidenceRole ? " · " : ""}
+                  {source.evidenceRole ? `Confirmed role: ${source.evidenceRole}` : ""}
+                </p>
+              ) : null}
             </details>
           ))}
           {answer.inferredClaims.length > 0 && (
@@ -349,6 +381,35 @@ function EvidencePanel({ answer }: { answer?: AssistantAnswer }) {
       )}
     </section>
   );
+}
+
+function formatSourceLocation(source: AssistantAnswer["sources"][number]) {
+  const location = source.sourceLocation ?? {};
+  const parts: string[] = [];
+  const pageNumber = source.pageNumber ?? location.pageNumber;
+  if (typeof pageNumber === "number") parts.push(`Page ${pageNumber}`);
+  if (typeof location.sheetName === "string") parts.push(`Sheet ${location.sheetName}`);
+  if (typeof location.slideNumber === "number") parts.push(`Slide ${location.slideNumber}`);
+  if (typeof location.rowStart === "number") {
+    parts.push(
+      location.rowStart === location.rowEnd
+        ? `Row ${location.rowStart}`
+        : `Rows ${location.rowStart}-${location.rowEnd}`,
+    );
+  }
+  if (typeof location.cellRangeStart === "string") {
+    parts.push(`Cells ${location.cellRangeStart}-${String(location.cellRangeEnd ?? location.cellRangeStart)}`);
+  }
+  if (typeof location.paragraphStart === "number") {
+    parts.push(
+      location.paragraphStart === location.paragraphEnd
+        ? `Paragraph ${location.paragraphStart}`
+        : `Paragraphs ${location.paragraphStart}-${location.paragraphEnd}`,
+    );
+  }
+  if (typeof location.imageName === "string") parts.push(location.imageName);
+  if (source.sectionLabel) parts.push(source.sectionLabel);
+  return parts.length ? parts.join(" · ") : "Location not available";
 }
 
 function RecommendationsPanel({ answer }: { answer?: AssistantAnswer }) {

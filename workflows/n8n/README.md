@@ -12,7 +12,7 @@ back to the tables already used by the UI.
 
 Use `x-assurance-supabase-document-polling.json` when Supabase cannot reach the
 VPS webhook. This workflow does not require an inbound request from Supabase.
-Every 15 seconds it:
+Every 60 seconds it:
 
 1. requests the oldest queued `parse_document` job from Supabase;
 2. claims it only if its status is still `queued`; and
@@ -36,10 +36,13 @@ On the VPS:
 4. Disable the Supabase Database Webhook for `public.ai_jobs`.
 5. Upload a new document and inspect n8n Executions.
 
-The job should move from `queued` to `processing` within approximately 15
-seconds and then to `completed`. If there are no queued jobs, a polling
-execution ends without writes. Keep only one published polling workflow unless
-you intentionally introduce additional queue coordination.
+The job is claimed from Supabase and the worker maintains a 15-minute lease
+while extraction groups complete. A transient worker failure is left for
+bounded lease recovery; deterministic validation failures are terminal. Partial
+results use `needs_review` and retain explicit quality warnings. If there are no
+queued or recoverable jobs, a polling execution ends without writes. Keep only
+one published polling workflow unless you intentionally introduce additional
+queue coordination.
 
 ### Local n8n with Docker
 
@@ -56,22 +59,21 @@ Then open:
 http://localhost:5678
 ```
 
-Import `x-assurance-supabase-document-processing.json`, open the webhook node,
-copy the production URL, and activate the workflow.
+For local HTTP, `.env` sets `N8N_SECURE_COOKIE=false` so Chromium-based
+debugging sessions can authenticate. Do not use that setting on a public
+HTTP endpoint; use HTTPS and set it to `true` instead.
 
-If Supabase is hosted in the cloud, it cannot call your machine's
-`localhost:5678` directly. Use a public tunnel for local testing, for example:
+The Docker configuration saves in-progress execution data so a live execution
+can be inspected node by node. This increases database writes.
 
-```bash
-ngrok http 5678
-```
+Import and activate `x-assurance-supabase-document-polling.json`.
 
-Then set `WEBHOOK_URL` in `workflows/n8n/.env` to the public tunnel URL and
-restart n8n:
+The polling workflow is the default local mode. It checks Supabase every
+60 seconds and calls the local Next.js worker through `host.docker.internal`,
+so no ngrok tunnel or inbound Supabase webhook is required.
 
-```bash
-docker compose restart n8n
-```
+Keep the webhook workflow and Supabase Database Webhook disabled while polling
+is active. Only one polling workflow may be published.
 
 ### Required n8n environment variables
 

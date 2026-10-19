@@ -1,9 +1,16 @@
 export type AssistantSource = {
+  id: string;
+  documentId: string;
+  chunkIndex: number;
   documentTitle: string;
   excerpt: string;
   pageNumber: number | null;
   sectionLabel: string | null;
-  confidence: number | null;
+  sourceLocation: Record<string, string | number> | null;
+  reportingPeriod: string | null;
+  evidenceRole: string | null;
+  reviewIds: string[];
+  retrievalRank: number;
 };
 
 export type AssistantRecommendation = {

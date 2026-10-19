@@ -8,6 +8,7 @@ import {
   renderReportDocx,
   renderReportPdf,
 } from "@/features/reports/lib/render-report";
+import { reviewEvidenceIssue } from "@/features/assurance/lib/evidence-readiness";
 
 export async function generateReportPreview(formData: FormData) {
   const projectId = String(formData.get("projectId") ?? "");
@@ -32,6 +33,24 @@ export async function generateReportPreview(formData: FormData) {
   const review = reviewRows?.[0];
   if (!review) throw new Error("Create an Assurance Review before generating a report.");
 
+  const { data: links, error: linksError } = await supabase
+    .from("assurance_review_documents")
+    .select("document_id, evidence_role")
+    .eq("review_id", review.id)
+    .eq("project_id", projectId);
+  if (linksError) throw new Error(linksError.message);
+  const linkedIds = [...new Set((links ?? []).map((link) => link.document_id))];
+  const { data: linkedDocs, error: linkedError } = linkedIds.length
+    ? await supabase.from("documents").select("id, processing_status").eq("project_id", projectId).in("id", linkedIds)
+    : { data: [], error: null };
+  if (linkedError) throw new Error(linkedError.message);
+  const evidenceIssue = reviewEvidenceIssue(links ?? [], linkedDocs ?? []);
+  if (evidenceIssue === "missing_role") {
+    throw new Error("Select completed Approved Baseline and Current Period evidence before generating a report.");
+  }
+  if (evidenceIssue) {
+    throw new Error("A selected baseline or current-period document is unavailable. Retry or replace it in the Evidence Library before generating a report.");
+  }
   const [{ data: findings, error: findingsError }, { data: actions, error: actionsError }, { count: evidenceCount }] =
     await Promise.all([
       supabase

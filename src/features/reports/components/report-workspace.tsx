@@ -31,7 +31,7 @@ const sectionMeta = {
   },
   key_findings: {
     label: "Budget, Schedule, and Risk findings",
-    help: "Evidence-backed findings from the latest automatic assessment.",
+    help: "Evidence-backed findings from this reporting-period Assurance Review.",
   },
   critical_risks: {
     label: "Critical matters",
@@ -75,14 +75,14 @@ export function ReportWorkspace({
     return (
       <section className="rounded-3xl border border-status-warn bg-status-warn-bg p-7 shadow-sm md:p-10">
         <p className="text-xs font-semibold uppercase tracking-[0.16em] text-status-warn-text">
-          Assessment not ready
+          Assurance Review not ready
         </p>
         <h2 className="mt-3 max-w-2xl text-3xl font-semibold tracking-tight text-status-warn-text">
           Add enough evidence before creating a management report.
         </h2>
         <p className="mt-3 max-w-2xl text-sm leading-6 text-status-warn-text/80">
-          The report uses the latest automatic Budget, Schedule, and Risk
-          assessment. Upload project files and wait for analysis to finish.
+          Select completed baseline and current evidence, then complete this
+          review&apos;s analysis before generating a management report.
         </p>
         <Button asChild className="mt-6 bg-brand text-brand-foreground hover:bg-brand/90">
           <Link href={`/app/projects/${projectId}/documents`}>Review evidence</Link>
@@ -101,7 +101,7 @@ export function ReportWorkspace({
             </span>
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-ink-muted">
-                Source assessment
+                Source review
               </p>
               <h2 className="mt-1 font-semibold text-ink">{review.title}</h2>
             </div>
@@ -150,7 +150,7 @@ export function ReportWorkspace({
                 Generate a concise report draft
               </p>
               <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-ink-muted">
-                The draft will use only the latest automatic assessment,
+                The draft uses this Assurance Review&apos;s findings, selected
                 evidence, and management actions.
               </p>
             </div>

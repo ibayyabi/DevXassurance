@@ -50,7 +50,7 @@ export type EvaluatedFinding = {
   currentValue: Record<string, unknown> | null;
   variance: Record<string, unknown> | null;
   requiredEvidence: string[];
-  sourceExcerpts: { role: "baseline" | "current"; excerpt: string }[];
+  sourceExcerpts: { role: "baseline" | "current"; excerpt: string; documentId?: string; documentTitle?: string; pageNumber?: number | null; sectionLabel?: string | null }[];
   confidence: number;
 };
 
@@ -61,11 +61,41 @@ export function parseReviewExtraction(
   const schedule = record(value.schedule);
   const risk = record(value.risk);
 
-  if (!budget || !schedule || !risk) return null;
+  if (
+    !budget ||
+    !schedule ||
+    !risk ||
+    !Array.isArray(schedule.milestones) ||
+    typeof risk.has_current_evidence !== "boolean" ||
+    !validConfidence(budget.confidence) ||
+    !validConfidence(schedule.confidence) ||
+    !validConfidence(risk.confidence) ||
+    ![budget.baseline_amount, budget.current_forecast, budget.current_actual].every(validOptionalNumber) ||
+    ![budget.currency, budget.baseline_excerpt, budget.current_excerpt, risk.baseline_excerpt, risk.current_excerpt].every(validOptionalText) ||
+    ![
+      risk.open_critical_count,
+      risk.open_high_count,
+      risk.high_risks_missing_owner_or_mitigation,
+      risk.increased_risk_count,
+      risk.new_high_risk_count,
+      risk.max_mitigation_overdue_days,
+    ].every(validCount)
+  ) return null;
 
-  const rawMilestones = Array.isArray(schedule.milestones)
-    ? schedule.milestones
-    : [];
+  const rawMilestones = schedule.milestones;
+  if (
+    !rawMilestones.every((item) => {
+      const milestone = record(item);
+      return Boolean(
+        milestone &&
+          text(milestone.name) &&
+          validOptionalIsoDate(milestone.baseline_date) &&
+          validOptionalIsoDate(milestone.current_forecast_date ?? milestone.current_date) &&
+          validOptionalText(milestone.baseline_excerpt) &&
+          validOptionalText(milestone.current_excerpt),
+      );
+    })
+  ) return null;
   const milestones = rawMilestones
     .map((item) => {
       const milestone = record(item);
@@ -397,19 +427,41 @@ function nullableNumber(value: unknown) {
 }
 
 function nonNegativeInteger(value: unknown) {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.max(0, Math.round(number)) : 0;
+  return value as number;
 }
 
 function confidence(value: unknown) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return 0.5;
-  return Math.max(0, Math.min(1, number));
+  return value as number;
+}
+
+function validCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function validConfidence(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+function validOptionalNumber(value: unknown) {
+  return value === null || value === undefined || (typeof value === "number" && Number.isFinite(value));
+}
+
+function validOptionalText(value: unknown) {
+  return value === null || value === undefined || typeof value === "string";
+}
+
+function validOptionalIsoDate(value: unknown) {
+  return value === null || value === undefined || (typeof value === "string" && isoDate(value) !== null);
 }
 
 function isoDate(value: unknown) {
   const normalized = nullableText(value);
-  return normalized && /^\d{4}-\d{2}-\d{2}$/.test(normalized)
+  if (!normalized || !/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return null;
+  const [year, month, day] = normalized.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
     ? normalized
     : null;
 }

@@ -7,25 +7,31 @@ supported evidence files and calls the configured LLM when available.
 
 ## Current State
 
-- Role-based project workspace with dashboard, documents, anomalies, AI
-  assistant, and reports pages.
-- Evidence file upload to Supabase Storage. PDF, TXT, CSV, DOCX, and XLSX files
-  are queued for automated extraction; PowerPoint and image files are stored as
-  reference evidence.
-- Upload creates a `public.ai_jobs` row.
-- The deployed n8n polling workflow checks Supabase for queued jobs every 15
-  seconds. The webhook workflow remains available for local/tunnel or future
-  HTTPS deployments.
-- n8n calls the Next.js worker endpoint at
-  `/api/workers/parse-document`.
-- The worker extracts supported file text, uses the configured LLM when
-  available, and
-  returns chunks, facts, summary, alerts, actions, and health signals.
-- n8n writes processed data back to Supabase tables used by the UI.
+- Role-based project workspace with dashboard, documents, anomalies, Advisor,
+  and reports pages.
+- Evidence uses resumable TUS multi-file intake; ZIP files are expanded as
+  separate evidence items. Traversal paths, nested archives, unsupported
+  members, and unsafe package contents are reported
+  without discarding safe siblings.
+- PDF, TXT, CSV, DOCX, XLSX, and PPTX files plus PNG, JPEG/JPG, WEBP, TIF/TIFF,
+  and BMP images are parsed. Legacy `.ppt` files can be retained for review but
+  are not automatically parsed. Image OCR and scanned-PDF OCR use local Tesseract
+  (and Ghostscript for PDF pages); missing tools or configured language data cause
+  an explicit failure, never an empty successful extraction.
+- Upload creates a `public.ai_jobs` row. n8n remains the queue/orchestrator and
+  calls the Next.js worker at `/api/workers/parse-document`; the worker handles
+  bounded per-document model calls and returns source-mapped chunks, facts,
+  summaries, alerts, actions, and health signals.
+- The worker persists AI suggestions separately from intake hints and human
+  confirmations. Review roles are `baseline`, `current`, and `supporting`;
+  confirmation does not overwrite the original hints or AI suggestions.
+- The Advisor searches fresh project evidence with active-review, role, and
+  period scope, preserves follow-up conversation context, and shows only
+  citations verified against the exact retrieved chunk and source location.
 - Documents can be removed from the library, including related extracted
   evidence and storage files.
-- Processed documents now feed the Documents, Dashboard, Anomalies, Assistant,
-  and Reports pages through shared Supabase records.
+- Processed documents feed the Documents, Dashboard, Anomalies, Advisor, and
+  Reports pages through shared Supabase records.
 - Dashboard can be refreshed from current evidence without a new upload.
 - Reports can be generated, edited, marked reviewed, exported, and downloaded
   from recent exports.
@@ -35,12 +41,11 @@ supported evidence files and calls the configured LLM when available.
 ## Required Tools
 
 - Node.js 20 or newer
-- Docker Desktop
-- Supabase hosted project
-- n8n through the included Docker Compose file
-- ngrok only when testing the optional webhook workflow locally
-- A cloud LLM API key for hosted extraction and assistant/report writing
-  (Ollama remains supported for local demos)
+- Supabase development project (verify the linked project before any writes)
+- Docker Desktop and the included n8n workflow for queue/polling integration
+- A configured Ollama Cloud provider, or local Ollama for fully local model runs
+- Tesseract and (for scanned PDFs) Ghostscript for OCR; OCR language data is
+  installed separately and configured with `XASS_OCR_LANG`
 
 ## 1. Install App Dependencies
 
@@ -59,38 +64,55 @@ Copy-Item .env.example .env.local
 Fill these values from Supabase Project Settings > API:
 
 ```env
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_URL=https://your-development-project.supabase.co
 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your-publishable-or-anon-key
-NEXT_PUBLIC_SITE_URL=https://your-domain.example
+NEXT_PUBLIC_SITE_URL=http://localhost:3000
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 XASS_WORKER_SECRET=use-the-same-value-as-n8n
 XASS_LLM_PROVIDER=ollama_cloud
 OLLAMA_CLOUD_BASE_URL=https://ollama.com/api
 OLLAMA_API_KEY=your-ollama-api-key
 OLLAMA_CLOUD_MODEL=gpt-oss:20b
+XASS_OCR_LANG=eng
 ```
 
 `SUPABASE_SERVICE_ROLE_KEY` must stay server-only. Never put it in a
 `NEXT_PUBLIC_*` variable.
 
-## 3. Apply Supabase Migrations
+Local mode runs Next.js and n8n on this machine while targeting the hosted
+development Supabase project in the environment files. The local Supabase
+stack under `supabase/` is a separate target; do not mix its keys with the
+hosted project's keys.
 
-Run every SQL file in `supabase/migrations` in order using the Supabase SQL
-Editor, or use the Supabase CLI if your project is linked.
+Apply `supabase/migrations` in filename order. For a linked development project,
+verify the project name/ref before writes and dry-run first:
 
-The latest migration needed for the current demo is:
-
-```text
-supabase/migrations/202606190001_allow_reference_evidence_file_types.sql
+```powershell
+supabase projects list
+supabase db push --linked --dry-run
+supabase db push --linked
+supabase migration list --linked
 ```
 
-This allows non-PDF evidence to be saved in the document library. If
-you have not applied the previous migrations yet, apply all files in
-`supabase/migrations` in filename order.
+Phase 6's additive migrations apply in this order:
+
+```text
+202610180001_phase6_evidence_metadata.sql
+202610180002_document_upload_submissions.sql
+202610180003_zip_intake_manifest.sql
+202610180004_document_extraction_groups.sql
+202610180005_advisor_retrieval_and_conversations.sql
+202610180006_upload_submission_batches.sql
+202610180007_advisor_ranked_or_search.sql
+202610180008_advisor_relaxed_match_guard.sql
+```
+
+Do not link, push, or test against production as part of development work.
 
 ## 4. Configure the LLM
 
-For VPS deployment, use the cloud provider in the Next.js app environment:
+For a development run, choose the configured provider for the Next.js worker and
+Advisor:
 
 ```env
 XASS_LLM_PROVIDER=ollama_cloud
@@ -99,15 +121,15 @@ OLLAMA_API_KEY=your-ollama-api-key
 OLLAMA_CLOUD_MODEL=gpt-oss:20b
 ```
 
-The app uses Ollama Cloud's native API at:
+The app sends model requests server-side to `{OLLAMA_CLOUD_BASE_URL}/chat`. Keep
+the key in `.env.local`; never put it in a `NEXT_PUBLIC_*` variable, browser
+code, workflow JSON, or logs. A cloud provider may send evidence to the
+configured provider; use only approved development/test evidence.
 
-```text
-{OLLAMA_CLOUD_BASE_URL}/chat
-```
-
-Do not put the cloud LLM key in `NEXT_PUBLIC_*` variables, the browser, or the
-n8n workflow JSON. Keep it in `.env.local` locally and in your VPS secret/env
-configuration for the Next.js process.
+Document extraction requests use temperature `0` and request JSON mode where the
+provider supports it. Provider formatting is not trusted: strict schema and
+source-citation checks still apply, and malformed output remains a visible
+failure for review rather than a successful extraction.
 
 For a local-only demo, you can still use Ollama:
 
@@ -123,6 +145,10 @@ XASS_LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=qwen2.5:3b
 ```
+
+OCR uses `XASS_OCR_LANG=eng` by default. For Bahasa Indonesia and English,
+install both Tesseract traineddata files and set `XASS_OCR_LANG=ind+eng`.
+Missing language data is an explicit OCR failure, not an empty successful parse.
 
 ## 5. Start the Next.js App
 
@@ -147,7 +173,7 @@ Copy-Item workflows\n8n\.env.example workflows\n8n\.env
 Fill these values in `workflows/n8n/.env`:
 
 ```env
-SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_URL=https://your-development-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 XASS_DOCUMENT_WORKER_URL=http://host.docker.internal:3000/api/workers/parse-document
 XASS_N8N_WEBHOOK_SECRET=use-a-shared-webhook-secret
@@ -157,8 +183,8 @@ N8N_BLOCK_ENV_ACCESS_IN_NODE=false
 
 Start n8n:
 
-```powershell
-docker compose -f workflows\n8n\docker-compose.yml --env-file workflows\n8n\.env up -d
+```bash
+docker compose -f workflows/n8n/docker-compose.yml --env-file workflows/n8n/.env up -d
 ```
 
 Open:
@@ -167,87 +193,60 @@ Open:
 http://localhost:5678
 ```
 
-Import:
+Import and activate:
 
 ```text
-workflows/n8n/x-assurance-supabase-document-processing.json
+workflows/n8n/x-assurance-supabase-document-polling.json
 ```
 
-Publish/activate the workflow. Use the production webhook URL, not the test URL.
-Re-import this workflow after pulling changes because it now writes anomalies as
-well as chunks, facts, summaries, dashboard health, alerts, and actions.
+The polling workflow is the default local mode. It checks Supabase every 60
+seconds, claims queued jobs atomically, and calls the Next.js worker through
+`host.docker.internal`. It does not need a public tunnel or a Supabase Database
+Webhook.
 
-## 7. Expose n8n with ngrok
+Keep the webhook workflow and the Supabase Database Webhook disabled while
+polling is active. Only one polling workflow may be published. Re-import and
+publish the workflow after changing its JSON.
 
-Supabase cannot call your local `localhost:5678`, so run:
+The webhook workflow is optional for testing inbound delivery. Use it only with
+a public HTTPS tunnel and a matching `WEBHOOK_URL`; never use its
+`/webhook-test/` URL for a persistent integration.
 
-```powershell
-ngrok http 5678
-```
+## 8. Development Workflow
 
-Copy the HTTPS forwarding URL, then update `WEBHOOK_URL` in
-`workflows/n8n/.env`:
+1. Verify the linked Supabase project is the approved development target, then
+   dry-run migrations before applying them; use the Phase 6 order above.
+2. Start the app and open a development project.
+3. Upload multiple supported files together. Select a ZIP containing a safe
+   supported file plus an unsafe path, nested archive, or unsupported member;
+   verify the safe sibling remains available and rejected members are listed.
+4. For a single file, optionally enter document type, date, reporting period,
+   and workstream hints. Hints remain distinct from AI suggestions and reviewer
+   confirmations.
+5. Review the file state and extraction summary. PDF/TXT/CSV/DOCX/XLSX/PPTX and
+   supported images are parsed; image and scanned-PDF OCR requires Tesseract
+   language data and Ghostscript for PDF. Missing tools/languages, invalid
+   evidence, and work-limit breaches must remain Needs Review or Failed, never
+   Ready.
+6. Correct the suggested artifact type and assign an evidence role:
+   `baseline`, `current`, or `supporting`. Confirm the saved value while
+   retaining the original hint and AI suggestion.
+7. Start an assurance review and verify missing baseline/current evidence keeps
+   analysis and reporting unready. Select approved baseline and current-period
+   evidence, filter by a dimension, change a visible selection, and save;
+   confirm selected off-filter evidence remains linked. Run analysis, inspect
+   its source document/location link, and continue to a report only after
+   verified findings exist. A failed model analysis stays visibly unready; do
+   not invent findings.
+8. Ask the Advisor a project question. Inspect its exact source ID/location,
+   ask a follow-up in the same conversation, and try a historical/comparative
+   question and a no-match question. Unsupported claims should not be presented
+   as facts.
+9. Use the existing Dashboard, Reports, and Members pages as needed.
 
-```env
-WEBHOOK_URL=https://your-ngrok-url.ngrok-free.app/
-```
-
-Restart n8n:
-
-```powershell
-docker compose -f workflows\n8n\docker-compose.yml --env-file workflows\n8n\.env restart n8n
-```
-
-If the ngrok URL changes, update `WEBHOOK_URL`, restart n8n, and update the
-Supabase Database Webhook URL.
-
-## 8. Create the Supabase Database Webhook
-
-In Supabase Dashboard:
-
-1. Go to Database Webhooks.
-2. Create a webhook for table `public.ai_jobs`.
-3. Event: `INSERT`.
-4. Method: `POST`.
-5. URL: n8n production URL:
-
-```text
-https://your-ngrok-url.ngrok-free.app/webhook/x-assurance-ai-jobs
-```
-
-6. Add headers:
-
-```text
-Content-Type: application/json
-x-xass-workflow-secret: same-value-as-XASS_N8N_WEBHOOK_SECRET
-```
-
-Do not use `/webhook-test/` for the Supabase webhook. Test URLs only work while
-the n8n editor is listening.
-
-## 9. Demo Test Path
-
-1. Sign in to the app.
-2. Open a project.
-3. Go to Documents.
-4. Upload a PDF, TXT, CSV, DOCX, or XLSX file.
-5. Confirm the file shows `Queued`, then `Processing`, then `Completed`.
-6. Check n8n Executions for a successful run.
-7. Refresh the Documents page and confirm extracted information, summary,
-   source evidence, dashboard health, alerts, and actions are populated.
-8. Upload a PowerPoint or image file and confirm it is saved in the Document
-   Library as reference evidence with `Needs Review`.
-9. Open Dashboard and use `Refresh from evidence` if you want to recompute the
-   dashboard from the current facts and anomalies.
-10. Open Reports, generate a preview, edit sections, mark it reviewed, export a
-   PDF or DOCX, then use Recent Exports to download the real generated file.
-11. Open Members and add another signed-up Supabase Auth user by email. Choose
-   their project role, save changes, and confirm they can see the project after
-   login.
-12. Open AI Assistant and ask a project-scoped question. It uses local Ollama
-    when `XASS_LLM_PROVIDER=ollama`, or the configured cloud provider when
-    `XASS_LLM_PROVIDER=ollama_cloud`.
-13. Use the document menu to remove old demo documents from the library.
+Phase 6 extraction limits and OCR setup are also documented in `worker/README.md`.
+The full release, rollback, browser-run, and moderator checklist is
+`planning-artifacts/product-recovery/phase-6-development-release-and-rollback.md`.
 
 ## Member Management Notes
 
@@ -271,35 +270,42 @@ Check containers:
 docker ps
 ```
 
-Check n8n can reach Supabase:
+Run the integration behavior suite and persistent browser workflow:
 
 ```powershell
-docker exec aisx-n8n node -e "const dns=require('dns'); dns.lookup('your-project.supabase.co',(e,a)=>{console.log(e?e.message:a); process.exit(e?1:0)})"
-```
-
-Check n8n can reach the Next.js worker:
-
-```powershell
-docker exec aisx-n8n node -e "fetch('http://host.docker.internal:3000').then(r=>console.log(r.status)).catch(e=>{console.error(e.message); process.exit(1)})"
-```
-
-Run local validation:
-
-```powershell
-npm run lint
 npm test
+npx playwright install chromium
+npm run test:e2e
+npm run test:e2e:live
 ```
+
+`npm run test:e2e` runs the full browser journey against a deterministic,
+source-grounded provider fixture isolated in the test proxy; fixture mode has
+no upstream request path. It still requires the verified development Supabase
+target and development credentials because the journey creates and cleans up
+test-owned rows and storage objects. `npm run test:e2e:live` is a separate
+single-document extraction smoke that calls the configured real provider with
+generated synthetic evidence and reports strict success or a visible failure.
+Never print model keys or use private project evidence.
 
 ## Architecture Boundary
 
-The deployed demo flow is:
+The development flow is:
 
 ```text
-Next.js upload -> Supabase ai_jobs -> n8n polling -> Next.js worker -> cloud LLM -> Supabase tables -> UI
+TUS multi-file/ZIP intake -> Supabase Storage + ai_jobs -> n8n queue/orchestrator -> Next.js worker -> configured LLM -> Supabase evidence rows -> UI
+Advisor -> scoped PostgreSQL full-text search -> fresh chunk IDs/locations -> citation validation -> conversation history
 ```
 
-n8n is the orchestrator. Supabase remains the source of truth. The app does not
-directly call n8n after upload.
+n8n remains the queue/orchestrator and Supabase remains the source of truth. The
+browser suite can call the actual Next.js worker endpoint for queued development
+jobs when n8n is unavailable. The route persists validated document suggestions;
+the E2E helper separately persists returned chunks, an extraction-run record,
+and terminal job/document state so the browser can use the real worker output.
+Facts, summaries, snapshots, alerts, and actions use n8n's separate persistence
+path, covered by n8n mapping behavior tests. This does not verify live n8n
+connectivity or claim a production rollout.
 
-See `DEPLOYMENT_HANDOFF.md` for the current VPS configuration, deployment
-procedure, and troubleshooting guide.
+See `DEPLOYMENT_HANDOFF.md` for the existing environment-specific handoff. The
+Phase 6 development release and rollback procedure is
+`planning-artifacts/product-recovery/phase-6-development-release-and-rollback.md`.
