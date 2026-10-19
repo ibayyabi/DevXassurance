@@ -367,7 +367,7 @@ export async function POST(
           mime_type: memberMimeType,
           storage_path: memberStoragePath,
           document_type: "unknown",
-          processing_status: processable ? "uploaded" : "needs_review",
+          processing_status: processable ? "queued" : "needs_review",
           processing_error: processable ? null : "File retained as reference evidence; this format is not automatically analyzed.",
         })
         .select("id")

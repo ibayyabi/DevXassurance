@@ -143,6 +143,10 @@ test("Phase 6 browser journey: multi-file, ZIP safety, guided correction, retrie
   const regularRows = await Promise.all([baseline, february, march].map((item) => waitForDocument(projectId, item.name)));
   const archiveRow = await waitForDocument(projectId, "safe-evidence.txt");
   const archiveCopyRow = await waitForDocument(projectId, "safe-copy.txt");
+  for (const member of [archiveRow, archiveCopyRow]) {
+    // The helper below bypasses n8n claim, so catch stranded imports before it changes document state.
+    expect(["queued", "processing", "completed", "needs_review"]).toContain(member.processing_status);
+  }
   expect(archiveCopyRow.submission_id).toBe(archiveRow.submission_id);
   const { data: regularSubmission, error: regularSubmissionError } = await db().from("document_upload_submissions").select("batch_id").eq("id", regularRows[0].submission_id).eq("project_id", projectId).maybeSingle();
   const { data: archiveSubmission, error: archiveSubmissionError } = await db().from("document_upload_submissions").select("batch_id").eq("id", archiveRow.submission_id).eq("project_id", projectId).maybeSingle();
