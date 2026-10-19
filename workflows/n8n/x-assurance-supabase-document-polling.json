@@ -759,19 +759,6 @@
     },
     {
       "parameters": {
-        "jsCode": "const input = $input.first()?.json;\nconst rows = Array.isArray(input) ? input : Array.isArray(input?.body) ? input.body : input?.id ? [input] : [];\nreturn rows.filter((claimed) => claimed?.id && claimed.status === 'processing').map((claimed) => ({ json: { job_id: claimed.id, project_id: claimed.project_id, document_id: claimed.document_id, job_type: claimed.job_type, status: claimed.status, metadata: claimed.metadata ?? {} } }));"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        280,
-        -40
-      ],
-      "id": "74ee34e1-3d3a-46d5-b34f-4c4197eec44e",
-      "name": "Require Successful Claim"
-    },
-    {
-      "parameters": {
         "method": "POST",
         "url": "={{ $env.SUPABASE_URL + '/rest/v1/rpc/reset_document_job_results' }}",
         "sendHeaders": true,
@@ -824,7 +811,7 @@
       "main": [
         [
           {
-            "node": "Require Successful Claim",
+            "node": "Reset Previous Attempt",
             "type": "main",
             "index": 0
           }
@@ -1073,17 +1060,6 @@
         [
           {
             "node": "Normalize Job Payload",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Require Successful Claim": {
-      "main": [
-        [
-          {
-            "node": "Reset Previous Attempt",
             "type": "main",
             "index": 0
           }

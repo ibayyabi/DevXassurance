@@ -148,16 +148,38 @@ test("persisted evidence links preserve normalized multiline citations as exact 
     },
   }), /no verified source citation or valid confidence/);
 });
-test("claimed parse jobs normalize for processing while invalid rows are rejected", () => {
-  const normalize = (input) => executePollingCodeNode("Normalize Job Payload", { input }) .map((item) => item.json);
-  assert.deepEqual(normalize([{
+test("claimed parse jobs reach document processing without being dropped", () => {
+  function routeClaim(record) {
+    let input = [record];
+    let next = pollingWorkflow.connections["Claim Available Document Job"].main[0];
+    while (input.length && next.length) {
+      const node = nodeByName(pollingWorkflow.nodes, next[0].node);
+      let output = 0;
+      if (node.type === "n8n-nodes-base.httpRequest") return input;
+      if (node.type === "n8n-nodes-base.code") {
+        input = executePollingCodeNode(node.name, { input }).map((item) => item.json);
+      } else if (node.type === "n8n-nodes-base.if") {
+        const condition = node.parameters.conditions.conditions[0];
+        const expression = condition.leftValue.replace(/^=\{\{\s*|\s*\}\}$/g, "");
+        const value = new Function("$json", `return (${expression});`)(input[0]);
+        output = value === condition.rightValue ? 0 : 1;
+      } else {
+        assert.fail(`Unsupported claim-path node: ${node.type}`);
+      }
+      next = pollingWorkflow.connections[node.name]?.main[output] ?? [];
+    }
+    return [];
+  }
+
+  const claimed = {
     id: "job-a",
     project_id: "project-a",
     document_id: "document-a",
     job_type: "parse_document",
     status: "processing",
     metadata: { attempt: 2 },
-  }]), [{
+  };
+  assert.deepEqual(routeClaim(claimed), [{
     job_id: "job-a",
     project_id: "project-a",
     document_id: "document-a",
@@ -166,10 +188,14 @@ test("claimed parse jobs normalize for processing while invalid rows are rejecte
     metadata: { attempt: 2 },
     valid: true,
   }]);
-  assert.deepEqual(normalize([
-    { id: "job-b", project_id: "project-a", document_id: "document-b", job_type: "other", status: "processing" },
-    { id: "job-c", project_id: "project-a", document_id: "document-c", job_type: "parse_document", status: "queued" },
-  ]), []);
+  for (const rejected of [
+    [],
+    { ...claimed, status: "queued" },
+    { ...claimed, job_type: "other" },
+    { ...claimed, document_id: null },
+  ]) {
+    assert.deepEqual(routeClaim(rejected), []);
+  }
 });
 
 test("chunk evidence links resolve to worker-persisted chunk IDs", () => {
