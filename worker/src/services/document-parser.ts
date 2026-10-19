@@ -296,7 +296,7 @@ type ZipTextReader = {
   files: Record<string, unknown>;
 };
 
-const PARSER_VERSION = "document-parser/5";
+const PARSER_VERSION = "document-parser/6";
 const MAX_CHUNK_LENGTH = 4000;
 const PARAGRAPH_OVERLAP = 160;
 const CHUNK_CONTEXT_BUDGET = 900;
@@ -572,12 +572,12 @@ async function parseXlsxDocument(
       const xml = await zip.file(sheet.path)?.async("text");
       if (!xml) throw new Error(`The XLSX workbook is missing worksheet "${sheet.name}".`);
       const document = parseXml(xml, parser);
-      const merges = Array.from(document.getElementsByTagName("mergeCell"))
+      const merges = Array.from(document.getElementsByTagNameNS("*", "mergeCell"))
         .map((cell) => cell.getAttribute("ref"))
         .filter((reference): reference is string => Boolean(reference));
-      const rows = Array.from(document.getElementsByTagName("row")).map((row, index) => ({
+      const rows = Array.from(document.getElementsByTagNameNS("*", "row")).map((row, index) => ({
         number: Number(row.getAttribute("r")) || index + 1,
-        cells: Array.from(row.getElementsByTagName("c"))
+        cells: Array.from(row.getElementsByTagNameNS("*", "c"))
           .map((cell) => readWorkbookCell(cell, sharedStrings, numberFormats))
           .filter((cell) => cell.value || cell.formula),
       })).filter((row) => row.cells.length);
@@ -736,8 +736,8 @@ async function readSharedStrings(zip: ZipTextReader, parser: DOMParser) {
   const xml = await zip.file("xl/sharedStrings.xml")?.async("text");
   if (!xml) return [];
 
-  return Array.from(parseXml(xml, parser).getElementsByTagName("si")).map((item) =>
-    Array.from(item.getElementsByTagName("t"))
+  return Array.from(parseXml(xml, parser).getElementsByTagNameNS("*", "si")).map((item) =>
+    Array.from(item.getElementsByTagNameNS("*", "t"))
       .map((textNode) => textNode.textContent ?? "")
       .join(""),
   );
@@ -748,7 +748,7 @@ async function readWorkbookNumberFormats(zip: ZipTextReader, parser: DOMParser) 
   if (!xml) return [];
   const styles = parseXml(xml, parser);
   const customFormats = new Map(
-    Array.from(styles.getElementsByTagName("numFmt")).map((format) => [
+    Array.from(styles.getElementsByTagNameNS("*", "numFmt")).map((format) => [
       format.getAttribute("numFmtId"),
       format.getAttribute("formatCode"),
     ]),
@@ -764,7 +764,7 @@ async function readWorkbookNumberFormats(zip: ZipTextReader, parser: DOMParser) 
     "21": "h:mm:ss",
     "22": "m/d/yy h:mm",
   };
-  return Array.from(styles.getElementsByTagName("cellXfs")[0]?.getElementsByTagName("xf") ?? [])
+  return Array.from(styles.getElementsByTagNameNS("*", "cellXfs")[0]?.getElementsByTagNameNS("*", "xf") ?? [])
     .map((style) => {
       const id = style.getAttribute("numFmtId");
       const format = customFormats.get(id ?? "") ?? builtinDateFormats[id ?? ""];
@@ -815,7 +815,7 @@ async function readWorkbookSheets(zip: ZipTextReader, parser: DOMParser) {
   if (relationshipXml) {
     const relationships = parseXml(relationshipXml, parser);
     for (const relationship of Array.from(
-      relationships.getElementsByTagName("Relationship"),
+      relationships.getElementsByTagNameNS("*", "Relationship"),
     )) {
       const id = relationship.getAttribute("Id");
       const target = relationship.getAttribute("Target");
@@ -828,15 +828,18 @@ async function readWorkbookSheets(zip: ZipTextReader, parser: DOMParser) {
     }
   }
 
-  const sheets = Array.from(workbook.getElementsByTagName("sheet"))
+  const sheets = Array.from(workbook.getElementsByTagNameNS("*", "sheet"))
     .map((sheet, index) => ({
       name: sheet.getAttribute("name") || `Sheet ${index + 1}`,
       path:
-        pathsById.get(sheet.getAttribute("r:id") ?? "") ??
+        pathsById.get(
+          sheet.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id") ??
+          sheet.getAttributeNS("http://purl.oclc.org/ooxml/officeDocument/relationships", "id") ?? "",
+        ) ??
         `xl/worksheets/sheet${index + 1}.xml`,
     }));
   const date1904 = ["1", "true"].includes(
-    workbook.getElementsByTagName("workbookPr")[0]?.getAttribute("date1904")?.toLowerCase() ?? "",
+    workbook.getElementsByTagNameNS("*", "workbookPr")[0]?.getAttribute("date1904")?.toLowerCase() ?? "",
   );
   return {
     sheets: sheets.length
@@ -858,8 +861,8 @@ function readWorkbookCell(
   numberFormats: Array<{ format?: string; date: boolean }>,
 ) {
   const type = cell.getAttribute("t");
-  const rawValue = cell.getElementsByTagName("v")[0]?.textContent ?? "";
-  const formula = cell.getElementsByTagName("f")[0]?.textContent ?? "";
+  const rawValue = cell.getElementsByTagNameNS("*", "v")[0]?.textContent ?? "";
+  const formula = cell.getElementsByTagNameNS("*", "f")[0]?.textContent ?? "";
   const value = type === "s" ? sharedStrings[Number(rawValue)] ?? ""
     : type === "inlineStr" ? elementText(cell, "t")
     : type === "b" ? rawValue === "1" ? "TRUE" : "FALSE"
@@ -1422,7 +1425,7 @@ function mergeSourceLocations(blocks: SourceBlock[]): ParsedSourceLocation {
 }
 
 function parseXml(xml: string, parser = new DOMParser()) {
-  const document = parser.parseFromString(xml, "application/xml");
+  const document = parser.parseFromString(xml.startsWith("\uFEFF") ? xml.slice(1) : xml, "application/xml");
   if (!document.documentElement || document.getElementsByTagName("parsererror").length) {
     throw new Error("The document contains malformed XML.");
   }
@@ -1436,7 +1439,10 @@ function childElements(parent: Element) {
 }
 
 function elementText(element: Element, tagName: string) {
-  return Array.from(element.getElementsByTagName(tagName))
+  const nodes = tagName.includes(":")
+    ? element.getElementsByTagName(tagName)
+    : element.getElementsByTagNameNS("*", tagName);
+  return Array.from(nodes)
     .map((node) => node.textContent ?? "")
     .join("");
 }

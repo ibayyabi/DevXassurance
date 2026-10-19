@@ -102,7 +102,7 @@ test("TXT extraction keeps headings and source-linked bounded chunks across long
   for (let index = 1; index <= 24; index += 1) {
     assert.ok(result.chunks.some((chunk) => chunk.chunkText.includes(`PARAGRAPH-${index} `)));
   }
-  assert.equal(result.parserMetadata.parserVersion, "document-parser/5");
+  assert.equal(result.parserMetadata.parserVersion, "document-parser/6");
 });
 test("a single long paragraph is bounded without losing its boundary markers", async () => {
   const paragraph =
@@ -201,16 +201,19 @@ test("long DOCX paragraphs and table rows retain source content within the chunk
   assert.ok(contextualRowChunk?.chunkText.includes(header));
 });
 
-test("XLSX extraction retains sheet name, cell columns, and row range", async () => {
+test("XLSX extraction handles UTF-8 BOMs and namespace prefixes with source provenance", async () => {
+  const declaration = '\uFEFF<?xml version="1.0" encoding="UTF-8"?>';
   const result = await parseDocumentBuffer(
     "schedule.xlsx",
     await makeZip({
-      "xl/workbook.xml": `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets><sheet name="Milestones" sheetId="1" r:id="rId1" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></sheets></workbook>`,
-      "xl/worksheets/sheet1.xml": `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Milestone</t></is></c><c r="B1" t="inlineStr"><is><t>Status</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Commissioning</t></is></c><c r="B2" t="inlineStr"><is><t>At risk</t></is></c></row></sheetData></worksheet>`,
+      "xl/workbook.xml": `${declaration}<x:workbook xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:rel="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><x:sheets><x:sheet name="Milestones" sheetId="1" rel:id="rId1"/></x:sheets></x:workbook>`,
+      "xl/_rels/workbook.xml.rels": `${declaration}<p:Relationships xmlns:p="http://schemas.openxmlformats.org/package/2006/relationships"><p:Relationship Id="rId1" Target="worksheets/milestones.xml"/></p:Relationships>`,
+      "xl/sharedStrings.xml": `${declaration}<x:sst xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:si><x:t>Milestone</x:t></x:si><x:si><x:t>Commissioning</x:t></x:si></x:sst>`,
+      "xl/worksheets/milestones.xml": `${declaration}<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheetData><x:row r="1"><x:c r="A1" t="s"><x:v>0</x:v></x:c><x:c r="B1" t="inlineStr"><x:is><x:t>Status</x:t></x:is></x:c></x:row><x:row r="2"><x:c r="A2" t="s"><x:v>1</x:v></x:c><x:c r="B2" t="inlineStr"><x:is><x:t>At risk</x:t></x:is></x:c></x:row></x:sheetData></x:worksheet>`,
     }),
   );
 
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
   if (!result.ok) return;
   const chunk = result.chunks[0];
   assert.match(chunk.chunkText, /Milestones/);
