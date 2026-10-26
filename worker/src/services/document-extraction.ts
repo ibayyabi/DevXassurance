@@ -125,6 +125,7 @@ export type DocumentExtraction = {
   alerts: ExtractedAlert[];
   actions: ExtractedAction[];
   document_suggestions: DocumentSuggestions;
+  sheet_interpretations: SheetInterpretation[];
   quality_warnings: string[];
 };
 
@@ -155,6 +156,40 @@ type DocumentClassificationResult = {
   suggestion: DocumentClassificationSuggestion;
   qualityWarnings: string[];
 };
+type SheetSourceLocation = {
+  source_id: string;
+  sheet_name: string;
+  row_start: number | null;
+  row_end: number | null;
+  cell_reference: string | null;
+  cell_range_start: string | null;
+  cell_range_end: string | null;
+};
+type SheetInterpretation = {
+  interpretation_status: "resolved" | "ambiguous" | "unknown";
+  structure_type:
+    | "table"
+    | "key_value"
+    | "timeline_gantt"
+    | "narrative"
+    | "instructions_template"
+    | "mixed"
+    | "unknown";
+  sheet_name: string;
+  source_ids: string[];
+  header_candidates: Array<{ label: string; source_ids: string[]; source_locations: SheetSourceLocation[] }>;
+  column_roles: Array<{ column: string; role: string; source_ids: string[]; source_locations: SheetSourceLocation[] }>;
+  candidate_observations: Array<{
+    raw_value: string;
+    normalized_value: string | null;
+    value_type: string | null;
+    unit: string | null;
+    period: string | null;
+    source_ids: string[];
+    source_locations: SheetSourceLocation[];
+  }>;
+  warnings: string[];
+};
 type GroupExtraction = {
   facts: ExtractedFact[];
   summary: GroupSummary;
@@ -162,6 +197,7 @@ type GroupExtraction = {
   alerts: ExtractedAlert[];
   actions: ExtractedAction[];
   group_metadata_suggestions: GroupMetadataSuggestions;
+  sheet_interpretation?: SheetInterpretation;
   quality_warnings: string[];
 };
 type ChunkGroup = {
@@ -170,6 +206,7 @@ type ChunkGroup = {
   chunkEndIndex: number;
   groupKey: string;
   chunks: ParsedChunk[];
+  candidateInterpretation: string[];
 };
 type ModelProvider = {
   provider: "ollama" | "ollama_cloud" | "openai-compatible";
@@ -187,7 +224,7 @@ type GroupAttemptResult = {
 type GroupAttemptError = Error & { attempts: number; errorCode: string };
 class TransientProviderError extends Error {}
 
-const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/9";
+const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/11";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -267,7 +304,7 @@ export async function extractDocumentGroups(
     );
   }
   const contentHash = hashContent(job.fileBuffer);
-  const groups = buildChunkGroups(chunks, contentHash, parserVersion);
+  const groups = buildChunkGroups(chunks, contentHash, parserVersion, parserMetadata);
   if (groups.length > MAX_DOCUMENT_GROUPS) {
     return failure(
       "document_extraction_limit_exceeded",
@@ -435,10 +472,12 @@ function buildChunkGroups(
   chunks: ParsedChunk[],
   contentHash: string,
   parserVersion: string,
+  parserMetadata: Record<string, unknown>,
 ): ChunkGroup[] {
   const groups: ChunkGroup[] = [];
   let current: ParsedChunk[] = [];
   let currentLength = 0;
+  let currentScope: string | null = null;
 
   const flush = () => {
     if (!current.length) return;
@@ -464,24 +503,74 @@ function buildChunkGroups(
         text: chunk.chunkText,
       }))))
       .digest("hex");
-    groups.push({ groupIndex, chunkStartIndex, chunkEndIndex, groupKey, chunks: current });
+    const candidateInterpretation = collectCandidateInterpretation(current, parserMetadata);
+    groups.push({
+      groupIndex,
+      chunkStartIndex,
+      chunkEndIndex,
+      groupKey,
+      chunks: current,
+      candidateInterpretation,
+    });
     current = [];
     currentLength = 0;
   };
 
   for (const chunk of chunks) {
+    const sheetName = chunk.sourceLocation?.sheetName;
+    const tableNumber = chunk.sourceLocation?.tableNumber;
+    const nextScope = typeof sheetName === "string" && typeof tableNumber === "number"
+      ? `${sheetName}:${tableNumber}`
+      : null;
     const nextLength = currentLength + (current.length ? 2 : 0) + chunk.chunkText.length;
     if (
       current.length &&
-      (current.length >= MAX_GROUP_CHUNKS || nextLength > MAX_GROUP_CHARACTERS)
+      (
+        current.length >= MAX_GROUP_CHUNKS ||
+        nextLength > MAX_GROUP_CHARACTERS ||
+        (currentScope !== nextScope && (currentScope !== null || nextScope !== null))
+      )
     ) {
       flush();
     }
+    if (!current.length) currentScope = nextScope;
     current.push(chunk);
     currentLength += (current.length > 1 ? 2 : 0) + chunk.chunkText.length;
   }
   flush();
   return groups;
+}
+
+// Scope ambiguity to source ranges that overlap the diagnostic; a sheet name
+// alone would incorrectly route every table on that worksheet.
+function collectCandidateInterpretation(
+  chunks: ParsedChunk[],
+  parserMetadata: Record<string, unknown>,
+): string[] {
+  const warnings = Array.isArray(parserMetadata.warnings)
+    ? parserMetadata.warnings.filter((warning): warning is string => typeof warning === "string")
+    : [];
+  const diagnostics = warnings.filter((warning) => warning.includes("candidate ambiguity indicators"));
+  const references = chunks.flatMap((chunk) => sourceReferencesForChunk(chunk));
+  return diagnostics.flatMap((diagnostic) => {
+    const match = diagnostic.match(/^Sheet "(.+)" table rows (\d+)-(\d+) \(/);
+    if (!match) return [];
+    const [, sheetName, startText, endText] = match;
+    const rowStart = Number(startText);
+    const rowEnd = Number(endText);
+    const sourceIds = references
+      .filter((reference) => {
+        const location = reference.sourceLocation;
+        return location?.sheetName === sheetName &&
+          typeof location.rowStart === "number" &&
+          typeof location.rowEnd === "number" &&
+          location.rowStart <= rowEnd &&
+          location.rowEnd >= rowStart;
+      })
+      .map((reference) => reference.sourceId);
+    if (!sourceIds.length) return [];
+    return [`[candidate-only sheet interpretation] ${JSON.stringify({ diagnostic, source_ids: [...new Set(sourceIds)] })}`];
+  });
 }
 
 function groupRecord(
@@ -545,8 +634,11 @@ async function extractGroupWithCorrection(
         errorCode = "llm_group_extraction_failed";
         continue;
       }
-      if (validation.value.quality_warnings.length && attempt < MAX_GROUP_ATTEMPTS) {
-        corrections = validation.value.quality_warnings;
+      const retryableWarnings = validation.value.quality_warnings.filter(
+        (warning) => !warning.includes("formula_result_unavailable"),
+      );
+      if (retryableWarnings.length && attempt < MAX_GROUP_ATTEMPTS) {
+        corrections = retryableWarnings;
         lastError = `Optional extraction rows failed validation: ${corrections.join("; ")}`;
         errorCode = "llm_group_extraction_failed";
         continue;
@@ -604,6 +696,109 @@ function allowedSourceCitations(group: ChunkGroup) {
     ),
   );
 }
+function findSourceReference(group: ChunkGroup, sourceId: string) {
+  for (const chunk of group.chunks) {
+    const reference = sourceReferencesForChunk(chunk).find((source) => source.sourceId === sourceId);
+    if (reference) return reference;
+  }
+  return undefined;
+}
+function referenceHasUnavailableFormula(
+  chunk: ParsedChunk,
+  reference: ParsedSourceReference,
+): boolean {
+  const { sheetName, rowStart, rowEnd } = reference.sourceLocation ?? {};
+  if (
+    typeof sheetName !== "string" ||
+    typeof rowStart !== "number" ||
+    typeof rowEnd !== "number"
+  ) {
+    return false;
+  }
+  return (chunk.formulaCells ?? []).some((cell) =>
+    ["missing_cache", "cached_empty", "cached_error", "unknown"].includes(cell.formulaCacheStatus) &&
+    cell.sheetName === sheetName &&
+    cell.rowStart <= rowEnd &&
+    cell.rowEnd >= rowStart,
+  );
+}
+
+function sourceHasUnavailableFormula(group: ChunkGroup, sourceId: unknown): boolean {
+  if (typeof sourceId !== "string") return false;
+  return group.chunks.some((chunk) => {
+    const reference = sourceReferencesForChunk(chunk).find((source) => source.sourceId === sourceId);
+    return reference ? referenceHasUnavailableFormula(chunk, reference) : false;
+  });
+}
+
+function citationHasUnavailableFormula(
+  group: ChunkGroup,
+  citation: SourceCitation | null,
+): boolean {
+  if (!citation) return false;
+  return group.chunks.some((chunk) =>
+    sourceReferencesForChunk(chunk).some((reference) =>
+      reference.chunkIndex === citation.evidence_chunk_index &&
+      reference.text === citation.excerpt &&
+      referenceHasUnavailableFormula(chunk, reference),
+    ),
+  );
+}
+
+function resolveSheetSourceLocations(
+  group: ChunkGroup,
+  sourceIds: string[],
+  sheetName: string,
+): SheetSourceLocation[] | null {
+  const locations: SheetSourceLocation[] = [];
+  for (const sourceId of sourceIds) {
+    const reference = findSourceReference(group, sourceId);
+    const location = reference?.sourceLocation;
+    if (
+      !location ||
+      location.sheetName !== sheetName ||
+      typeof location.rowStart !== "number" ||
+      typeof location.rowEnd !== "number" ||
+      typeof location.cellRangeStart !== "string" ||
+      typeof location.cellRangeEnd !== "string"
+    ) {
+      return null;
+    }
+    locations.push({
+      source_id: sourceId,
+      sheet_name: sheetName,
+      row_start: location.rowStart,
+      row_end: location.rowEnd,
+      cell_reference: typeof location.cellReference === "string" ? location.cellReference : null,
+      cell_range_start: location.cellRangeStart,
+      cell_range_end: location.cellRangeEnd,
+    });
+  }
+  return locations;
+}
+function sourceContainsExactXlsxText(sourceText: string, value: string) {
+  const index = sourceText.indexOf(value);
+  if (index < 0) return false;
+  const before = sourceText.slice(0, index);
+  const after = sourceText.slice(index + value.length);
+  return (!before || /(?:\|\s*|:\s*)$/u.test(before)) &&
+    (!after || /^\s*(?:\||$)/u.test(after));
+}
+
+function sourceRangeContainsColumn(location: SheetSourceLocation, column: string) {
+  const columnNumber = (cell: string | null) => {
+    const letters = cell?.match(/^([A-Z]+)/i)?.[1]?.toUpperCase();
+    if (!letters) return null;
+    return [...letters].reduce((value, letter) => value * 26 + letter.charCodeAt(0) - 64, 0);
+  };
+  const target = columnNumber(`${column}1`);
+  const start = columnNumber(location.cell_range_start);
+  const end = columnNumber(location.cell_range_end);
+  return target !== null && start !== null && end !== null &&
+    target >= Math.min(start, end) && target <= Math.max(start, end);
+}
+
+
 function documentClassificationReferences(chunks: ParsedChunk[]) {
   const candidates: Array<{ chunk: ParsedChunk; reference: ParsedSourceReference }> = [];
   for (const chunk of chunks) {
@@ -834,6 +1029,7 @@ Rules:
 - This group may suggest document date, reporting period, and workstream only. Artifact type and evidence role are classified once from the document-level preview.
 - Use insufficient_evidence when a health dimension lacks direct evidence; absence of a negative statement is not evidence of green status.
 - A source-group health assessment is not a document comparison. Do not claim change or variance unless both values appear in these sources.
+- Formula expressions are not evaluated. Only cached values explicitly labeled as stored cache may be described. Missing, empty, or error cache yields formula_result_unavailable and must not generate numeric values, statuses, variances, progress, or facts. Do not recalculate, interpolate, or infer any formula result.
 - Return exactly one complete top-level JSON object: no leading text, trailing text, second JSON value, markdown, or code fence; nothing may follow its final closing brace. Use at most 50 facts, 20 alerts, and 20 actions.
 
 Document context:
@@ -843,6 +1039,7 @@ Document context:
 - intake document_date_hint (human hint, not evidence): ${JSON.stringify(job.documentDateHint ?? null)}
 - intake reporting_period_hint (human hint, not evidence): ${JSON.stringify(job.reportingPeriodHint ?? null)}
 - intake workstream_hint (human hint, not evidence): ${JSON.stringify(job.workstreamHint ?? null)}
+${group.candidateInterpretation.length ? `\nCandidate sheet interpretation (parser-authored, candidate-only, not accepted fact):\n${group.candidateInterpretation.map((item) => `- ${item}`).join("\n")}\n` : ""}
 
 SOURCE_REFERENCES_JSON=${JSON.stringify(sourceReferences)}
 
@@ -853,14 +1050,16 @@ Required JSON schema:
   "health_snapshots": [{"dimension":"overall|schedule|cost|risk|governance|audit_readiness","score":null,"status":"green|amber|red|insufficient_evidence","evidence_coverage":0.0,"status_text":"...","source_summary":"...","snapshot_date":null,"source_id":null}],
   "alerts": [{"severity":"low|medium|high|critical","impacted_area":"...","explanation":"...","evidence_count":1,"recommended_action":"...","source_id":"..."}],
   "actions": [{"title":"...","owner_name":null,"priority":"low|medium|high","status":"open","source_id":"..."}],
-  "group_metadata_suggestions": {"suggested_document_date":null,"detected_reporting_period":null,"suggested_workstream":null,"source_id":null}
+  "group_metadata_suggestions": {"suggested_document_date":null,"detected_reporting_period":null,"suggested_workstream":null,"source_id":null},
+  "sheet_interpretation": {"interpretation_status":"resolved|ambiguous|unknown","structure_type":"table|key_value|timeline_gantt|narrative|instructions_template|mixed|unknown","sheet_name":"...","source_ids":["..."],"header_candidates":[{"label":"exact source header text","source_ids":["..."]}],"column_roles":[{"column":"A","role":"...","source_ids":["..."]}],"candidate_observations":[{"raw_value":"exact source value","normalized_value":null,"value_type":null,"unit":null,"period":null,"source_ids":["..."]}],"warnings":["..."]}
 }
 
 For health snapshots, return exactly one entry for every listed dimension. Use exactly one of these status strings: "green", "amber", "red", "insufficient_evidence" (exact spelling). For "insufficient_evidence", set "score" and "source_id" to null and "evidence_coverage" to exactly 0.
 Other statuses require a matching source_id and a score within green 80-100, amber 50-79, or red 0-49.
 Health status_text and source_summary fields must each be nonempty strings no longer than 500 characters.
 Group metadata suggestions are limited to document date, reporting period, and workstream. Every non-null suggestion requires a valid source_id.
-Report document dates as YYYY-MM-DD and reporting periods as their first day YYYY-MM-01.${correction}`;
+Report document dates as YYYY-MM-DD and reporting periods as their first day YYYY-MM-01.
+sheet_interpretation is candidate-only and may appear only for parser-flagged ambiguous XLSX groups. Never invent cells, sheets, headers, cached values, dates, owners, or formula results. Cite each header, column role, and observation with source_ids from this group. The worker resolves those IDs to parser-authored sheet/cell/range locators; never provide locators yourself. Each header label and observation raw_value must be exact text present in its cited source. Normalized values remain candidates and must not replace raw evidence. If the group is not flagged ambiguous, omit the field.${correction}`;
 }
 
 function configuredModelProvider(): ModelProvider {
@@ -1078,6 +1277,9 @@ function validateGroupExtraction(
       const originalValue = boundedString(fact.original_value, `${path}.original_value`, rowErrors, MAX_MODEL_STRING_LENGTH);
       const confidence = boundedConfidence(fact.confidence, `${path}.confidence`, rowErrors);
       const citation = requiredCitation(fact, allowedSources, path, rowErrors, fromCache);
+      if (citation && citationHasUnavailableFormula(group, citation)) {
+        rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support an extracted fact.`);
+      }
       if (!FACT_TYPES.includes(factType as (typeof FACT_TYPES)[number])) rowErrors.push(`${path}.fact_type is invalid`);
       if (rowErrors.length) {
         warnInvalidRow(path, rowErrors);
@@ -1161,6 +1363,9 @@ function validateGroupExtraction(
       const citation = status === "insufficient_evidence"
         ? optionalCitation(snapshot, allowedSources, path, rowErrors, fromCache)
         : requiredCitation(snapshot, allowedSources, path, rowErrors, fromCache);
+      if (citation && citationHasUnavailableFormula(group, citation)) {
+        rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support a health status.`);
+      }
       if (status === "insufficient_evidence" && score !== null) rowErrors.push(`${path}.score must be null for insufficient_evidence`);
       if (status === "green" && (score === null || score < 80 || score > 100)) rowErrors.push(`${path}.score must be 80-100 for green`);
       if (status === "amber" && (score === null || score < 50 || score > 79)) rowErrors.push(`${path}.score must be 50-79 for amber`);
@@ -1229,6 +1434,9 @@ function validateGroupExtraction(
       const evidenceCount = boundedPositiveInteger(alert.evidence_count, `${path}.evidence_count`, rowErrors);
       const recommendedAction = boundedString(alert.recommended_action, `${path}.recommended_action`, rowErrors, 1000);
       const citation = requiredCitation(alert, allowedSources, path, rowErrors, fromCache);
+      if (citation && citationHasUnavailableFormula(group, citation)) {
+        rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support an alert.`);
+      }
       if (!["low", "medium", "high", "critical"].includes(severity)) rowErrors.push(`${path}.severity is invalid`);
       if (rowErrors.length) {
         warnInvalidRow(path, rowErrors);
@@ -1261,6 +1469,9 @@ function validateGroupExtraction(
       const priority = stringField(action.priority);
       const status = stringField(action.status);
       const citation = requiredCitation(action, allowedSources, path, rowErrors, fromCache);
+      if (citation && citationHasUnavailableFormula(group, citation)) {
+        rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support an action.`);
+      }
       if (!["low", "medium", "high"].includes(priority)) rowErrors.push(`${path}.priority is invalid`);
       if (status !== "open") rowErrors.push(`${path}.status must be open for a recommended action`);
       if (rowErrors.length) {
@@ -1281,7 +1492,14 @@ function validateGroupExtraction(
     value.group_metadata_suggestions,
     allowedSources,
     qualityWarnings,
+    group,
     fromCache,
+  );
+  const sheetInterpretation = validateSheetInterpretation(
+    value.sheet_interpretation,
+    group,
+    allowedSources,
+    qualityWarnings,
   );
   if (errors.length || !summary) {
     return { ok: false, errors: [...new Set(errors)].slice(0, 20) };
@@ -1294,9 +1512,170 @@ function validateGroupExtraction(
       health_snapshots: snapshots,
       alerts,
       actions,
+      sheet_interpretation: sheetInterpretation,
       group_metadata_suggestions: suggestions,
       quality_warnings: [...new Set(qualityWarnings)],
     },
+  };
+}
+
+// Candidate-only: the model describes structure but cannot create evidence or
+// locators; every citation resolves to this group's parser-authored source ranges.
+function validateSheetInterpretation(
+  value: unknown,
+  group: ChunkGroup,
+  allowedSources: Map<string, SourceCitation>,
+  qualityWarnings: string[],
+): SheetInterpretation | undefined {
+  const reject = (message: string) => {
+    qualityWarnings.push(message);
+    return undefined;
+  };
+  if (!group.candidateInterpretation.length) {
+    return value === undefined || value === null
+      ? undefined
+      : reject("sheet_interpretation was excluded because the group was not flagged ambiguous by the parser.");
+  }
+  if (value === undefined || value === null) {
+    return reject("The parser flagged an ambiguous XLSX group, but no candidate sheet_interpretation was returned.");
+  }
+  if (!isRecord(value)) {
+    return reject("sheet_interpretation was not an object; no candidate interpretation was accepted.");
+  }
+  const interpretationStatus = stringField(value.interpretation_status);
+  const structureType = stringField(value.structure_type);
+  const validStatus = ["resolved", "ambiguous", "unknown"].includes(interpretationStatus);
+  const validStructure = ["table", "key_value", "timeline_gantt", "narrative", "instructions_template", "mixed", "unknown"].includes(structureType);
+  if (!validStatus || !validStructure) {
+    return reject("sheet_interpretation was excluded because interpretation_status or structure_type was invalid.");
+  }
+  const sheetName = stringField(value.sheet_name).trim();
+  const groupSheets = new Set(
+    group.chunks.flatMap((chunk) =>
+      sourceReferencesForChunk(chunk)
+        .map((source) => source.sourceLocation?.sheetName)
+        .filter((name): name is string => typeof name === "string"),
+    ),
+  );
+  if (!sheetName || !groupSheets.has(sheetName)) {
+    return reject(`sheet_interpretation was excluded because sheet_name "${sheetName}" does not match a source sheet in this group.`);
+  }
+  const sourceIds = Array.isArray(value.source_ids)
+    ? value.source_ids.filter((id): id is string => typeof id === "string" && id.length > 0)
+    : [];
+  if (!sourceIds.length || sourceIds.length > 50 || sourceIds.some((id) => !allowedSources.has(id))) {
+    return reject("sheet_interpretation was excluded because it had no valid source IDs from this group.");
+  }
+  const sourceLocations = resolveSheetSourceLocations(group, sourceIds, sheetName);
+  if (!sourceLocations || sourceLocations.length !== sourceIds.length) {
+    return reject("sheet_interpretation was excluded because a cited source does not resolve to a real locator on the named sheet.");
+  }
+  const citationsFor = (rawIds: unknown) => {
+    if (!Array.isArray(rawIds) || rawIds.length === 0) return null;
+    const ids = rawIds.filter((id): id is string => typeof id === "string" && sourceIds.includes(id));
+    if (ids.length !== rawIds.length) return null;
+    const locations = resolveSheetSourceLocations(group, ids, sheetName);
+    return locations ? { ids, locations } : null;
+  };
+  const headerCandidates: SheetInterpretation["header_candidates"] = [];
+  if (!Array.isArray(value.header_candidates) || value.header_candidates.length > 20) {
+    return reject("sheet_interpretation.header_candidates must be an array with at most 20 entries.");
+  }
+  for (const candidate of value.header_candidates) {
+    if (!isRecord(candidate) || typeof candidate.label !== "string" || !candidate.label.trim() || candidate.label.length > 500) {
+      return reject("A header candidate was excluded because it lacked a bounded source label.");
+    }
+    const citation = citationsFor(candidate.source_ids);
+    const label = candidate.label.trim();
+    if (!citation || !citation.ids.some((id) => {
+      const source = findSourceReference(group, id);
+      return source ? sourceContainsExactXlsxText(source.text, label) : false;
+    })) {
+      return reject("A header candidate was excluded because its source IDs were invalid or the label was not present in the cited source.");
+    }
+    headerCandidates.push({ label, source_ids: citation.ids, source_locations: citation.locations });
+  }
+  const columnRoles: SheetInterpretation["column_roles"] = [];
+  if (!Array.isArray(value.column_roles) || value.column_roles.length > 32) {
+    return reject("sheet_interpretation.column_roles must be an array with at most 32 entries.");
+  }
+  for (const candidate of value.column_roles) {
+    if (!isRecord(candidate) || typeof candidate.column !== "string" || typeof candidate.role !== "string") {
+      return reject("A column role was excluded because it was not a structured column/role pair.");
+    }
+    const column = candidate.column.trim().toUpperCase();
+    const role = candidate.role.trim();
+    const citation = citationsFor(candidate.source_ids);
+    if (
+      !/^[A-Z]{1,3}$/.test(column) ||
+      !role ||
+      role.length > 200 ||
+      !citation ||
+      !citation.locations.some((location) => sourceRangeContainsColumn(location, column))
+    ) {
+      return reject("A column role was excluded because its column/range or source IDs were invalid.");
+    }
+    columnRoles.push({ column, role, source_ids: citation.ids, source_locations: citation.locations });
+  }
+  const candidateObservations: SheetInterpretation["candidate_observations"] = [];
+  if (!Array.isArray(value.candidate_observations) || value.candidate_observations.length > 20) {
+    return reject("sheet_interpretation.candidate_observations must be an array with at most 20 entries.");
+  }
+  for (const candidate of value.candidate_observations) {
+    if (!isRecord(candidate) || typeof candidate.raw_value !== "string" || !candidate.raw_value.trim() || candidate.raw_value.length > 500) {
+      return reject("A candidate observation was excluded because it lacked a bounded raw_value.");
+    }
+    const rawValue = candidate.raw_value.trim();
+    const citation = citationsFor(candidate.source_ids);
+    if (!citation) {
+      return reject("A candidate observation was excluded because its citations were invalid.");
+    }
+    if (citation.ids.some((id) => sourceHasUnavailableFormula(group, id))) {
+      return reject("A candidate observation was excluded because its cited formula_result_unavailable cannot be treated as an observation.");
+    }
+    if (!citation.ids.some((id) => {
+      const source = findSourceReference(group, id);
+      return source ? sourceContainsExactXlsxText(source.text, rawValue) : false;
+    })) {
+      return reject("A candidate observation was excluded because raw_value was not present in its cited source.");
+    }
+    const optionalText = (field: string) => {
+      const fieldValue = candidate[field];
+      return fieldValue === undefined || fieldValue === null
+        ? null
+        : typeof fieldValue === "string" && fieldValue.trim().length <= 200
+          ? fieldValue.trim() || null
+          : undefined;
+    };
+    const normalizedValue = optionalText("normalized_value");
+    const valueType = optionalText("value_type");
+    const unit = optionalText("unit");
+    const period = optionalText("period");
+    if ([normalizedValue, valueType, unit, period].includes(undefined)) {
+      return reject("A candidate observation was excluded because a normalized value, type, unit, or period exceeded the allowed text shape.");
+    }
+    candidateObservations.push({
+      raw_value: rawValue,
+      normalized_value: normalizedValue ?? null,
+      value_type: valueType ?? null,
+      unit: unit ?? null,
+      period: period ?? null,
+      source_ids: citation.ids,
+      source_locations: citation.locations,
+    });
+  }
+  const warnings = Array.isArray(value.warnings)
+    ? value.warnings.filter((warning): warning is string => typeof warning === "string" && warning.trim().length > 0).slice(0, 20).map((warning) => warning.slice(0, 500))
+    : [];
+  return {
+    interpretation_status: interpretationStatus as SheetInterpretation["interpretation_status"],
+    structure_type: structureType as SheetInterpretation["structure_type"],
+    sheet_name: sheetName,
+    source_ids: sourceIds,
+    header_candidates: headerCandidates,
+    column_roles: columnRoles,
+    candidate_observations: candidateObservations,
+    warnings,
   };
 }
 
@@ -1304,6 +1683,7 @@ function validateGroupMetadataSuggestions(
   value: unknown,
   allowedSources: Map<string, SourceCitation>,
   qualityWarnings: string[],
+  group: ChunkGroup,
   fromCache = false,
 ): GroupMetadataSuggestions {
   const empty: GroupMetadataSuggestions = {
@@ -1344,6 +1724,10 @@ function validateGroupMetadataSuggestions(
     : optionalCitation(value, allowedSources, "group_metadata_suggestions", citationErrors, fromCache);
   if (citationErrors.length) {
     qualityWarnings.push(`Group metadata was excluded because ${citationErrors.join("; ")}.`);
+    return empty;
+  }
+  if (citation && citationHasUnavailableFormula(group, citation)) {
+    qualityWarnings.push("Group metadata was excluded because its source has formula_result_unavailable.");
     return empty;
   }
   return {
@@ -1518,6 +1902,18 @@ function aggregateGroups(
       `${action.title}\0${action.evidence_chunk_index}`,
     ),
     document_suggestions: suggestionAggregation.suggestions,
+    sheet_interpretations: groups.flatMap((group, index) => {
+      const interpretation = group.value.sheet_interpretation;
+      if (!interpretation) return [];
+      return [{
+        ...interpretation,
+        interpretation_status: interpretation.interpretation_status,
+        warnings: [
+          `Candidate-only interpretation for group ${chunkGroups[index].chunkStartIndex}-${chunkGroups[index].chunkEndIndex}; not accepted fact, health status, or business mapping.`,
+          ...interpretation.warnings,
+        ],
+      }];
+    }),
     quality_warnings: uniqueText(qualityWarnings),
   };
 }

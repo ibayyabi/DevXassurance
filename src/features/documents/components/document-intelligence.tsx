@@ -506,6 +506,23 @@ function DocumentRow({
           {document.processingError}
         </p>
       )}
+      {document.reviewDetails.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {document.reviewDetails.map((detail) => (
+            <details key={detail.key} className="rounded-lg border border-ui-border bg-base px-3 py-2 text-sm">
+              <summary className="cursor-pointer font-medium text-ink">{detail.title}</summary>
+              <ul className="mt-2 space-y-1 pl-5 text-ink-muted">
+                {detail.entries.map((entry, index) => (
+                  <li key={`${detail.key}-${index}`}>{entry}</li>
+                ))}
+                {detail.omittedCount > 0 && (
+                  <li>{detail.omittedCount} additional entries not shown.</li>
+                )}
+              </ul>
+            </details>
+          ))}
+        </div>
+      )}
 
       {document.processingStatus === "failed" && (
         <form action={retryDocumentProcessing} className="mt-3">

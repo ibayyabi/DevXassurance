@@ -45,6 +45,13 @@ export type EvidenceDocument = {
   effectiveDocumentDate: string | null;
   effectiveReportingPeriod: string | null;
   effectiveWorkstream: string | null;
+  reviewDetails: DocumentReviewDetail[];
+};
+export type DocumentReviewDetail = {
+  key: string;
+  title: string;
+  entries: string[];
+  omittedCount: number;
 };
 export type ExtractedFact = {
   id: string;
@@ -201,15 +208,28 @@ export async function getDocumentIntelligence(projectId: string) {
         .order("created_at", { ascending: false })
     ]);
 
-  if (documentsError) throw new Error(documentsError.message);
-  if (factsError) throw new Error(factsError.message);
-  if (summaryError) throw new Error(summaryError.message);
-  if (submissionError) throw new Error(submissionError.message);
+  const documentIds = (documentsData ?? []).map((row) => row.id);
+  let reviewChunkData: Array<{ document_id: string; parser_metadata: Record<string, unknown> | null }> = [];
+  if (documentIds.length) {
+    const { data, error } = await supabase
+      .from("document_chunks")
+      .select("document_id, parser_metadata")
+      .eq("project_id", projectId)
+      .in("document_id", documentIds);
+    if (error) throw new Error(error.message);
+    reviewChunkData = (data ?? []) as unknown as typeof reviewChunkData;
+  }
+  const metadataByDocument = new Map<string, unknown[]>();
+  for (const row of reviewChunkData) {
+    const metadata = metadataByDocument.get(row.document_id) ?? [];
+    metadata.push(row.parser_metadata);
+    metadataByDocument.set(row.document_id, metadata);
+  }
 
   return {
     membership,
-    documents: ((documentsData ?? []) as unknown as DocumentRow[]).map(
-      mapDocument,
+    documents: ((documentsData ?? []) as unknown as DocumentRow[]).map((row) =>
+      mapDocument(row, readDocumentReviewDetails(metadataByDocument.get(row.id) ?? [])),
     ),
     facts: ((factsData ?? []) as unknown as FactRow[]).map(mapFact),
     summaries: ((summaryData ?? []) as unknown as SummaryRow[]).map(mapSummary),
@@ -227,7 +247,10 @@ export async function getDocumentIntelligence(projectId: string) {
   };
 }
 
-function mapDocument(row: DocumentRow): EvidenceDocument {
+function mapDocument(
+  row: DocumentRow,
+  reviewDetails: DocumentReviewDetail[] = [],
+): EvidenceDocument {
   const effective = resolveDocumentMetadata(row);
   return {
     id: row.id,
@@ -268,8 +291,118 @@ function mapDocument(row: DocumentRow): EvidenceDocument {
     effectiveDocumentDate: effective.documentDate,
     effectiveReportingPeriod: effective.reportingPeriod,
     effectiveWorkstream: effective.workstream,
+    reviewDetails,
   };
 }
+
+function readDocumentReviewDetails(metadataRows: unknown[]): DocumentReviewDetail[] {
+  const formulaCells = new Map<string, string[]>();
+  const interpretations = new Map<string, Record<string, unknown>>();
+  for (const value of metadataRows) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const metadata = value as Record<string, unknown>;
+    if (Array.isArray(metadata.formulaCells)) {
+      for (const value of metadata.formulaCells) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+        const cell = value as Record<string, unknown>;
+        if (typeof cell.formulaCacheStatus !== "string") continue;
+        const status = cell.formulaCacheStatus;
+        if (!["cached_value", "cached_empty", "missing_cache", "cached_error", "unknown"].includes(status)) continue;
+        const sheet = typeof cell.sheetName === "string" ? cell.sheetName : "Unknown sheet";
+        const reference = typeof cell.cellReference === "string" ? cell.cellReference : "Unknown cell";
+        const formula = typeof cell.formula === "string" ? cell.formula.slice(0, 300) : "";
+        const raw = typeof cell.formulaCacheRaw === "string" ? cell.formulaCacheRaw.slice(0, 100) : null;
+        const type = typeof cell.formulaCacheType === "string" ? cell.formulaCacheType : null;
+        const provenance = cell.cacheProvenance === "stored_cached_result"
+          ? "stored cached result; freshness not established"
+          : null;
+        const entry = `${sheet}!${reference}: ${formula || "(formula text unavailable)"} → ${status}${provenance ? ` (${provenance})` : ""}${type ? `; type ${type}` : ""}${raw !== null ? `; raw cache ${JSON.stringify(raw)}` : ""}`;
+        const entries = formulaCells.get(status) ?? [];
+        entries.push(entry);
+        formulaCells.set(status, entries);
+      }
+    }
+    if (Array.isArray(metadata.sheetInterpretations)) {
+      for (const value of metadata.sheetInterpretations) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+        const interpretation = value as Record<string, unknown>;
+        interpretations.set(JSON.stringify(interpretation), interpretation);
+      }
+    }
+  }
+
+  const details: DocumentReviewDetail[] = [];
+  const formulaTitles: Record<string, string> = {
+    cached_value: "Stored formula cache",
+    cached_empty: "Formula cache is empty",
+    missing_cache: "Formula result unavailable",
+    cached_error: "Formula cache contains spreadsheet error",
+    unknown: "Formula cache needs review",
+  };
+  for (const [status, entries] of formulaCells) {
+    details.push({
+      key: `formula-${status}`,
+      title: `${formulaTitles[status] ?? "Formula cache"} (${entries.length} cell${entries.length === 1 ? "" : "s"})`,
+      entries: entries.slice(0, 8),
+      omittedCount: Math.max(0, entries.length - 8),
+    });
+  }
+  let interpretationIndex = 0;
+  for (const interpretation of interpretations.values()) {
+    const sheet = typeof interpretation.sheet_name === "string" ? interpretation.sheet_name : "Unknown sheet";
+    const status = typeof interpretation.interpretation_status === "string" ? interpretation.interpretation_status : "unknown";
+    const structure = typeof interpretation.structure_type === "string" ? interpretation.structure_type : "unknown";
+    const entries: string[] = [];
+    const addEntries = (key: string, format: (value: Record<string, unknown>) => string) => {
+      const values = Array.isArray(interpretation[key]) ? interpretation[key] as unknown[] : [];
+      for (const value of values) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+        entries.push(format(value as Record<string, unknown>));
+      }
+    };
+    const formatLocations = (value: unknown) => {
+      const locations = Array.isArray(value)
+        ? value.filter((location): location is Record<string, unknown> =>
+          Boolean(location) && typeof location === "object" && !Array.isArray(location),
+        )
+        : [];
+      return locations.map((location) => {
+        const locationSheet = typeof location.sheet_name === "string" ? location.sheet_name : sheet;
+        const cell = typeof location.cell_reference === "string"
+          ? location.cell_reference
+          : typeof location.cell_range_start === "string"
+            ? `${location.cell_range_start}-${typeof location.cell_range_end === "string" ? location.cell_range_end : location.cell_range_start}`
+            : typeof location.row_start === "number"
+              ? `rows ${location.row_start}-${typeof location.row_end === "number" ? location.row_end : location.row_start}`
+              : "";
+        return cell ? `${locationSheet}!${cell}` : locationSheet;
+      }).join(", ");
+    };
+    addEntries("header_candidates", (value) =>
+      `Header candidate: ${String(value.label ?? "")} [${formatLocations(value.source_locations)}]`,
+    );
+    addEntries("column_roles", (value) =>
+      `Column ${String(value.column ?? "?")}: ${String(value.role ?? "")} [${formatLocations(value.source_locations)}]`,
+    );
+    addEntries("candidate_observations", (value) => {
+      const normalized = typeof value.normalized_value === "string" ? ` → ${value.normalized_value}` : "";
+      const unit = typeof value.unit === "string" ? ` ${value.unit}` : "";
+      const period = typeof value.period === "string" ? ` (${value.period})` : "";
+      return `Observation: ${String(value.raw_value ?? "")}${normalized}${unit}${period} [${formatLocations(value.source_locations)}]`;
+    });
+    if (Array.isArray(interpretation.warnings)) {
+      entries.push(...interpretation.warnings.filter((warning): warning is string => typeof warning === "string").slice(0, 8));
+    }
+    details.push({
+      key: `sheet-interpretation-${interpretationIndex++}`,
+      title: `Candidate only · ${sheet} (${structure}; ${status})`,
+      entries: entries.slice(0, 12),
+      omittedCount: Math.max(0, entries.length - 12),
+    });
+  }
+  return details;
+}
+
 
 function mapFact(row: FactRow): ExtractedFact {
   return {

@@ -1,0 +1,3 @@
+# Evidence authority is field-specific
+
+The pipeline evaluates authority by value meaning, domain, scope, period, and explicit approval; it does not rank all documents globally or let the newest upload overwrite other claims. Clear, source-located observations may be assessment-eligible after validation, while baseline and mapping decisions require reviewer acceptance and unclear conflicts remain for review. Cross-currency values use the project's approved reporting currency and date-specific rate source; missing approved rates leave the comparison unresolved. Budget variance includes exchange-rate movement when baseline and forecast use rates from their respective value dates.

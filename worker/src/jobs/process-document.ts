@@ -40,13 +40,33 @@ export async function processDocumentJob(
 
   const extraction = result.extraction;
   const classificationNeedsReview = suggestionsNeedReview(job, extraction.document_suggestions);
-  const needsReview = classificationNeedsReview || extraction.quality_warnings.length > 0;
+  const unresolvedFormulaCells = parsed.chunks.flatMap((chunk) =>
+    (chunk.formulaCells ?? []).filter((cell) =>
+      ["missing_cache", "cached_empty", "cached_error", "unknown"].includes(cell.formulaCacheStatus),
+    ),
+  );
+  const formulaReviewMessages = unresolvedFormulaCells.length
+    ? [`Formula results are unavailable for ${unresolvedFormulaCells.length} cell(s); examples: ${unresolvedFormulaCells.slice(0, 3).map((cell) => `${cell.sheetName}!${cell.cellReference} formula "${cell.formula}" (${cell.formulaCacheStatus})`).join("; ")}. Recalculate and save the workbook before relying on formula results.`]
+    : [];
+  const interpretationReviewMessages = extraction.sheet_interpretations.length
+    ? [`${extraction.sheet_interpretations.length} candidate-only XLSX sheet interpretation(s) need reviewer confirmation before use as a mapping.`]
+    : [];
+  const needsReview =
+    classificationNeedsReview ||
+    extraction.quality_warnings.length > 0 ||
+    unresolvedFormulaCells.length > 0 ||
+    extraction.sheet_interpretations.length > 0;
   const reviewMessages = [
     ...(classificationNeedsReview
       ? [`Review AI artifact type and evidence role; artifact-type confidence must be at least ${MIN_READY_CLASSIFICATION_CONFIDENCE} with no conflicting intake hints. ${extraction.document_suggestions.classification_reason ?? ""}`.trim()]
       : []),
+    ...formulaReviewMessages,
+    ...interpretationReviewMessages,
     ...extraction.quality_warnings,
   ];
+  const parserWarnings = Array.isArray(parsed.parserMetadata.warnings)
+    ? parsed.parserMetadata.warnings.filter((warning): warning is string => typeof warning === "string")
+    : [];
   return {
     jobId: job.jobId,
     projectId: job.projectId,
@@ -62,6 +82,17 @@ export async function processDocumentJob(
       parser_metadata: {
         ...parsed.parserMetadata,
         sourceLocation: chunk.sourceLocation ?? null,
+        warnings: parserWarnings.filter((warning) =>
+          !warning.includes(' has formula "') ||
+          (chunk.formulaCells ?? []).some((cell) =>
+            warning.startsWith(`Sheet "${cell.sheetName}" cell ${cell.cellReference} has formula "`),
+          ),
+        ),
+        formulaCells: chunk.formulaCells ?? [],
+        sheetInterpretations: extraction.sheet_interpretations.filter((interpretation) =>
+          interpretation.source_ids[0] &&
+          chunk.sourceReferences?.some((source) => source.sourceId === interpretation.source_ids[0]),
+        ),
       },
     })),
     facts: extraction.facts,
@@ -76,6 +107,7 @@ export async function processDocumentJob(
       ...parsed.parserMetadata,
       llmProvider: extraction.provider,
       llmModel: extraction.model,
+      sheetInterpretations: extraction.sheet_interpretations,
     },
   };
 }

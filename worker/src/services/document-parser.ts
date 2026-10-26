@@ -18,6 +18,12 @@ const MAX_PDF_TEXT_CHARACTERS = 320_000;
 const MAX_PDF_PAGE_TEXT_CHARACTERS = 64_000;
 const MAX_SCANNED_PDF_PAGES = 20;
 
+const OCR_ENGINE = "rapidocr";
+const OCR_MODEL = "PP-OCRv6";
+const OCR_MODEL_SIZE = "tiny";
+const OCR_BACKEND = "onnxruntime-cpu";
+const OCR_ROUTE = "id";
+
 class OfficePackageError extends Error {
   constructor(
     readonly code: "office_package_size_limit" | "office_package_unsupported" | "office_package_invalid",
@@ -65,6 +71,10 @@ async function loadOfficePackage(buffer: ArrayBuffer) {
   }
 }
 
+type PdfPageEntry =
+  | { pageNumber: number; text: string }
+  | { pageNumber: number; imagePath: string };
+
 async function parsePdfDocument(
   fileName: string,
   buffer: ArrayBuffer,
@@ -94,6 +104,7 @@ async function parsePdfDocument(
     let scannedPageCount = 0;
     let totalTextLength = 0;
     let currentSectionLabel: string | undefined;
+    const pageEntries: PdfPageEntry[] = [];
 
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
@@ -108,21 +119,10 @@ async function parsePdfDocument(
             )
             .join(""),
         );
-        if (pageText.length > MAX_PDF_PAGE_TEXT_CHARACTERS) {
-          return {
-            ok: false,
-            errorCode: "pdf_text_limit_exceeded",
-            errorMessage: `PDF page ${pageNumber} exceeds the ${MAX_PDF_PAGE_TEXT_CHARACTERS}-character page text limit. Split the PDF and retry.`,
-          };
+        if (pageText) {
+          pageEntries.push({ pageNumber, text: pageText });
+          continue;
         }
-        if (totalTextLength + pageText.length > MAX_PDF_TEXT_CHARACTERS) {
-          return {
-            ok: false,
-            errorCode: "pdf_text_limit_exceeded",
-            errorMessage: `The PDF exceeds the ${MAX_PDF_TEXT_CHARACTERS}-character extracted-text limit. Split the PDF into smaller evidence files and retry.`,
-          };
-        }
-        totalTextLength += pageText.length;
         const operators = await page.getOperatorList();
         const containsImage = operators.fnArray.some(
           (operator) =>
@@ -130,70 +130,78 @@ async function parsePdfDocument(
             operator === OPS.paintInlineImageXObject ||
             operator === OPS.paintImageMaskXObject,
         );
-
-        if (pageText) {
-          const pageBlocks = paragraphBlocks(
-            pageText,
-            { kind: "pdf", pageNumber },
-            `page:${pageNumber}`,
-            currentSectionLabel,
-          );
-          blocks.push(...pageBlocks);
-          currentSectionLabel = pageBlocks.at(-1)?.sectionLabel ?? currentSectionLabel;
-        } else if (containsImage) {
-          if (scannedPageCount >= MAX_SCANNED_PDF_PAGES) {
-            return {
-              ok: false,
-              errorCode: "pdf_ocr_page_limit_exceeded",
-              errorMessage: `The PDF has more than ${MAX_SCANNED_PDF_PAGES} scanned pages requiring OCR. Split the PDF into smaller evidence files and retry.`,
-            };
-          }
-          scannedPageCount += 1;
-          if (!temporaryDirectory) {
-            temporaryDirectory = await mkdtemp(join(tmpdir(), "xass-pdf-ocr-"));
-          }
-
-          const imagePath = await renderPdfPageWithGhostscript(
-            buffer,
-            pageNumber,
-            temporaryDirectory,
-          );
-          const ocrText = normalizeText(await recognizeImage(imagePath));
-          if (!ocrText) {
-            return {
-              ok: false,
-              errorCode: "ocr_no_text",
-              errorMessage: `OCR found no readable text on PDF page ${pageNumber}.`,
-            };
-          }
-          if (ocrText.length > MAX_PDF_PAGE_TEXT_CHARACTERS) {
-            return {
-              ok: false,
-              errorCode: "pdf_text_limit_exceeded",
-              errorMessage: `OCR text on PDF page ${pageNumber} exceeds the ${MAX_PDF_PAGE_TEXT_CHARACTERS}-character page text limit.`,
-            };
-          }
-          if (totalTextLength + ocrText.length > MAX_PDF_TEXT_CHARACTERS) {
-            return {
-              ok: false,
-              errorCode: "pdf_text_limit_exceeded",
-              errorMessage: `The PDF exceeds the ${MAX_PDF_TEXT_CHARACTERS}-character extracted-text limit. Split the PDF into smaller evidence files and retry.`,
-            };
-          }
-          totalTextLength += ocrText.length;
-          const pageBlocks = paragraphBlocks(
-            ocrText,
-            { kind: "pdf", pageNumber, ocr: "tesseract" },
-            `page:${pageNumber}`,
-            currentSectionLabel,
-          );
-          blocks.push(...pageBlocks);
-          currentSectionLabel = pageBlocks.at(-1)?.sectionLabel ?? currentSectionLabel;
-          warnings.push(`OCR was used for scanned PDF page ${pageNumber}.`);
+        if (!containsImage) continue;
+        if (scannedPageCount >= MAX_SCANNED_PDF_PAGES) {
+          return {
+            ok: false,
+            errorCode: "pdf_ocr_page_limit_exceeded",
+            errorMessage: `The PDF has more than ${MAX_SCANNED_PDF_PAGES} scanned pages requiring OCR. Split the PDF into smaller evidence files and retry.`,
+          };
         }
+        scannedPageCount += 1;
+        if (!temporaryDirectory) {
+          temporaryDirectory = await mkdtemp(join(tmpdir(), "xass-pdf-ocr-"));
+        }
+        const imagePath = await renderPdfPageWithGhostscript(
+          buffer,
+          pageNumber,
+          temporaryDirectory,
+        );
+        pageEntries.push({ pageNumber, imagePath });
       } finally {
         page.cleanup();
       }
+    }
+
+    // One helper process and one engine initialization for every scanned page.
+    const ocr = scannedPageCount
+      ? await recognizeImages(
+          pageEntries.flatMap((entry) => ("imagePath" in entry ? [entry.imagePath] : [])),
+        )
+      : undefined;
+
+    let scannedIndex = 0;
+    for (const entry of pageEntries) {
+      let text: string;
+      if ("text" in entry) {
+        text = entry.text;
+      } else {
+        text = normalizeText(ocr?.texts[scannedIndex] ?? "");
+        scannedIndex += 1;
+        if (!text) {
+          return {
+            ok: false,
+            errorCode: "ocr_no_text",
+            errorMessage: `OCR found no readable text on PDF page ${entry.pageNumber}.`,
+          };
+        }
+        warnings.push(`OCR was used for scanned PDF page ${entry.pageNumber}.`);
+      }
+      if (text.length > MAX_PDF_PAGE_TEXT_CHARACTERS) {
+        return {
+          ok: false,
+          errorCode: "pdf_text_limit_exceeded",
+          errorMessage: `PDF page ${entry.pageNumber} exceeds the ${MAX_PDF_PAGE_TEXT_CHARACTERS}-character page text limit. Split the PDF and retry.`,
+        };
+      }
+      if (totalTextLength + text.length > MAX_PDF_TEXT_CHARACTERS) {
+        return {
+          ok: false,
+          errorCode: "pdf_text_limit_exceeded",
+          errorMessage: `The PDF exceeds the ${MAX_PDF_TEXT_CHARACTERS}-character extracted-text limit. Split the PDF into smaller evidence files and retry.`,
+        };
+      }
+      totalTextLength += text.length;
+      const pageBlocks = paragraphBlocks(
+        text,
+        "text" in entry
+          ? { kind: "pdf", pageNumber: entry.pageNumber }
+          : { kind: "pdf", pageNumber: entry.pageNumber, ocr: OCR_ENGINE },
+        `page:${entry.pageNumber}`,
+        currentSectionLabel,
+      );
+      blocks.push(...pageBlocks);
+      currentSectionLabel = pageBlocks.at(-1)?.sectionLabel ?? currentSectionLabel;
     }
 
     const chunks = chunkSourceBlocks(blocks);
@@ -202,7 +210,7 @@ async function parsePdfDocument(
         ok: false,
         errorCode: "no_extractable_text",
         errorMessage:
-          "No readable text was found. Scanned pages need local Tesseract and Ghostscript OCR support.",
+          "No readable text was found. Scanned pages need local PP-OCRv6 and Ghostscript OCR support.",
       };
     }
 
@@ -214,7 +222,13 @@ async function parsePdfDocument(
         parserVersion: PARSER_VERSION,
         fileName,
         scannedPageCount,
-        ocrLanguage: scannedPageCount ? configuredOcrLanguage() : null,
+        ocrEngine: scannedPageCount ? OCR_ENGINE : null,
+        ocrModel: scannedPageCount ? OCR_MODEL : null,
+        ocrModelSize: scannedPageCount ? OCR_MODEL_SIZE : null,
+        ocrBackend: scannedPageCount ? OCR_BACKEND : null,
+        ocrRoute: scannedPageCount ? ocr?.route ?? null : null,
+        ocrRuntimeVersions: scannedPageCount ? ocr?.runtimeVersions ?? null : null,
+        ocrModelSha256: scannedPageCount ? ocr?.modelSha256 ?? null : null,
         textLength: chunks.reduce((length, chunk) => length + chunk.chunkText.length, 0),
         warnings,
       },
@@ -267,6 +281,7 @@ export type ParsedChunk = {
   sectionLabel?: string;
   sourceLocation?: ParsedSourceLocation;
   sourceReferences?: ParsedSourceReference[];
+  formulaCells?: FormulaCell[];
 };
 
 export type ParseResult =
@@ -289,6 +304,19 @@ type SourceBlock = {
   sectionLabel?: string;
   continuation?: string;
   modelText?: string;
+  formulaCells?: FormulaCell[];
+};
+
+type FormulaCell = {
+  sheetName: string;
+  cellReference: string;
+  formula: string;
+  formulaCacheStatus: FormulaCacheStatus;
+  formulaCacheType: WorkbookCell["formulaCacheType"];
+  formulaCacheRaw: string | null;
+  cacheProvenance: "stored_cached_result" | null;
+  rowStart: number;
+  rowEnd: number;
 };
 
 type ZipTextReader = {
@@ -296,7 +324,7 @@ type ZipTextReader = {
   files: Record<string, unknown>;
 };
 
-const PARSER_VERSION = "document-parser/6";
+const PARSER_VERSION = "document-parser/8";
 const MAX_CHUNK_LENGTH = 4000;
 const PARAGRAPH_OVERLAP = 160;
 const CHUNK_CONTEXT_BUDGET = 900;
@@ -579,7 +607,7 @@ async function parseXlsxDocument(
         number: Number(row.getAttribute("r")) || index + 1,
         cells: Array.from(row.getElementsByTagNameNS("*", "c"))
           .map((cell) => readWorkbookCell(cell, sharedStrings, numberFormats))
-          .filter((cell) => cell.value || cell.formula),
+          .filter((cell) => cell.value || cell.formula || cell.formulaCacheStatus !== "not_formula"),
       })).filter((row) => row.cells.length);
       if (!rows.length) continue;
 
@@ -623,15 +651,44 @@ async function parseXlsxDocument(
         }
 
         const headerCells = tableRows.slice(0, headerCount).flatMap((row) => row.cells);
+        const headerLabels = [...headers.values()];
+        const formulaCellsForRow = (row: typeof tableRows[number]): FormulaCell[] =>
+          row.cells.flatMap((cell) =>
+            cell.formulaCacheStatus === "not_formula" ? [] : [{
+              sheetName: sheet.name,
+              cellReference: cell.reference,
+              formula: cell.formula,
+              formulaCacheStatus: cell.formulaCacheStatus,
+              formulaCacheType: cell.formulaCacheType,
+              formulaCacheRaw: cell.formulaCacheRaw,
+              cacheProvenance: cell.formulaCacheStatus === "cached_value" ? "stored_cached_result" : null,
+              rowStart: row.number,
+              rowEnd: row.number,
+            }],
+          );
+        for (const row of tableRows) {
+          for (const cell of row.cells) {
+            if (
+              cell.formulaCacheStatus === "missing_cache" ||
+              cell.formulaCacheStatus === "cached_empty" ||
+              cell.formulaCacheStatus === "cached_error" ||
+              cell.formulaCacheStatus === "unknown"
+            ) {
+              warnings.push(`Sheet "${sheet.name}" cell ${cell.reference} has formula "${cell.formula}" with formula cache status "${cell.formulaCacheStatus}"; recalculate and save the workbook in a spreadsheet application before using the result, and do not treat the missing or cached-empty result as zero or as project evidence.`);
+            }
+          }
+        }
         blocks.push({
           text: [...headers.entries()]
             .sort(([left], [right]) => left - right)
             .map(([column, label]) => `${columnLetters(column)}: ${label}`)
             .join(" | "),
           kind: "table-header",
+          formulaCells: tableRows.slice(0, headerCount).flatMap(formulaCellsForRow),
           location: {
             kind: "xlsx",
             sheetName: sheet.name,
+            tableNumber: tableIndex,
             rowStart: tableRows[0].number,
             rowEnd: tableRows[headerCount - 1].number,
             cellRangeStart: headerCells[0].reference,
@@ -640,6 +697,9 @@ async function parseXlsxDocument(
           groupKey: `sheet:${sheet.name}:table:${tableIndex}`,
           sectionLabel: sheet.name,
         });
+        for (const diagnostic of diagnoseTableAmbiguity(sheet.name, tableRows, headerCount, merges, headerLabels)) {
+          warnings.push(diagnostic);
+        }
 
         for (const row of tableRows.slice(headerCount)) {
           const cells = row.cells.map((cell) => {
@@ -650,22 +710,36 @@ async function parseXlsxDocument(
               ? excelSerialToIsoDate(cell.value, date1904)
               : undefined;
             const invalidDate = cell.dateFormat && cell.value && !isoDate;
-            const value = cell.formula
-              ? `${cell.formula}${cell.value ? ` (cached value: ${cell.value}${isoDate ? `; ISO date: ${isoDate}` : ""})` : " (no cached value)"}`
-              : cell.value;
-            const format = cell.numberFormat
-              ? ` [raw value: ${cell.value}; number format: ${cell.numberFormat}${isoDate ? `; ISO date: ${isoDate}` : invalidDate ? `; Needs Review: invalid Excel serial ${cell.value}` : cell.dateFormat ? "; Needs Review: no cached date value" : ""}]`
+            const formulaStatus = cell.formulaCacheStatus;
+            const isFormula = formulaStatus !== "not_formula";
+            const formulaCacheTag = isFormula ? `; formula cache: ${formulaStatus}` : "";
+            const formulaValueText = formulaStatus === "missing_cache"
+              ? " (no cached value)"
+              : formulaStatus === "cached_empty"
+                ? " (cached value: empty)"
+                : formulaStatus === "cached_error"
+                  ? ` (cached error: ${cell.formulaCacheRaw ?? cell.value ?? "unknown error"})`
+                  : formulaStatus === "unknown"
+                    ? " (formula cache status unknown)"
+                    : formulaStatus === "cached_value"
+                      ? ` (stored cached result: ${cell.value}; freshness not established)`
+                      : "";
+            const value = cell.formula ? `${cell.formula}${formulaValueText}${formulaCacheTag}` : cell.value;
+            const format = cell.numberFormat || isFormula
+              ? ` [raw value: ${cell.value}; number format: ${cell.numberFormat ?? "none"}${isoDate ? `; ISO date: ${isoDate}` : invalidDate ? `; Needs Review: invalid Excel serial ${cell.value}` : cell.dateFormat ? "; Needs Review: no cached date value" : ""}${formulaCacheTag}]`
               : "";
             const compactValue = cell.formula
-              ? `${cell.formula}${cell.value ? ` (cached value: ${isoDate ?? cell.value})` : " (no cached value)"}`
+              ? `${cell.formula}${formulaValueText}${formulaCacheTag}`
               : isoDate ?? cell.value;
             const compactFormat = cell.dateFormat
               ? isoDate
                 ? ""
-                : ` [date format: ${cell.numberFormat ?? "unknown"}; Needs Review: ${invalidDate ? `invalid Excel serial ${cell.value}` : "no cached date value"}]`
+                : ` [date format: ${cell.numberFormat ?? "unknown"}; Needs Review: ${invalidDate ? `invalid Excel serial ${cell.value}` : "no cached date value"}${formulaCacheTag}]`
               : cell.numberFormat && cell.numberFormat !== "General"
-                ? ` [number format: ${cell.numberFormat}]`
-                : "";
+                ? ` [number format: ${cell.numberFormat}${formulaCacheTag}]`
+                : isFormula
+                  ? ` [formula cache: ${formulaStatus}]`
+                  : "";
             return {
               text: `${labelText}${value}${format}`,
               modelText: `${labelText}${compactValue}${compactFormat}`,
@@ -680,9 +754,11 @@ async function parseXlsxDocument(
             text,
             modelText,
             kind: "table-row",
+            formulaCells: formulaCellsForRow(row),
             location: {
               kind: "xlsx",
               sheetName: sheet.name,
+              tableNumber: tableIndex,
               rowStart: row.number,
               rowEnd: row.number,
               cellRangeStart: row.cells[0].reference,
@@ -855,19 +931,42 @@ async function readWorkbookSheets(zip: ZipTextReader, parser: DOMParser) {
   };
 }
 
+type FormulaCacheStatus =
+  | "not_formula"
+  | "cached_value"
+  | "cached_empty"
+  | "missing_cache"
+  | "cached_error"
+  | "unknown";
+
+type WorkbookCell = {
+  reference: string;
+  value: string;
+  formula: string;
+  numberFormat?: string;
+  dateFormat: boolean;
+  textual: boolean;
+  formulaCacheStatus: FormulaCacheStatus;
+  formulaCacheType: "number" | "string" | "boolean" | "error" | null;
+  formulaCacheRaw: string | null;
+};
+
 function readWorkbookCell(
   cell: Element,
   sharedStrings: string[],
   numberFormats: Array<{ format?: string; date: boolean }>,
-) {
+): WorkbookCell {
   const type = cell.getAttribute("t");
-  const rawValue = cell.getElementsByTagNameNS("*", "v")[0]?.textContent ?? "";
-  const formula = cell.getElementsByTagNameNS("*", "f")[0]?.textContent ?? "";
+  const valueNode = cell.getElementsByTagNameNS("*", "v")[0] ?? null;
+  const rawValue = valueNode?.textContent ?? "";
+  const formulaNode = cell.getElementsByTagNameNS("*", "f")[0] ?? null;
+  const formula = formulaNode?.textContent ?? "";
   const value = type === "s" ? sharedStrings[Number(rawValue)] ?? ""
     : type === "inlineStr" ? elementText(cell, "t")
     : type === "b" ? rawValue === "1" ? "TRUE" : "FALSE"
     : rawValue;
   const format = numberFormats[Number(cell.getAttribute("s"))];
+  const formulaCache = classifyFormulaCache(Boolean(formulaNode), type, valueNode, rawValue);
   return {
     reference: cell.getAttribute("r") ?? "",
     value,
@@ -875,7 +974,161 @@ function readWorkbookCell(
     numberFormat: format?.format,
     dateFormat: format?.date ?? false,
     textual: ["s", "inlineStr", "str"].includes(type ?? "") || type === "b",
+    ...formulaCache,
   };
+}
+
+// Distinguishes actual numeric zero, cached empty, missing cache, cached error,
+// and non-formula. Never computes formulas and never invents a result.
+function classifyFormulaCache(
+  hasFormula: boolean,
+  type: string | null,
+  valueNode: Element | null,
+  rawValue: string,
+): Pick<WorkbookCell, "formulaCacheStatus" | "formulaCacheType" | "formulaCacheRaw"> {
+  if (!hasFormula) {
+    return {
+      formulaCacheStatus: "not_formula",
+      formulaCacheType: null,
+      formulaCacheRaw: null,
+    };
+  }
+  if (!valueNode) {
+    return {
+      formulaCacheStatus: "missing_cache",
+      formulaCacheType: null,
+      formulaCacheRaw: null,
+    };
+  }
+  const cacheType = type === "b" ? "boolean"
+    : type === "str" || type === "s" ? "string"
+    : type === "e" ? "error"
+    : type === "n" || type === null || type === undefined ? "number"
+    : null;
+  if (cacheType === "error") {
+    return {
+      formulaCacheStatus: "cached_error",
+      formulaCacheType: "error",
+      formulaCacheRaw: rawValue,
+    };
+  }
+  if (cacheType === null) {
+    return {
+      formulaCacheStatus: "unknown",
+      formulaCacheType: null,
+      formulaCacheRaw: rawValue,
+    };
+  }
+  if (rawValue === "") {
+    return {
+      formulaCacheStatus: "cached_empty",
+      formulaCacheType: null,
+      formulaCacheRaw: "",
+    };
+  }
+  return {
+    formulaCacheStatus: "cached_value",
+    formulaCacheType: cacheType,
+    formulaCacheRaw: rawValue,
+  };
+}
+
+// Conservative deterministic ambiguity diagnostics. One indicator alone does not
+// force an LLM call; the parser keeps the raw block and flags the group so the
+// bounded group-extraction path may treat it as a candidate interpretation only.
+type AmbiguityReason =
+  | "multi_row_header"
+  | "merged_header"
+  | "key_value_shape"
+  | "date_period_columns"
+  | "non_square_header"
+  | "unresolved_formula_columns"
+  | "inconsistent_cell_types";
+
+const AMBIGUITY_PERIOD_PATTERN = /(week|month|quarter|period|w\d+|m\d+|q\d+|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i;
+// Formula cache problems remain review diagnostics, not candidate triggers.
+const AMBIGUITY_TRIGGER_REASONS: Partial<Record<AmbiguityReason, true>> = {
+  multi_row_header: true,
+  key_value_shape: true,
+  date_period_columns: true,
+  non_square_header: true,
+  inconsistent_cell_types: true,
+};
+
+function diagnoseTableAmbiguity(
+  sheetName: string,
+  tableRows: { number: number; cells: WorkbookCell[] }[],
+  headerCount: number,
+  merges: string[],
+  headerLabels: string[],
+): string[] {
+  const reasons = new Set<AmbiguityReason>();
+  const headerRows = tableRows.slice(0, headerCount);
+  const dataRows = tableRows.slice(headerCount);
+  const headerColumns = new Set<number>();
+  for (const row of headerRows) {
+    for (const cell of row.cells) {
+      const column = columnNumber(cell.reference);
+      if (column) headerColumns.add(column);
+    }
+  }
+  const dataColumns = new Set<number>();
+  for (const row of dataRows) {
+    for (const cell of row.cells) {
+      const column = columnNumber(cell.reference);
+      if (column) dataColumns.add(column);
+    }
+  }
+
+  if (headerCount > 1) {
+    const firstColumns = new Set(headerRows[0].cells.map((cell) => columnNumber(cell.reference)));
+    if (headerRows.slice(1).some((row) => {
+      const columns = new Set(row.cells.map((cell) => columnNumber(cell.reference)));
+      return columns.size !== firstColumns.size || [...columns].some((column) => !firstColumns.has(column));
+    })) reasons.add("multi_row_header");
+  }
+  if (merges.length && headerRows.some((row) => row.cells.some((cell) =>
+    merges.some((merge) => merge.split(":")[0] === cell.reference),
+  ))) reasons.add("merged_header");
+  if (dataRows.length && dataRows.every((row) => row.cells.length <= 1)) reasons.add("key_value_shape");
+  if (headerLabels.filter((label) => AMBIGUITY_PERIOD_PATTERN.test(label)).length > 1) reasons.add("date_period_columns");
+  if (headerColumns.size > 0 && dataColumns.size > 0 && ![...dataColumns].every((column) => headerColumns.has(column))) {
+    reasons.add("non_square_header");
+  }
+  const dataTypesByColumn = new Map<number, Set<string>>();
+  for (const row of dataRows) {
+    for (const cell of row.cells) {
+      if (["missing_cache", "cached_empty", "cached_error", "unknown"].includes(cell.formulaCacheStatus)) continue;
+      const column = columnNumber(cell.reference);
+      if (!column) continue;
+      const type = cell.formulaCacheStatus === "cached_value"
+        ? cell.formulaCacheType ?? "unknown"
+        : cell.textual ? "text" : "number";
+      const types = dataTypesByColumn.get(column) ?? new Set<string>();
+      types.add(type);
+      dataTypesByColumn.set(column, types);
+    }
+  }
+  if ([...dataTypesByColumn.values()].some((types) => types.size > 1)) reasons.add("inconsistent_cell_types");
+  const unresolvedColumns = new Set<number>();
+  for (const row of dataRows) {
+    for (const cell of row.cells) {
+      if (["missing_cache", "cached_empty", "cached_error", "unknown"].includes(cell.formulaCacheStatus)) {
+        const column = columnNumber(cell.reference);
+        if (column) unresolvedColumns.add(column);
+      }
+    }
+  }
+  if (unresolvedColumns.size) reasons.add("unresolved_formula_columns");
+
+  if (!reasons.size) return [];
+  const rowStart = tableRows[0].number;
+  const rowEnd = tableRows[tableRows.length - 1].number;
+  const cellRangeStart = tableRows[0].cells[0]?.reference ?? "";
+  const cellRangeEnd = tableRows[tableRows.length - 1].cells[tableRows[tableRows.length - 1].cells.length - 1]?.reference ?? "";
+  const triggers = [...reasons].filter((reason) => AMBIGUITY_TRIGGER_REASONS[reason] === true);
+  if (!triggers.length) return [];
+  return [`Sheet "${sheetName}" table rows ${rowStart}-${rowEnd} (${cellRangeStart}-${cellRangeEnd}) has candidate ambiguity indicators: ${triggers.join(", ")}; row/column mapping is kept as raw evidence and may need a candidate interpretation review.`];
 }
 
 async function parsePptxDocument(fileName: string, buffer: ArrayBuffer): Promise<ParseResult> {
@@ -1032,7 +1285,8 @@ async function parseImageDocument(
     const extension = fileName.slice(fileName.lastIndexOf(".")).toLowerCase();
     const imagePath = join(temporaryDirectory, `image${extension}`);
     await writeFile(imagePath, new Uint8Array(buffer));
-    const text = normalizeText(await recognizeImage(imagePath));
+    const ocr = await recognizeImages([imagePath]);
+    const text = normalizeText(ocr.texts[0] ?? "");
     if (!text) {
       return {
         ok: false,
@@ -1042,18 +1296,24 @@ async function parseImageDocument(
     }
 
     const chunks = chunkSourceBlocks(
-      paragraphBlocks(text, { kind: "image", imageName: fileName, ocr: "tesseract" }),
+      paragraphBlocks(text, { kind: "image", imageName: fileName, ocr: OCR_ENGINE }),
     );
     return {
       ok: true,
       chunks,
       parserMetadata: {
-        parser: "tesseract",
+        parser: OCR_ENGINE,
         parserVersion: PARSER_VERSION,
         fileName,
         textLength: text.length,
-        ocrLanguage: configuredOcrLanguage(),
-        warnings: ["Image text was extracted using local Tesseract OCR."],
+        ocrEngine: OCR_ENGINE,
+        ocrModel: OCR_MODEL,
+        ocrModelSize: OCR_MODEL_SIZE,
+        ocrBackend: OCR_BACKEND,
+        ocrRoute: ocr.route,
+        ocrRuntimeVersions: ocr.runtimeVersions,
+        ocrModelSha256: ocr.modelSha256,
+        warnings: ["Image text was extracted using local PP-OCRv6 (tiny) OCR."],
       },
     };
   } catch (error) {
@@ -1063,7 +1323,7 @@ async function parseImageDocument(
       errorMessage:
         error instanceof OcrError
           ? error.message
-          : "The image could not be read by local Tesseract OCR.",
+          : "The image could not be read by local PP-OCRv6 OCR.",
     };
   } finally {
     if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
@@ -1101,51 +1361,122 @@ async function renderPdfPageWithGhostscript(
     if (isMissingExecutable(error)) {
       throw new OcrError(
         "ocr_unavailable",
-        "Scanned PDF OCR needs local Ghostscript and Tesseract; install both to process scanned pages.",
+        "Scanned PDF OCR needs local Ghostscript and PP-OCRv6; install Ghostscript and the PP-OCRv6 runtime to process scanned pages.",
       );
     }
     throw new OcrError("ocr_failed", `Ghostscript could not rasterize PDF page ${pageNumber}.`);
   }
 }
 
-async function recognizeImage(imagePath: string) {
+type OcrRun = {
+  texts: string[];
+  route: string;
+  runtimeVersions: { rapidocr: string; onnxruntime: string };
+  modelSha256: { detector: string; recognizer: string; classifier: string };
+};
+
+type OcrPayload =
+  | {
+      ok: true;
+      results: Array<{ index: number; text: string }>;
+      route: string;
+      runtimeVersions: { rapidocr: string; onnxruntime: string };
+      modelSha256: { detector: string; recognizer: string; classifier: string };
+    }
+  | { ok: false; errorCode: OcrErrorCode; errorMessage: string };
+
+async function recognizeImages(imagePaths: string[]): Promise<OcrRun> {
+  if (!imagePaths.length) {
+    throw new OcrError("ocr_failed", "No image paths were supplied to the OCR helper.");
+  }
+
+  let stdout: string;
   try {
+    const python =
+      process.env.XASS_OCR_PYTHON?.trim() ||
+      join(process.cwd(), ".venv-ocr", "bin", "python");
+    const helper = join(process.cwd(), "worker", "ocr", "ppocr.py");
     const result = await execFileAsync(
-      "tesseract",
-      [imagePath, "stdout", "-l", configuredOcrLanguage()],
+      python,
+      [helper, "--json", "--images", ...imagePaths],
       {
-        timeout: 120_000,
+        timeout: imagePaths.length * 120_000 + 120_000,
         maxBuffer: 10_000_000,
         encoding: "utf8",
       },
     );
-    return result.stdout;
+    stdout = result.stdout;
   } catch (error) {
+    const failed = readOcrPayload(
+      typeof error === "object" && error !== null && "stdout" in error
+        ? String(error.stdout)
+        : undefined,
+    );
+    if (failed && failed.ok === false) {
+      throw new OcrError(failed.errorCode, failed.errorMessage);
+    }
     if (isMissingExecutable(error)) {
       throw new OcrError(
         "ocr_unavailable",
-        "Local Tesseract OCR is unavailable; install Tesseract and its language data to process images.",
-      );
-    }
-    if (isMissingLanguageData(error)) {
-      throw new OcrError(
-        "ocr_language_unavailable",
-        `Configured OCR language "${configuredOcrLanguage()}" is unavailable; install its Tesseract traineddata or set XASS_OCR_LANG to an installed language (for example eng or ind+eng).`,
+        "Local PP-OCRv6 runtime is unavailable; install the OCR virtualenv and dependencies (see worker/README.md).",
       );
     }
     throw new OcrError(
       "ocr_failed",
-      "Tesseract could not read this image; verify that the file is a supported, readable image.",
+      "Local PP-OCRv6 OCR failed while reading the document images.",
     );
+  }
+
+  const payload = readOcrPayload(stdout);
+  if (
+    !payload ||
+    payload.ok !== true ||
+    payload.route !== OCR_ROUTE ||
+    !payload.runtimeVersions ||
+    typeof payload.runtimeVersions.rapidocr !== "string" ||
+    typeof payload.runtimeVersions.onnxruntime !== "string" ||
+    !payload.modelSha256 ||
+    typeof payload.modelSha256.detector !== "string" ||
+    typeof payload.modelSha256.recognizer !== "string" ||
+    typeof payload.modelSha256.classifier !== "string" ||
+    !Array.isArray(payload.results) ||
+    payload.results.length !== imagePaths.length ||
+    payload.results.some(
+      (entry, index) =>
+        !entry ||
+        typeof entry !== "object" ||
+        entry.index !== index ||
+        typeof entry.text !== "string",
+    )
+  ) {
+    throw new OcrError("ocr_failed", "Local PP-OCRv6 OCR returned an invalid response.");
+  }
+  return {
+    texts: payload.results.map((entry) => entry.text),
+    route: payload.route,
+    runtimeVersions: payload.runtimeVersions,
+    modelSha256: payload.modelSha256,
+  };
+}
+
+function readOcrPayload(stdout: string | undefined): OcrPayload | undefined {
+  if (!stdout) return undefined;
+  try {
+    return JSON.parse(stdout) as OcrPayload;
+  } catch {
+    return undefined;
   }
 }
 
+
+type OcrErrorCode =
+  | "ocr_unavailable"
+  | "ocr_model_unavailable"
+  | "ocr_failed";
+
 class OcrError extends Error {
   constructor(
-    readonly code:
-      | "ocr_unavailable"
-      | "ocr_language_unavailable"
-      | "ocr_failed",
+    readonly code: OcrErrorCode,
     message: string,
   ) {
     super(message);
@@ -1162,20 +1493,6 @@ function isMissingExecutable(error: unknown): error is Error & { code: string } 
   );
 }
 
-function configuredOcrLanguage() {
-  return process.env.XASS_OCR_LANG?.trim() || "eng";
-}
-
-function isMissingLanguageData(error: unknown) {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "stderr" in error &&
-    /failed loading language|error opening data file|couldn't load any languages/i.test(
-      String(error.stderr),
-    )
-  );
-}
 
 function isHeadingText(text: string) {
   const firstLine = text.split("\n")[0]?.trim() ?? "";
@@ -1301,6 +1618,7 @@ function chunkBlockGroup(blocks: SourceBlock[]): ParsedChunk[] {
           : undefined,
       sectionLabel,
       sourceLocation,
+      formulaCells: sourceBlocks.flatMap((block) => block.formulaCells ?? []),
       sourceReferences: sourceBlocks.map((block, sourceIndex) => ({
         sourceId: `s${chunks.length}s${sourceIndex}`,
         chunkIndex: chunks.length,
