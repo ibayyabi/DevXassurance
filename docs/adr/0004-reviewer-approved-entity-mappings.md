@@ -1,0 +1,3 @@
+# WBS, milestone, and risk identity mappings require reviewer approval
+
+When WBS codes or package names, milestone labels, or risk identifiers differ across project documents, the model may propose a source-backed mapping. Identical milestone labels and exact risk IDs may be matched directly; differing-label or differing-ID mappings become usable and reusable for comparison only after a project reviewer accepts them within the project scope. The model does not merge work packages, compare dates across differing milestone labels, or infer risk changes from unaccepted matches.

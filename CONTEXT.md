@@ -35,6 +35,12 @@ A document that can support a comparison field without the pipeline managing eve
 **Section classification**:
 A document can contain sections or tables with different evidence purposes; classification at that level supplements, rather than replaces, the document's primary type.
 
+**Evidence-led extraction**:
+Document and section labels guide interpretation but do not gate domain extraction. Clear values may enter the matching contract even when the artifact's type is uncertain; uncertain values remain marked for review rather than forced into a type.
+
+**Grouped extraction**:
+Retain the existing document-level classifier. For each existing text group, one structured model call identifies relevant section/domain evidence and extracts all relevant domain contracts together; do not add a separate section-classification call, a call per domain, or send an entire long document as one input. The domain model does not fix a vendor. If a provider quota is reached, defer/retry remaining groups when capacity returns; keep them marked not processed until handled, never as absent evidence.
+
 **Baseline candidate**:
 Source-backed values proposed as comparison references for a project-data domain. They are not active baselines until an authorized project reviewer accepts their scope and effective date.
 _Avoid_: Approved baseline.
@@ -50,6 +56,12 @@ A required value that is absent from the processed scope, not processed, ambiguo
 
 **Comparison level**:
 Project comparisons may roll up to the project total and also compare matching WBS/work-package records. Missing or incomparable WBS evidence leaves a gap at that level without suppressing a supported project-total comparison.
+
+**WBS record**:
+A work package is identified by its source or canonical code, parent code when present, name, and stated deliverable or scope. Owner, acceptance criteria, and resource details are outside the initial comparison contract.
+
+**Scope difference**:
+Compare reported deliverables or WBS scope with the approved baseline using accepted WBS mappings. Show added, missing, or changed items as source-backed candidate findings; they are not approved changes automatically.
 
 **Cost baseline**:
 An approved cost reference for a defined project scope and currency, with an effective version or date. It is compared with forecast total, not treated as current spend.
@@ -71,7 +83,7 @@ A future amount or date explicitly stated in a project source. The pipeline extr
 _Avoid_: System-generated forecast.
 
 **Risk snapshot**:
-An item-level set of risk claims for a stated reporting period, retaining source ID/name, description, status, rating and original scale, owner, mitigation, due date, and WBS when stated. A claim that a risk is new or increased requires a comparable earlier snapshot and a matched risk identity.
+An item-level set of risk claims for a stated reporting period, retaining source ID/name, description, status, rating and original scale, owner, mitigation, due date, and WBS when stated. A “new” or “increased” claim requires a comparable earlier snapshot and either the exact same risk ID or a reviewer-accepted identity mapping; without a match, do not infer change.
 
 **Review period**:
 The PMO-selected period for one comparison. Every observation retains its own source period or as-of date; newer evidence is not silently mixed into the selected period.
@@ -82,14 +94,32 @@ Compare an approved baseline date with a reported forecast date only for the sam
 **Schedule record**:
 Keep baseline and reported forecast dates for the same milestone or work package. Reported progress percentages remain separate values; the initial comparison does not rebuild the activity dependency network or critical path.
 
+**Progress record**:
+Preserve explicitly reported progress at project or WBS level with its source period/as-of date. Do not calculate a project percentage from WBS percentages; show change across periods only when the compared scope and WBS are comparable.
+
 **WBS mapping proposal**:
 A source-backed suggestion that differently coded or named work packages refer to the same scope. It is not used for comparison until a project reviewer accepts it.
 
 **Accepted WBS mapping**:
 A project-reviewer-approved link between source work-package labels and the same WBS scope. Accepted mappings may be reused within their approved scope; new conflicting evidence requires review.
 
+**Milestone mapping proposal**:
+A source-backed suggestion that differently named milestones refer to the same project event. Use it for date comparison only after a project reviewer accepts it; identical labels may be matched directly.
+
+**Accepted milestone mapping**:
+A project-reviewer-approved link between milestone labels that refer to the same event. Reuse it within its approved project scope; conflicting evidence requires review.
+
+**Risk identity mapping**:
+A reviewer-approved link between risk identifiers that refer to the same risk. Use it to compare snapshots only within its accepted project scope; similar names alone do not prove identity.
+
 **Evidence observation**:
 A value or claim extracted from a source with its original wording/value, standardized value when safe, meaning, unit, scope, period, status, and exact source location. Standardization never replaces the original.
+
+**Reviewer correction**:
+A reviewer may correct an extracted or normalized value for use in assessment while preserving the original extraction, source wording, and source location. Record the corrected value and reviewer attribution/reason; never rewrite the source evidence.
+
+**Change evidence**:
+A source statement about a proposed, approved, or rejected project change is extracted with its stated status, effective date when given, and source location. It is supporting evidence only: it does not change the active baseline automatically, but may support a candidate reviewed through the existing baseline-approval process.
 
 **Risk rating**:
 A likelihood, impact, or severity value retained in the scale used by its source. Comparison across different scales requires an accepted mapping.
@@ -103,11 +133,17 @@ A clear, source-located value that passes schema and meaning checks may be used 
 **Assurance thresholds**:
 For comparable data, Budget is on-track at variance <= 0%, needs attention above 0% through 5%, and critical above 5%. Schedule is on-track at 0 days late, needs attention at 1–14 days, and critical above 14 days. These thresholds are versioned evaluation rules.
 
-**Currency conversion date**:
-If values use different currencies, conversion uses the date relevant to the value—transaction date for actual/committed costs and reporting/as-of date for forecasts—not the file upload date. Preserve the original amount, rate, rate date, and converted amount.
+**Domain status**:
+Show Budget, Schedule, and Risk separately. Do not calculate a combined project score; if a source reports an overall status, preserve it as a source claim with its citation.
 
-**Project reporting currency**:
-Each project uses a Finance/PMO-approved comparison currency and date-specific exchange rates. Preserve the source amount and currency; if an approved rate for the relevant value date is unavailable, do not calculate a cross-currency variance.
+**Assurance result**:
+Show the evidence-backed Budget, Schedule, and Risk comparisons, project/WBS findings, scope differences, evidence gaps, and source citations on the existing Assurance page. The initial output does not add AI-generated action suggestions or a separate downloadable report.
 
-**Budget currency variance**:
-Compare baseline and forecast in the project reporting currency using the rate relevant to each value. The total Budget variance includes exchange-rate movement; preserve original amounts and rates for review.
+**Assurance pipeline boundary**:
+Reuse the existing upload, parser/OCR, source-located chunks, and text groups. Replace the assurance-specific classification and generic extraction with PMO-domain contracts, then update the existing Assurance result; do not maintain a permanent parallel pipeline.
+
+**Model provider preference**:
+The provider and model are not selected yet; the target is a free provider. Domain contracts and the grouped-extraction design remain independent of that choice.
+
+**Currency comparison limit**:
+Calculate a Budget variance only when the approved baseline and reported EAC use the same currency. Preserve original amounts and currencies; if they differ, mark the comparison not comparable and record an evidence gap. Currency conversion and exchange-rate handling are outside the initial scope.
