@@ -38,6 +38,12 @@ supported evidence files and calls the configured LLM when available.
 - Project members can be viewed, added by Supabase Auth email, role-updated,
   and removed from a project by project managers/admins.
 
+## Team AI tooling
+
+- Install the official [RTK CLI](https://www.rtk-ai.app/docs/getting-started/installation/) and verify it with `rtk --version` and `rtk gain`. OMP loads the checked-in project extension at `.omp/extensions/rtk.ts`; it rewrites supported Bash tool commands when RTK is on `PATH` (minimum version: `0.23.0`).
+- Repository skills are consolidated under `.agents/skills/`: six selected Matt Pocock workflows (`grill-with-docs`, `handoff`, `implement`, `implement-spec`, `to-spec`, `to-tickets`) plus the project `ponytail` and `ui-skills` guidance.
+- See [Agent workflows](docs/agents/README.md) to continue PMO tickets or start a new objective. Start a new OMP session or run `/reload-plugins` after checkout or skill changes.
+
 ## Required Tools
 
 - Node.js 20 or newer
