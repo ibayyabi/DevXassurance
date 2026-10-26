@@ -1,0 +1,3 @@
+# Domain contracts independent of document type
+
+The pipeline uses two layers: document type describes an uploaded artifact, while evidence contracts describe PMO data domains. One source document may contribute to multiple domain contracts; document type is context, not an exclusive extraction schema. Each observation retains its original value and exact source location; safe normalization supplements rather than replaces the source value. This handles varied input templates and overlapping fields across baseline, finance, and WBS reports.

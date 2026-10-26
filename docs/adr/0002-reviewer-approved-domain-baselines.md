@@ -1,0 +1,3 @@
+# Baselines are approved per data domain
+
+The pipeline stores source-backed baseline candidates and activates values for comparison only after an authorized project reviewer accepts the relevant domain, scope, and effective date. Approval may be partial and may combine evidence from multiple documents; a source document's own “approved” label is evidence, not the application's acceptance decision. An accepted baseline remains active until a reviewer accepts a replacement; a newer report or forecast alone does not rebaseline the project.

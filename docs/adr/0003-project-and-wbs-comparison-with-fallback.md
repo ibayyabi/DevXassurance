@@ -1,0 +1,3 @@
+# Compare at project and WBS levels with fallback
+
+Assurance supports both project-total and matching WBS/work-package comparisons. When WBS identifiers or comparable values are missing, the WBS result remains an explicit evidence gap while any supported project-total comparison is still available. Schedule variance compares baseline and reported forecast dates only for the same milestone or WBS; progress percentages do not generate forecast dates. Each comparison uses a PMO-selected review period, and source periods/as-of dates are preserved rather than silently mixing the newest value from each document. This favors useful partial results without treating incomparable records as equal.
