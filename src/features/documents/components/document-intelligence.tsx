@@ -428,7 +428,7 @@ function DocumentRow({
     <article id={`document-${document.id}`} className="rounded-xl border border-ui-border bg-surface p-4 transition-colors hover:border-ui-border">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex min-w-0 gap-3">
-          <span className={`rounded-xl p-2.5 ${document.processingStatus === "completed" ? "bg-status-ok-bg text-status-ok-text" : document.processingStatus === "failed" ? "bg-status-critical-bg text-status-critical-text" : "bg-plan-track text-ink-muted"}`}>
+          <span className={`rounded-xl p-2.5 ${document.processingStatus === "completed" ? "bg-status-ok-bg text-status-ok-text" : document.processingStatus === "failed" ? "bg-status-critical-bg text-status-critical-text" : "bg-status-warn-bg text-status-warn-text"}`}>
             {document.processingStatus === "completed" ? (
               <FileCheck2 className="h-5 w-5" />
             ) : (

@@ -82,7 +82,7 @@ export function AppShell({
                   title={collapsed ? item.label : undefined}
                   className={cn(
                     "relative flex h-11 items-center gap-3 rounded-md border-l-[3px] border-transparent px-3 text-sm font-medium text-sidebar-muted outline-none transition hover:bg-sidebar-hover hover:text-sidebar-text focus-visible:ring-2 focus-visible:ring-sidebar-text",
-                    active && "border-l-sidebar-text bg-sidebar-hover text-sidebar-text",
+                    active && "border-l-brand-foreground bg-brand text-brand-foreground hover:bg-brand hover:text-brand-foreground",
                     collapsed && "justify-center",
                   )}
                 >
@@ -142,7 +142,7 @@ export function AppShell({
                     href={href}
                     className={cn(
                       "flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-ink-muted",
-                      active && "bg-plan-track text-ink",
+                      active && "bg-brand text-brand-foreground",
                     )}
                   >
                     <Icon className="h-4 w-4" />

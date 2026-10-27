@@ -262,7 +262,7 @@ export function UploadDocumentForm({
             <li key={item.id} className="py-3 first:pt-0 last:pb-0">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="min-w-0 flex-1 truncate text-sm font-medium text-ink">{item.file.name}</p>
-                <span className="text-xs font-medium text-ink-muted" role="status">{item.status === "uploading" ? `Uploading ${Math.round(item.progress)}%` : item.status === "queued" ? "Queued" : item.status === "needs_review" ? "Needs review" : "Upload failed"}</span>
+                <span className={`text-xs font-medium ${item.status === "failed" ? "bg-status-critical-bg text-status-critical-text" : "bg-status-warn-bg text-status-warn-text"}`} role="status">{item.status === "uploading" ? `Uploading ${Math.round(item.progress)}%` : item.status === "queued" ? "Queued" : item.status === "needs_review" ? "Needs review" : "Upload failed"}</span>
                 {item.status === "failed" && <Button type="button" disabled={pending} onClick={() => void retry(item)}>Retry</Button>}
               </div>
               {item.status === "uploading" && <progress className="mt-2 block h-2 w-full accent-brand" value={item.progress} max={100} aria-label={`Uploading ${item.file.name}`} />}

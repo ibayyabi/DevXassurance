@@ -18,7 +18,7 @@ const buttonVariants = cva(
         secondary:
           "bg-plan-track text-ink shadow-sm hover:bg-plan-track/70",
         ghost: "text-ink hover:bg-plan-track hover:text-ink",
-        link: "text-ink underline-offset-4 hover:underline",
+        link: "text-brand underline-offset-4 hover:underline",
       },
       size: {
         default: "h-9 px-4 py-2",
