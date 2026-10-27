@@ -5,9 +5,8 @@ import { revalidatePath } from "next/cache";
 import {
   evaluateAssuranceReview,
   parseReviewExtraction,
-  type EvaluatedFinding,
 } from "@/features/assurance/lib/analysis";
-import { reviewEvidenceIssue } from "@/features/assurance/lib/evidence-readiness";
+import type { SourceChunk } from "@/features/assurance/lib/source-evidence";
 import { requireProjectMembership } from "@/features/projects/lib/queries";
 import { canManageProject } from "@/features/projects/lib/roles";
 import { parseJsonObject, runOllamaChat } from "@/lib/ai/ollama";
@@ -68,64 +67,15 @@ export async function saveReviewEvidence(formData: FormData): Promise<void> {
     throw new Error("One document cannot be both baseline and current evidence.");
   }
 
-  const { supabase, user, membership } =
+  const { supabase, membership } =
     await requireProjectMembership(projectId);
   assertCanManage(membership.role);
 
-  const selectedIds = [...baselineIds, ...currentIds];
-  const { data: documents, error: documentError } = await supabase
-    .from("documents")
-    .select("id, processing_status")
-    .eq("project_id", projectId)
-    .in("id", selectedIds);
-
-  if (documentError) throw new Error(documentError.message);
-  if ((documents ?? []).length !== selectedIds.length) {
-    throw new Error("One or more selected documents are not in this project.");
-  }
-  if ((documents ?? []).some((document) => document.processing_status !== "completed")) {
-    throw new Error("Wait for selected documents to finish processing first.");
-  }
-
-  const { error: deleteError } = await supabase
-    .from("assurance_review_documents")
-    .delete()
-    .eq("review_id", reviewId)
-    .eq("project_id", projectId);
-  if (deleteError) throw new Error(deleteError.message);
-
-  const rows = [
-    ...baselineIds.map((documentId) => ({
-      project_id: projectId,
-      review_id: reviewId,
-      document_id: documentId,
-      evidence_role: "baseline",
-      added_by: user.id,
-    })),
-    ...currentIds.map((documentId) => ({
-      project_id: projectId,
-      review_id: reviewId,
-      document_id: documentId,
-      evidence_role: "current",
-      added_by: user.id,
-    })),
-  ];
-  const { error: insertError } = await supabase
-    .from("assurance_review_documents")
-    .insert(rows);
-  if (insertError) throw new Error(insertError.message);
-
-  const { error: reviewError } = await supabase
-    .from("assurance_reviews")
-    .update({
-      status: "evidence_ready",
-      current_step: "analysis",
-      analysis_error: null,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", reviewId)
-    .eq("project_id", projectId);
-  if (reviewError) throw new Error(reviewError.message);
+  const { error } = await supabase.rpc("save_assurance_evidence", {
+    p_project_id: projectId, p_review_id: reviewId,
+    p_baseline_ids: baselineIds, p_current_ids: currentIds,
+  });
+  if (error) throw new Error(error.message);
 
   revalidateAssurance(projectId);
 }
@@ -138,215 +88,123 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
   const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanManage(membership.role);
 
-  const { data: links, error: linksError } = await supabase
-    .from("assurance_review_documents")
-    .select("document_id, evidence_role, documents!inner(title, document_date, processing_status)")
-    .eq("project_id", projectId)
-    .eq("review_id", reviewId);
-  if (linksError) throw new Error(linksError.message);
-
-  const baselineIds = (links ?? [])
-    .filter((link) => link.evidence_role === "baseline")
-    .map((link) => link.document_id);
-  const currentIds = (links ?? [])
-    .filter((link) => link.evidence_role === "current")
-    .map((link) => link.document_id);
-
-  const linkedIds = [...new Set((links ?? []).map((link) => link.document_id))];
-  const { data: linkedDocuments, error: linkedError } = linkedIds.length
-    ? await supabase.from("documents").select("id, processing_status")
-        .eq("project_id", projectId).in("id", linkedIds)
-    : { data: [], error: null };
-  if (linkedError) throw new Error(linkedError.message);
-  const evidenceIssue = reviewEvidenceIssue(links ?? [], linkedDocuments ?? []);
-  if (evidenceIssue) {
-    const message = evidenceIssue === "missing_role"
-      ? "Baseline and current evidence must be selected before analysis."
-      : "A linked evidence document is not completed. Retry or replace it in the Evidence Library.";
-    await setAnalysisFailure(supabase, projectId, reviewId, message);
-    return;
-  }
-
-  await supabase
-    .from("assurance_reviews")
-    .update({
-      status: "analyzing",
-      current_step: "analysis",
-      analysis_error: null,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", reviewId)
-    .eq("project_id", projectId);
-
-  const allDocumentIds = [...baselineIds, ...currentIds];
-  const { data: chunks, error: chunksError } = await supabase
-    .from("document_chunks")
-    .select("document_id, chunk_text, page_number, section_label, parser_metadata, documents(title)")
-    .eq("project_id", projectId)
-    .in("document_id", allDocumentIds)
-    .order("chunk_index");
-
-  if (chunksError || !chunks?.length) {
-    await setAnalysisFailure(
-      supabase,
-      projectId,
-      reviewId,
-      chunksError?.message ?? "Selected evidence has no processed text.",
-    );
-    return;
-  }
-
-  const baselineText = formatEvidence(chunks, new Set(baselineIds));
-  const currentText = formatEvidence(chunks, new Set(currentIds));
-  if (!reviewEvidenceFits(baselineText, currentText)) {
-    await setAnalysisFailure(
-      supabase,
-      projectId,
-      reviewId,
-      "Selected evidence exceeds the complete review request limit. Filter or select fewer documents and retry; no partial evidence was analyzed.",
-    );
-    return;
-  }
-  const response = await runOllamaChat({
-    format: "json",
-    temperature: 0,
-    system:
-      "You extract structured project assurance values. Use only supplied evidence. Never invent a number, date, risk, comparison, or source excerpt. Use null or zero only as instructed. Return valid JSON only.",
-    user: buildReviewPrompt(baselineText, currentText),
+  const { data: claimed, error: claimError } = await supabase.rpc("claim_assurance_analysis", {
+    p_project_id: projectId, p_review_id: reviewId,
   });
-
-  if (!response.ok) {
-    await setAnalysisFailure(
-      supabase,
-      projectId,
-      reviewId,
-      `AI analysis failed: ${response.warning}`,
-    );
-    return;
-  }
-
-  const parsed = parseJsonObject(response.content);
-  const extraction = parsed ? parseReviewExtraction(parsed) : null;
-
-  if (!extraction) {
-    await setAnalysisFailure(
-      supabase,
-      projectId,
-      reviewId,
-      "AI analysis returned an invalid structure. No finding was saved.",
-    );
-    return;
-  }
-  const baselineSet = new Set(baselineIds);
-  const currentSet = new Set(currentIds);
-  const excerptRequests: { role: "baseline" | "current"; excerpt: string | null; required: boolean }[] = [
-    { role: "baseline", excerpt: extraction.budget.baselineExcerpt, required: extraction.budget.baselineAmount !== null },
-    { role: "current", excerpt: extraction.budget.currentExcerpt, required: extraction.budget.currentForecast !== null || extraction.budget.currentActual !== null },
-    { role: "baseline", excerpt: extraction.risk.baselineExcerpt, required: false },
-    { role: "current", excerpt: extraction.risk.currentExcerpt, required: extraction.risk.hasCurrentEvidence },
-    ...extraction.schedule.milestones.flatMap((milestone) => [
-      { role: "baseline" as const, excerpt: milestone.baselineExcerpt, required: milestone.baselineDate !== null },
-      { role: "current" as const, excerpt: milestone.currentExcerpt, required: milestone.currentDate !== null },
-    ]),
-  ];
-  const verifiedSources: VerifiedSource[] = [];
-  let unverifiable = false;
-  for (const request of excerptRequests) {
-    if (!request.excerpt) {
-      if (request.required) unverifiable = true;
-      continue;
+  if (claimError) throw new Error(claimError.message);
+  const claim = claimed as {
+    attempt_id: string; baseline_ids: string[]; current_ids: string[];
+    chunks: (SourceChunk & { documents: { title: string } })[];
+  };
+  const { attempt_id: attemptId, baseline_ids: baselineIds, current_ids: currentIds, chunks } = claim;
+  try {
+    if (!chunks.length) {
+      await setAnalysisFailure(
+        supabase,
+        projectId,
+        reviewId,
+        attemptId,
+        "Selected evidence has no processed text.",
+      );
+      return;
     }
-    const source = verifySourceExcerpt(request.role, request.excerpt, chunks, request.role === "baseline" ? baselineSet : currentSet);
-    if (!source) unverifiable = true;
-    else verifiedSources.push(source);
-  }
-  if (unverifiable) {
-    await setAnalysisFailure(supabase, projectId, reviewId,
-      "More Evidence Required: one or more extracted values lack an exact excerpt in the selected baseline/current source documents.");
-    return;
-  }
 
-  const findings = evaluateAssuranceReview(extraction).map((finding) => ({
-    ...finding,
-    sourceExcerpts: finding.sourceExcerpts.map((source) => ({
-      ...source,
-      ...verifiedSources.find((verified) => verified.role === source.role && verified.excerpt === source.excerpt),
-    })),
-  }));
-  const { error: actionDeleteError } = await supabase
-    .from("assurance_actions")
-    .delete()
-    .eq("review_id", reviewId);
-  if (actionDeleteError) throw new Error(actionDeleteError.message);
+    const baselineText = formatEvidence(chunks, new Set(baselineIds));
+    const currentText = formatEvidence(chunks, new Set(currentIds));
+    if (!reviewEvidenceFits(baselineText, currentText)) {
+      await setAnalysisFailure(
+        supabase,
+        projectId,
+        reviewId,
+        attemptId,
+        "Selected evidence exceeds the complete review request limit. Filter or select fewer documents and retry; no partial evidence was analyzed.",
+      );
+      return;
+    }
+    const response = await runOllamaChat({
+      format: "json",
+      temperature: 0,
+      system:
+        "You extract structured project assurance values. Use only supplied evidence. Never invent a number, date, risk, comparison, or source excerpt. Use null or zero only as instructed. Return valid JSON only.",
+      user: buildReviewPrompt(baselineText, currentText),
+    });
 
-  const { error: findingDeleteError } = await supabase
-    .from("assurance_findings")
-    .delete()
-    .eq("review_id", reviewId);
-  if (findingDeleteError) throw new Error(findingDeleteError.message);
+    if (!response.ok) {
+      await setAnalysisFailure(
+        supabase,
+        projectId,
+        reviewId,
+        attemptId,
+        `AI analysis failed: ${response.warning}`,
+      );
+      return;
+    }
 
-  const { data: insertedFindings, error: findingInsertError } = await supabase
-    .from("assurance_findings")
-    .insert(
-      findings.map((finding) => ({
-        project_id: projectId,
-        review_id: reviewId,
-        domain: finding.domain,
-        condition: finding.condition,
-        severity: finding.severity,
-        headline: finding.headline,
-        explanation: finding.explanation,
-        baseline_value: finding.baselineValue,
-        current_value: finding.currentValue,
-        variance: finding.variance,
-        required_evidence: finding.requiredEvidence,
-        baseline_document_ids: baselineIds,
-        current_document_ids: currentIds,
-        source_excerpts: finding.sourceExcerpts,
-        confidence: finding.confidence,
-        provenance: {
-          extraction_provider: response.provider,
-          extraction_model: response.model,
-          comparison_engine: "deterministic_phase_4_v1",
-          thresholds: "phase_3_usable_mvp_defaults",
-        },
+    const parsed = parseJsonObject(response.content);
+    const extraction = parsed ? parseReviewExtraction(parsed) : null;
+
+    if (!extraction) {
+      await setAnalysisFailure(
+        supabase,
+        projectId,
+        reviewId,
+        attemptId,
+        "AI analysis returned an invalid structure. No finding was saved.",
+      );
+      return;
+    }
+    const baselineSet = new Set(baselineIds);
+    const currentSet = new Set(currentIds);
+    const excerptRequests: { role: "baseline" | "current"; excerpt: string | null; required: boolean }[] = [
+      { role: "baseline", excerpt: extraction.budget.baselineExcerpt, required: extraction.budget.baselineAmount !== null },
+      { role: "current", excerpt: extraction.budget.currentExcerpt, required: extraction.budget.currentForecast !== null || extraction.budget.currentActual !== null },
+      { role: "baseline", excerpt: extraction.risk.baselineExcerpt, required: false },
+      { role: "current", excerpt: extraction.risk.currentExcerpt, required: extraction.risk.hasCurrentEvidence },
+      ...extraction.schedule.milestones.flatMap((milestone) => [
+        { role: "baseline" as const, excerpt: milestone.baselineExcerpt, required: milestone.baselineDate !== null },
+        { role: "current" as const, excerpt: milestone.currentExcerpt, required: milestone.currentDate !== null },
+      ]),
+    ];
+    const verifiedSources: VerifiedSource[] = [];
+    let unverifiable = false;
+    for (const request of excerptRequests) {
+      if (!request.excerpt) {
+        if (request.required) unverifiable = true;
+        continue;
+      }
+      const source = verifySourceExcerpt(request.role, request.excerpt, chunks, request.role === "baseline" ? baselineSet : currentSet);
+      if (!source) unverifiable = true;
+      else verifiedSources.push(source);
+    }
+    if (unverifiable) {
+      await setAnalysisFailure(supabase, projectId, reviewId, attemptId,
+        "More Evidence Required: one or more extracted values lack an exact excerpt in the selected baseline/current source documents.");
+      return;
+    }
+
+    const findings = evaluateAssuranceReview(extraction).map((finding) => ({
+      ...finding,
+      sourceExcerpts: finding.sourceExcerpts.map((source) => ({
+        ...source,
+        ...verifiedSources.find((verified) => verified.role === source.role && verified.excerpt === source.excerpt),
       })),
-    )
-    .select("id, domain, condition");
-  if (findingInsertError) throw new Error(findingInsertError.message);
-
-  const actionRows = buildActionRows(
-    projectId,
-    reviewId,
-    findings,
-    insertedFindings ?? [],
-  );
-  if (actionRows.length > 0) {
-    const { error: actionInsertError } = await supabase
-      .from("assurance_actions")
-      .insert(actionRows);
-    if (actionInsertError) throw new Error(actionInsertError.message);
+    }));
+    const { data: published, error: publicationError } = await supabase.rpc("finish_assurance_analysis", {
+      p_project_id: projectId, p_review_id: reviewId, p_attempt_id: attemptId,
+      p_findings: findings, p_actions: buildActionRows(findings),
+      p_metadata: { provider: response.provider, model: response.model,
+        extraction_provider: response.provider, extraction_model: response.model,
+        comparison_engine: "deterministic_phase_4_v1", thresholds: "phase_3_usable_mvp_defaults" },
+    });
+    if (publicationError) throw new Error(publicationError.message);
+    if (!published) {
+      throw new Error("Analysis was not published: evidence or attempt ownership changed. Run analysis again.");
+    }
+  } catch (error) {
+    await setAnalysisFailure(supabase, projectId, reviewId, attemptId,
+      error instanceof Error ? error.message : "Assurance analysis failed.");
+    throw error;
   }
-
-  const { error: reviewUpdateError } = await supabase
-    .from("assurance_reviews")
-    .update({
-      status: "findings_ready",
-      current_step: "findings",
-      analysis_error: null,
-      analysis_metadata: {
-        provider: response.provider,
-        model: response.model,
-        completed_at: new Date().toISOString(),
-        baseline_document_count: baselineIds.length,
-        current_document_count: currentIds.length,
-      },
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", reviewId)
-    .eq("project_id", projectId);
-  if (reviewUpdateError) throw new Error(reviewUpdateError.message);
-
   revalidateAssurance(projectId);
 }
 
@@ -478,12 +336,7 @@ function formatEvidence(
     .join("\n\n");
 }
 
-function buildActionRows(
-  projectId: string,
-  reviewId: string,
-  findings: EvaluatedFinding[],
-  inserted: { id: string; domain: string; condition: string }[],
-) {
+function buildActionRows(findings: ReturnType<typeof evaluateAssuranceReview>) {
   const titles = {
     budget:
       "Confirm the cost forecast, explain the variance, and agree a budget recovery decision.",
@@ -498,10 +351,7 @@ function buildActionRows(
       ["needs_attention", "critical"].includes(finding.condition),
     )
     .map((finding) => ({
-      project_id: projectId,
-      review_id: reviewId,
-      finding_id:
-        inserted.find((row) => row.domain === finding.domain)?.id ?? null,
+      domain: finding.domain,
       title: titles[finding.domain],
       priority: finding.condition === "critical" ? "high" : "medium",
       status: "open",
@@ -512,18 +362,14 @@ async function setAnalysisFailure(
   supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
   projectId: string,
   reviewId: string,
+  attemptId: string,
   message: string,
 ) {
-  await supabase
-    .from("assurance_reviews")
-    .update({
-      status: "analysis_failed",
-      current_step: "analysis",
-      analysis_error: message.slice(0, 1000),
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", reviewId)
-    .eq("project_id", projectId);
+  const { error } = await supabase.rpc("finish_assurance_analysis", {
+    p_project_id: projectId, p_review_id: reviewId, p_attempt_id: attemptId,
+    p_error: message.slice(0, 1000),
+  });
+  if (error) throw new Error(error.message);
   revalidateAssurance(projectId);
 }
 
