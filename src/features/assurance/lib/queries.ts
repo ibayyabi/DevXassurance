@@ -4,9 +4,13 @@ import {
   costObservationColumns,
   mapCostBaselineRow,
   mapCostObservationRow,
+  mapWbsMappingRow,
+  wbsMappingColumns,
   type CostBaselineRow,
   type CostObservationRow,
+  type WbsMappingRow,
 } from "@/features/assurance/lib/cost-queries";
+import type { WbsMapping } from "@/features/assurance/lib/cost-evidence";
 import type {
   ReviewCondition,
   ReviewDomain,
@@ -141,7 +145,7 @@ type ActionRow = {
 
 export async function getAssuranceWorkspace(projectId: string) {
   const { supabase, membership } = await requireProjectMembership(projectId);
-  const [costResult, baselineResult] = await Promise.all([
+  const [costResult, baselineResult, wbsLabelResult, mappingResult] = await Promise.all([
     supabase
       .from("cost_observations")
       .select(costObservationColumns)
@@ -153,15 +157,40 @@ export async function getAssuranceWorkspace(projectId: string) {
       .select(costBaselineColumns)
       .eq("project_id", projectId)
       .order("effective_date", { ascending: false }),
+    // Distinct WBS source labels captured in evidence, so a reviewer can map
+    // differing codes before comparison.
+    supabase
+      .from("cost_observations")
+      .select("scope_label")
+      .eq("project_id", projectId)
+      .eq("scope_level", "wbs")
+      .not("scope_label", "is", null),
+    supabase
+      .from("wbs_mappings")
+      .select(wbsMappingColumns)
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false }),
   ]);
   if (costResult.error) throw new Error(costResult.error.message);
   if (baselineResult.error) throw new Error(baselineResult.error.message);
+  if (wbsLabelResult.error) throw new Error(wbsLabelResult.error.message);
+  if (mappingResult.error) throw new Error(mappingResult.error.message);
 
   const costObservations = ((costResult.data ?? []) as CostObservationRow[]).map(
     mapCostObservationRow,
   );
   const costBaselines = ((baselineResult.data ?? []) as CostBaselineRow[]).map(
     mapCostBaselineRow,
+  );
+  const wbsScopeLabels = [
+    ...new Set(
+      ((wbsLabelResult.data ?? []) as { scope_label: string | null }[])
+        .map((row) => row.scope_label)
+        .filter((label): label is string => Boolean(label)),
+    ),
+  ].sort((first, second) => first.localeCompare(second));
+  const wbsMappings: WbsMapping[] = ((mappingResult.data ?? []) as WbsMappingRow[]).map(
+    mapWbsMappingRow,
   );
   const [documentsResult, reviewsResult] = await Promise.all([
     supabase
@@ -223,6 +252,8 @@ export async function getAssuranceWorkspace(projectId: string) {
       reviews: [] as AssuranceReview[],
       costObservations,
       costBaselines,
+      wbsScopeLabels,
+      wbsMappings,
     };
   }
 
@@ -309,5 +340,7 @@ export async function getAssuranceWorkspace(projectId: string) {
     reviews,
     costObservations,
     costBaselines,
+    wbsScopeLabels,
+    wbsMappings,
   };
 }

@@ -17,9 +17,16 @@ import {
   costObservationColumns,
   mapCostBaselineRow,
   mapCostObservationRow,
+  mapWbsMappingRow,
+  wbsMappingColumns,
   type CostBaselineRow,
   type CostObservationRow,
+  type WbsMappingRow,
 } from "@/features/assurance/lib/cost-queries";
+import {
+  buildWbsBudgetFindings,
+  buildWbsScopeCandidates,
+} from "@/features/assurance/lib/wbs-comparison";
 import { reviewEvidenceIssue } from "@/features/assurance/lib/evidence-readiness";
 import { requireProjectMembership } from "@/features/projects/lib/queries";
 import { canApproveAssuranceBaseline, canManageProject } from "@/features/projects/lib/roles";
@@ -293,6 +300,13 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
     currentIds,
     reportingPeriod,
   );
+  const wbs = await buildWbsComparison(
+    supabase,
+    projectId,
+    baselineIds,
+    currentIds,
+    reportingPeriod,
+  );
   const findings = evaluateAssuranceReview(extraction, budgetFinding).map((finding) => ({
     ...finding,
     sourceExcerpts: finding.sourceExcerpts.map((source) => ({
@@ -373,6 +387,9 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
         completed_at: new Date().toISOString(),
         baseline_document_count: baselineIds.length,
         current_document_count: currentIds.length,
+        // WBS comparisons sit beside the single project-total Budget finding.
+        wbs_budget_findings: wbs.findings,
+        wbs_scope_candidates: wbs.scopeCandidates,
       },
       updated_at: new Date().toISOString(),
     })
@@ -466,6 +483,75 @@ export async function approveCostBaseline(formData: FormData): Promise<void> {
     approval_note: note || null,
   });
   if (insertError) throw new Error(insertError.message);
+
+  revalidateAssurance(projectId);
+}
+
+/**
+ * Accepts a reviewer-approved WBS mapping: a statement that a source work-
+ * package label is the same work package as a canonical label, scoped to the
+ * project. Only after acceptance does the comparison group the two labels
+ * together (ADR 0004). The model never writes this; a reviewer does.
+ */
+export async function acceptWbsMapping(formData: FormData): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const sourceLabel = String(formData.get("sourceLabel") ?? "").trim();
+  const canonicalLabel = String(formData.get("canonicalLabel") ?? "").trim();
+  const note = String(formData.get("note") ?? "").trim();
+
+  if (!projectId || !sourceLabel || !canonicalLabel) {
+    throw new Error("Provide the source label and the canonical label it maps to.");
+  }
+  if (sourceLabel === canonicalLabel) {
+    throw new Error("A label mapped to itself is not a mapping; identical labels already match.");
+  }
+
+  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  // One accepted canonical target per source label: replace any prior one.
+  const { error: clearError } = await supabase
+    .from("wbs_mappings")
+    .delete()
+    .eq("project_id", projectId)
+    .eq("source_label", sourceLabel)
+    .eq("state", "accepted");
+  if (clearError) throw new Error(clearError.message);
+
+  const { error: insertError } = await supabase.from("wbs_mappings").insert({
+    project_id: projectId,
+    source_label: sourceLabel,
+    canonical_label: canonicalLabel,
+    state: "accepted",
+    proposed_by_model: false,
+    note: note || null,
+    created_by: user.id,
+    accepted_by: user.id,
+    accepted_at: new Date().toISOString(),
+  });
+  if (insertError) throw new Error(insertError.message);
+
+  revalidateAssurance(projectId);
+}
+
+/**
+ * Removes a WBS mapping. The comparison stops grouping its labels together
+ * immediately; nothing about the underlying evidence changes.
+ */
+export async function removeWbsMapping(formData: FormData): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const mappingId = String(formData.get("mappingId") ?? "");
+  if (!projectId || !mappingId) throw new Error("Choose a mapping to remove.");
+
+  const { supabase, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  const { error } = await supabase
+    .from("wbs_mappings")
+    .delete()
+    .eq("project_id", projectId)
+    .eq("id", mappingId);
+  if (error) throw new Error(error.message);
 
   revalidateAssurance(projectId);
 }
@@ -661,6 +747,72 @@ async function buildProjectBudgetFinding(
         (observation.measure === "actual_to_date" || observation.measure === "committed"),
     ),
   });
+}
+
+/**
+ * WBS-level cost comparisons and scope candidates for this review. These sit
+ * beside the single project-total Budget finding and never replace it: a WBS
+ * evidence gap is reported as its own gap and leaves the project total intact.
+ * Differing work-package labels are grouped only through reviewer-accepted
+ * mappings; identical labels match directly.
+ */
+async function buildWbsComparison(
+  supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
+  projectId: string,
+  baselineDocumentIds: string[],
+  currentDocumentIds: string[],
+  asOf: string,
+) {
+  const reviewDocumentIds = [...new Set([...baselineDocumentIds, ...currentDocumentIds])];
+  if (reviewDocumentIds.length === 0) {
+    return { findings: [], scopeCandidates: [] };
+  }
+
+  const [observationResult, baselineResult, mappingResult] = await Promise.all([
+    supabase
+      .from("cost_observations")
+      .select(costObservationColumns)
+      .eq("project_id", projectId)
+      .eq("scope_level", "wbs")
+      .in("document_id", reviewDocumentIds),
+    supabase
+      .from("cost_baselines")
+      .select(costBaselineColumns)
+      .eq("project_id", projectId)
+      .eq("scope_level", "wbs")
+      .eq("state", "accepted"),
+    supabase
+      .from("wbs_mappings")
+      .select(wbsMappingColumns)
+      .eq("project_id", projectId)
+      .eq("state", "accepted"),
+  ]);
+  if (observationResult.error) throw new Error(observationResult.error.message);
+  if (baselineResult.error) throw new Error(baselineResult.error.message);
+  if (mappingResult.error) throw new Error(mappingResult.error.message);
+
+  const observations = ((observationResult.data ?? []) as CostObservationRow[]).map(mapCostObservationRow);
+  const baselines = ((baselineResult.data ?? []) as CostBaselineRow[]).map(mapCostBaselineRow);
+  const mappings = ((mappingResult.data ?? []) as WbsMappingRow[]).map(mapWbsMappingRow);
+
+  const baselineSet = new Set(baselineDocumentIds);
+  const currentSet = new Set(currentDocumentIds);
+  const currentObservations = observations.filter((observation) => currentSet.has(observation.documentId));
+  const baselineObservations = observations.filter((observation) => baselineSet.has(observation.documentId));
+
+  const findings = buildWbsBudgetFindings({
+    observations: currentObservations,
+    baselineObservations: observations,
+    baselines,
+    mappings,
+    asOf,
+  });
+  const scopeCandidates = buildWbsScopeCandidates({
+    baselineObservations,
+    currentObservations,
+    mappings,
+  });
+  return { findings, scopeCandidates };
 }
 
 // The reviewed month's last day: a baseline accepted later does not apply.

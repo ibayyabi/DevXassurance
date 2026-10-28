@@ -18,9 +18,11 @@ import {
   updateAssuranceAction,
 } from "@/features/assurance/actions/assurance-actions";
 import { CostBaselinePanel } from "@/features/assurance/components/cost-baseline-panel";
+import { WbsComparisonPanel } from "@/features/assurance/components/wbs-comparison-panel";
 import type {
   CostBaseline,
   CostObservation,
+  WbsMapping,
 } from "@/features/assurance/lib/cost-evidence";
 import { ProcessingRefresh } from "@/features/assurance/components/processing-refresh";
 import type {
@@ -40,6 +42,8 @@ export function AssuranceWorkspace({
   documents,
   costObservations,
   costBaselines,
+  wbsScopeLabels,
+  wbsMappings,
   canApproveBaseline,
 }: {
   projectId: string;
@@ -47,6 +51,8 @@ export function AssuranceWorkspace({
   documents: AssuranceDocument[];
   costObservations: CostObservation[];
   costBaselines: CostBaseline[];
+  wbsScopeLabels: string[];
+  wbsMappings: WbsMapping[];
   canApproveBaseline: boolean;
 }) {
   const activeProcessing = documents.some((document) =>
@@ -153,6 +159,14 @@ export function AssuranceWorkspace({
         projectId={projectId}
         observations={costObservations}
         baselines={costBaselines}
+        canApprove={canApproveBaseline}
+      />
+
+      <WbsComparisonPanel
+        projectId={projectId}
+        review={review}
+        wbsScopeLabels={wbsScopeLabels}
+        wbsMappings={wbsMappings}
         canApprove={canApproveBaseline}
       />
 
