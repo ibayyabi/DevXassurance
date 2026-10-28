@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
+import { dirname, join } from "node:path";
+import { pathToFileURL, fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 import test from "node:test";
 
 import { evaluateAssuranceReview } from "../../src/features/assurance/lib/analysis.ts";
@@ -8,6 +12,44 @@ import {
   evaluateProjectBudget,
   selectReportedEac,
 } from "../../src/features/assurance/lib/cost-evidence.ts";
+
+// Schedule is now evaluated by the deterministic schedule comparison, which
+// imports sibling modules with extensionless specifiers. Compile them to .mjs
+// and rewrite the runtime imports, as the ticket-02/03 tests do.
+const require = createRequire(import.meta.url);
+const ts = require("typescript");
+const compile = (source) =>
+  ts.transpileModule(readFileSync(source, "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+const resolveSrc = (relative) => fileURLToPath(new URL(relative, import.meta.url));
+const analysisSrc = resolveSrc("../../src/features/assurance/lib/analysis.ts");
+const costSrc = resolveSrc("../../src/features/assurance/lib/cost-evidence.ts");
+const wbsSrc = resolveSrc("../../src/features/assurance/lib/wbs-comparison.ts");
+const scheduleSrc = resolveSrc("../../src/features/assurance/lib/schedule-comparison.ts");
+const analysisMod = join(dirname(analysisSrc), `.analysis-${randomUUID()}.mjs`);
+const costMod = join(dirname(costSrc), `.cost-evidence-${randomUUID()}.mjs`);
+const wbsMod = join(dirname(wbsSrc), `.wbs-comparison-${randomUUID()}.mjs`);
+const scheduleMod = join(dirname(scheduleSrc), `.schedule-comparison-${randomUUID()}.mjs`);
+writeFileSync(analysisMod, compile(analysisSrc));
+writeFileSync(costMod, compile(costSrc));
+writeFileSync(wbsMod, compile(wbsSrc).replace('from "./cost-evidence"', `from "${pathToFileURL(costMod).href}"`));
+writeFileSync(
+  scheduleMod,
+  compile(scheduleSrc)
+    .replace('from "./analysis"', `from "${pathToFileURL(analysisMod).href}"`)
+    .replace('from "./wbs-comparison"', `from "${pathToFileURL(wbsMod).href}"`),
+);
+process.on("exit", () => {
+  for (const file of [analysisMod, costMod, wbsMod, scheduleMod]) {
+    try {
+      unlinkSync(file);
+    } catch {
+      // best effort
+    }
+  }
+});
+const { buildMilestoneComparisons, buildScheduleFinding } = await import(pathToFileURL(scheduleMod).href);
 
 const root = path.resolve("demo-evidence-fixtures/realistic-pmo-cases");
 const scenarios = JSON.parse(readFileSync(path.join(root, "scenarios.json"), "utf8"));
@@ -93,19 +135,33 @@ test("golden evidence packs produce the expected three-period PMO conditions", (
   for (const scenario of scenarios.scenarios) {
     assert.equal(scenario.periods.length, 3);
     for (const period of scenario.periods) {
-      const findings = evaluateAssuranceReview({
-        schedule: {
-          milestones: [
+      const scheduleFinding = buildScheduleFinding(
+        buildMilestoneComparisons({
+          baselineMilestones: [
             {
-              name: scenario.baseline_milestone.name,
-              baselineDate: scenario.baseline_milestone.date,
-              currentDate: period.forecast_milestone_date,
-              baselineExcerpt: `Approved date ${scenario.baseline_milestone.date}.`,
-              currentExcerpt: `Forecast date ${period.forecast_milestone_date}.`,
+              label: scenario.baseline_milestone.name,
+              date: scenario.baseline_milestone.date,
+              periodLabel: null,
+              asOfDate: null,
+              excerpt: `Approved date ${scenario.baseline_milestone.date}.`,
             },
           ],
-          confidence: 1,
-        },
+          currentMilestones: [
+            {
+              label: scenario.baseline_milestone.name,
+              date: period.forecast_milestone_date,
+              periodLabel: period.period,
+              asOfDate: period.period,
+              excerpt: `Forecast date ${period.forecast_milestone_date}.`,
+            },
+          ],
+          mappings: [],
+        }),
+        1,
+      );
+      const findings = evaluateAssuranceReview({
+        schedule: { baselineMilestones: [], currentMilestones: [], confidence: 1 },
+        progress: { observations: [], confidence: 1 },
         risk: {
           hasCurrentEvidence: true,
           openCriticalCount: period.risk.open_critical_count,
@@ -120,7 +176,7 @@ test("golden evidence packs produce the expected three-period PMO conditions", (
           currentExcerpt: period.narrative,
           confidence: 1,
         },
-      }, budgetFindingFor(scenario, period));
+      }, budgetFindingFor(scenario, period), scheduleFinding);
 
       assert.equal(finding(findings, "budget").condition, period.expected.budget_condition);
       assert.equal(finding(findings, "schedule").condition, period.expected.schedule_condition);

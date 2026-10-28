@@ -7,19 +7,51 @@ export type ReviewCondition =
 export type ReviewDomain = "budget" | "schedule" | "risk";
 
 /**
+ * A single milestone date as one source states it. Baseline and current
+ * milestones stay in separate lists so the model never pairs differing labels
+ * itself; the deterministic comparison matches them by identical label or a
+ * reviewer-accepted mapping (ADR 0004). A null date is a milestone named
+ * without an explicit date — a comparison gap, never a guessed date.
+ */
+export type MilestoneObservation = {
+  label: string;
+  date: string | null;
+  periodLabel: string | null;
+  asOfDate: string | null;
+  excerpt: string | null;
+};
+
+/**
+ * A reported progress percentage at project or WBS level, preserved exactly as
+ * one source states it. The role records which evidence group it came from so a
+ * cross-period comparison can use the reviewer-selected current period against a
+ * prior baseline period for the same scope. Progress is never aggregated from
+ * WBS percentages into a project total and never converted into a forecast date.
+ */
+export type ProgressObservation = {
+  role: "baseline" | "current";
+  scopeLevel: "project" | "wbs";
+  scopeLabel: string | null;
+  percent: number | null;
+  periodLabel: string | null;
+  asOfDate: string | null;
+  excerpt: string | null;
+};
+
+/**
  * Review-time extraction for the domains that still use the single review
  * prompt. Budget no longer appears here: project cost evidence comes from the
- * grouped extraction's cost observations and a reviewer-accepted baseline.
+ * grouped extraction's cost observations and a reviewer-accepted baseline. The
+ * model only reports source values; conditions are computed deterministically.
  */
 export type ReviewExtraction = {
   schedule: {
-    milestones: {
-      name: string;
-      baselineDate: string | null;
-      currentDate: string | null;
-      baselineExcerpt: string | null;
-      currentExcerpt: string | null;
-    }[];
+    baselineMilestones: MilestoneObservation[];
+    currentMilestones: MilestoneObservation[];
+    confidence: number;
+  };
+  progress: {
+    observations: ProgressObservation[];
     confidence: number;
   };
   risk: {
@@ -54,14 +86,19 @@ export function parseReviewExtraction(
   value: Record<string, unknown>,
 ): ReviewExtraction | null {
   const schedule = record(value.schedule);
+  const progress = record(value.progress);
   const risk = record(value.risk);
 
   if (
     !schedule ||
+    !progress ||
     !risk ||
-    !Array.isArray(schedule.milestones) ||
+    !Array.isArray(schedule.baseline_milestones) ||
+    !Array.isArray(schedule.current_milestones) ||
+    !Array.isArray(progress.observations) ||
     typeof risk.has_current_evidence !== "boolean" ||
     !validConfidence(schedule.confidence) ||
+    !validConfidence(progress.confidence) ||
     !validConfidence(risk.confidence) ||
     ![risk.baseline_excerpt, risk.current_excerpt].every(validOptionalText) ||
     ![
@@ -74,43 +111,24 @@ export function parseReviewExtraction(
     ].every(validCount)
   ) return null;
 
-  const rawMilestones = schedule.milestones;
+  const baselineMilestones = parseMilestones(schedule.baseline_milestones);
+  const currentMilestones = parseMilestones(schedule.current_milestones);
+  const progressObservations = parseProgress(progress.observations);
   if (
-    !rawMilestones.every((item) => {
-      const milestone = record(item);
-      return Boolean(
-        milestone &&
-          text(milestone.name) &&
-          validOptionalIsoDate(milestone.baseline_date) &&
-          validOptionalIsoDate(milestone.current_forecast_date ?? milestone.current_date) &&
-          validOptionalText(milestone.baseline_excerpt) &&
-          validOptionalText(milestone.current_excerpt),
-      );
-    })
+    baselineMilestones === null ||
+    currentMilestones === null ||
+    progressObservations === null
   ) return null;
-  const milestones = rawMilestones
-    .map((item) => {
-      const milestone = record(item);
-      if (!milestone) return null;
-      const name = text(milestone.name);
-      if (!name) return null;
-
-      return {
-        name,
-        baselineDate: isoDate(milestone.baseline_date),
-        currentDate: isoDate(
-          milestone.current_forecast_date ?? milestone.current_date,
-        ),
-        baselineExcerpt: nullableText(milestone.baseline_excerpt),
-        currentExcerpt: nullableText(milestone.current_excerpt),
-      };
-    })
-    .filter((item): item is NonNullable<typeof item> => item !== null);
 
   return {
     schedule: {
-      milestones,
+      baselineMilestones,
+      currentMilestones,
       confidence: confidence(schedule.confidence),
+    },
+    progress: {
+      observations: progressObservations,
+      confidence: confidence(progress.confidence),
     },
     risk: {
       hasCurrentEvidence: Boolean(risk.has_current_evidence),
@@ -131,70 +149,68 @@ export function parseReviewExtraction(
   };
 }
 
+function parseMilestones(items: unknown[]): MilestoneObservation[] | null {
+  const parsed: MilestoneObservation[] = [];
+  for (const item of items) {
+    const milestone = record(item);
+    if (!milestone) return null;
+    const label = text(milestone.label ?? milestone.name);
+    if (
+      !label ||
+      !validOptionalIsoDate(milestone.date) ||
+      !validOptionalText(milestone.period_label) ||
+      !validOptionalText(milestone.as_of_date) ||
+      !validOptionalText(milestone.excerpt)
+    ) return null;
+    parsed.push({
+      label,
+      date: isoDate(milestone.date),
+      periodLabel: nullableText(milestone.period_label),
+      asOfDate: isoDate(milestone.as_of_date),
+      excerpt: nullableText(milestone.excerpt),
+    });
+  }
+  return parsed;
+}
+
+function parseProgress(items: unknown[]): ProgressObservation[] | null {
+  const parsed: ProgressObservation[] = [];
+  for (const item of items) {
+    const observation = record(item);
+    if (!observation) return null;
+    const role = text(observation.role);
+    const scopeLevel = text(observation.scope_level);
+    if (
+      (role !== "baseline" && role !== "current") ||
+      (scopeLevel !== "project" && scopeLevel !== "wbs") ||
+      !validOptionalPercent(observation.percent) ||
+      !validOptionalText(observation.scope_label) ||
+      !validOptionalText(observation.period_label) ||
+      !validOptionalText(observation.as_of_date) ||
+      !validOptionalText(observation.excerpt)
+    ) return null;
+    // Project progress carries no scope label; WBS progress needs one to be
+    // comparable, and a labelless WBS percentage stays an uncompared value.
+    const scopeLabel = scopeLevel === "wbs" ? nullableText(observation.scope_label) : null;
+    parsed.push({
+      role,
+      scopeLevel,
+      scopeLabel,
+      percent: percent(observation.percent),
+      periodLabel: nullableText(observation.period_label),
+      asOfDate: isoDate(observation.as_of_date),
+      excerpt: nullableText(observation.excerpt),
+    });
+  }
+  return parsed;
+}
+
 export function evaluateAssuranceReview(
   extraction: ReviewExtraction,
   budget: EvaluatedFinding,
+  schedule: EvaluatedFinding,
 ): EvaluatedFinding[] {
-  return [budget, evaluateSchedule(extraction), evaluateRisk(extraction)];
-}
-
-function evaluateSchedule(extraction: ReviewExtraction): EvaluatedFinding {
-  const comparable = extraction.schedule.milestones
-    .map((milestone) => ({
-      ...milestone,
-      delayDays: dateDifferenceDays(
-        milestone.baselineDate,
-        milestone.currentDate,
-      ),
-    }))
-    .filter(
-      (milestone): milestone is typeof milestone & { delayDays: number } =>
-        milestone.delayDays !== null,
-    );
-
-  if (comparable.length === 0) {
-    return missingFinding(
-      "schedule",
-      "Schedule comparison needs more evidence",
-      "At least one milestone needs both an approved baseline date and a current forecast date.",
-      ["Approved milestone date", "Current milestone forecast date"],
-      [],
-      extraction.schedule.confidence,
-    );
-  }
-
-  const worst = comparable.reduce((current, candidate) =>
-    candidate.delayDays > current.delayDays ? candidate : current,
-  );
-  const condition: ReviewCondition =
-    worst.delayDays > 14
-      ? "critical"
-      : worst.delayDays > 0
-        ? "needs_attention"
-        : "on_track";
-
-  return {
-    domain: "schedule",
-    condition,
-    severity: severityFor(condition),
-    headline:
-      condition === "on_track"
-        ? "Compared milestones are on or ahead of baseline"
-        : `${worst.name} is forecast ${worst.delayDays} day${worst.delayDays === 1 ? "" : "s"} late`,
-    explanation: `${comparable.length} milestone${comparable.length === 1 ? " was" : "s were"} compared. The largest forecast delay is ${worst.delayDays} calendar day${worst.delayDays === 1 ? "" : "s"}.`,
-    baselineValue: {
-      milestone: worst.name,
-      date: worst.baselineDate,
-    },
-    currentValue: { milestone: worst.name, date: worst.currentDate },
-    variance: { delay_days: worst.delayDays },
-    requiredEvidence: [],
-    sourceExcerpts: sourceExcerpts(
-      worst.baselineExcerpt,
-      worst.currentExcerpt,
-    ),
-    confidence: extraction.schedule.confidence,
-  };
+  return [budget, schedule, evaluateRisk(extraction)];
 }
 
 function evaluateRisk(extraction: ReviewExtraction): EvaluatedFinding {
@@ -254,13 +270,13 @@ function evaluateRisk(extraction: ReviewExtraction): EvaluatedFinding {
   };
 }
 
-function missingFinding(
+export function missingFinding(
   domain: ReviewDomain,
   headline: string,
   explanation: string,
   requiredEvidence: string[],
   excerpts: EvaluatedFinding["sourceExcerpts"],
-  findingConfidence: number,
+  findingConfidence: number | null,
 ): EvaluatedFinding {
   return {
     domain,
@@ -277,14 +293,14 @@ function missingFinding(
   };
 }
 
-function severityFor(condition: ReviewCondition): EvaluatedFinding["severity"] {
+export function severityFor(condition: ReviewCondition): EvaluatedFinding["severity"] {
   if (condition === "critical") return "critical";
   if (condition === "needs_attention") return "high";
   if (condition === "on_track") return "information";
   return "information";
 }
 
-function sourceExcerpts(
+export function sourceExcerpts(
   baseline: string | null,
   current: string | null,
 ): EvaluatedFinding["sourceExcerpts"] {
@@ -298,15 +314,13 @@ function sourceExcerpts(
   ];
 }
 
-function dateDifferenceDays(baseline: string | null, current: string | null) {
+export function dateDifferenceDays(baseline: string | null, current: string | null) {
   if (!baseline || !current) return null;
   const baselineTime = Date.parse(`${baseline}T00:00:00Z`);
   const currentTime = Date.parse(`${current}T00:00:00Z`);
   if (!Number.isFinite(baselineTime) || !Number.isFinite(currentTime)) return null;
   return Math.round((currentTime - baselineTime) / 86_400_000);
 }
-
-
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -322,13 +336,16 @@ function nullableText(value: unknown) {
   return text(value) || null;
 }
 
-
 function nonNegativeInteger(value: unknown) {
   return value as number;
 }
 
 function confidence(value: unknown) {
   return value as number;
+}
+
+function percent(value: unknown) {
+  return value === null || value === undefined ? null : (value as number);
 }
 
 function validCount(value: unknown): value is number {
@@ -339,6 +356,13 @@ function validConfidence(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
+function validOptionalPercent(value: unknown) {
+  return (
+    value === null ||
+    value === undefined ||
+    (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100)
+  );
+}
 
 function validOptionalText(value: unknown) {
   return value === null || value === undefined || typeof value === "string";

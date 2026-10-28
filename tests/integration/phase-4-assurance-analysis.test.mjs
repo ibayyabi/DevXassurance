@@ -7,8 +7,10 @@ import {
 } from "../../src/features/assurance/lib/analysis.ts";
 
 // Budget is evaluated from cost observations and an accepted baseline; see
-// ticket-01-project-budget-assurance.test.mjs. Here it is supplied as an
-// already-evaluated finding.
+// ticket-01-project-budget-assurance.test.mjs. Schedule is evaluated from
+// matched milestones; see ticket-03-schedule-comparison.test.mjs. Both are
+// supplied here as already-evaluated findings so this file covers composition
+// (budget, schedule, risk, in that order) and the risk thresholds.
 function budgetFinding(overrides = {}) {
   return {
     domain: "budget",
@@ -26,20 +28,39 @@ function budgetFinding(overrides = {}) {
   };
 }
 
+function scheduleFinding(overrides = {}) {
+  return {
+    domain: "schedule",
+    condition: "on_track",
+    severity: "information",
+    headline: "Compared milestones are on or ahead of baseline",
+    explanation: "1 milestone was compared.",
+    baselineValue: { milestone: "Completion", date: "2026-07-01" },
+    currentValue: { milestone: "Completion", date: "2026-07-01" },
+    variance: { delay_days: 0 },
+    requiredEvidence: [],
+    sourceExcerpts: [],
+    confidence: 0.9,
+    ...overrides,
+  };
+}
+
 function extraction(overrides = {}) {
   return {
     schedule: {
-      milestones: [
-        {
-          name: "Completion",
-          baselineDate: "2026-07-01",
-          currentDate: "2026-07-01",
-          baselineExcerpt: "Baseline completion 1 July 2026.",
-          currentExcerpt: "Forecast completion 1 July 2026.",
-        },
+      baselineMilestones: [
+        { label: "Completion", date: "2026-07-01", periodLabel: null, asOfDate: null, excerpt: "Baseline completion 1 July 2026." },
+      ],
+      currentMilestones: [
+        { label: "Completion", date: "2026-07-01", periodLabel: null, asOfDate: null, excerpt: "Forecast completion 1 July 2026." },
       ],
       confidence: 0.9,
       ...overrides.schedule,
+    },
+    progress: {
+      observations: [],
+      confidence: 0.9,
+      ...overrides.progress,
     },
     risk: {
       hasCurrentEvidence: true,
@@ -61,62 +82,30 @@ function finding(result, domain) {
   return result.find((item) => item.domain === domain);
 }
 
-test("the evaluated budget finding is reported alongside schedule and risk", () => {
+test("the evaluated budget and schedule findings are reported alongside risk", () => {
   const result = evaluateAssuranceReview(
     extraction(),
     budgetFinding({ condition: "critical", severity: "critical" }),
+    scheduleFinding(),
   );
 
   assert.deepEqual(result.map((item) => item.domain), ["budget", "schedule", "risk"]);
   assert.equal(finding(result, "budget").condition, "critical");
+  assert.equal(finding(result, "schedule").condition, "on_track");
 });
 
-test("schedule thresholds are deterministic at 0, 14, and 15 days", () => {
-  const schedule = (currentDate) => ({
-    milestones: [
-      {
-        name: "Completion",
-        baselineDate: "2026-07-01",
-        currentDate,
-        baselineExcerpt: "Baseline completion 1 July 2026.",
-        currentExcerpt: `Forecast completion ${currentDate}.`,
-      },
-    ],
-  });
-
-  assert.equal(
-    finding(evaluateAssuranceReview(extraction(), budgetFinding()), "schedule").condition,
-    "on_track",
-  );
-  assert.equal(
-    finding(
-      evaluateAssuranceReview(
-        extraction({ schedule: schedule("2026-07-15") }),
-        budgetFinding(),
-      ),
-      "schedule",
-    ).condition,
-    "needs_attention",
-  );
-  assert.equal(
-    finding(
-      evaluateAssuranceReview(
-        extraction({ schedule: schedule("2026-07-16") }),
-        budgetFinding(),
-      ),
-      "schedule",
-    ).condition,
-    "critical",
-  );
+test("the supplied schedule finding is passed through unchanged", () => {
+  const schedule = scheduleFinding({ condition: "critical", variance: { delay_days: 20 } });
+  const result = evaluateAssuranceReview(extraction(), budgetFinding(), schedule);
+  assert.equal(finding(result, "schedule").condition, "critical");
+  assert.equal(finding(result, "schedule").variance.delay_days, 20);
 });
 
-test("missing comparison evidence stays incomplete rather than optimistic", () => {
+test("missing risk evidence stays incomplete rather than optimistic", () => {
   const result = evaluateAssuranceReview(
-    extraction({
-      schedule: { milestones: [] },
-      risk: { hasCurrentEvidence: false },
-    }),
+    extraction({ risk: { hasCurrentEvidence: false } }),
     budgetFinding(),
+    scheduleFinding({ condition: "more_evidence_required" }),
   );
 
   assert.deepEqual(
@@ -135,6 +124,7 @@ test("risk becomes critical for an open critical risk or missing high-risk contr
       evaluateAssuranceReview(
         extraction({ risk: { openCriticalCount: 1 } }),
         budgetFinding(),
+        scheduleFinding(),
       ),
       "risk",
     ).condition,
@@ -145,6 +135,7 @@ test("risk becomes critical for an open critical risk or missing high-risk contr
       evaluateAssuranceReview(
         extraction({ risk: { highRisksMissingControl: 1 } }),
         budgetFinding(),
+        scheduleFinding(),
       ),
       "risk",
     ).condition,

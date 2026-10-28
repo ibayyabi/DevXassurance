@@ -18,6 +18,7 @@ export default async function AssurancePage({
       costBaselines={workspace.costBaselines}
       wbsScopeLabels={workspace.wbsScopeLabels}
       wbsMappings={workspace.wbsMappings}
+      milestoneMappings={workspace.milestoneMappings}
       canApproveBaseline={canApproveAssuranceBaseline(workspace.membership.role)}
     />
   );

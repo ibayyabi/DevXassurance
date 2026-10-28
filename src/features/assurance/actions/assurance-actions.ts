@@ -6,6 +6,7 @@ import {
   evaluateAssuranceReview,
   parseReviewExtraction,
   type EvaluatedFinding,
+  type ReviewExtraction,
 } from "@/features/assurance/lib/analysis";
 import {
   evaluateProjectBudget,
@@ -17,16 +18,25 @@ import {
   costObservationColumns,
   mapCostBaselineRow,
   mapCostObservationRow,
+  mapMilestoneMappingRow,
   mapWbsMappingRow,
+  milestoneMappingColumns,
   wbsMappingColumns,
   type CostBaselineRow,
   type CostObservationRow,
+  type MilestoneMappingRow,
   type WbsMappingRow,
 } from "@/features/assurance/lib/cost-queries";
 import {
   buildWbsBudgetFindings,
   buildWbsScopeCandidates,
 } from "@/features/assurance/lib/wbs-comparison";
+import {
+  buildMilestoneComparisons,
+  buildProgressComparison,
+  buildScheduleFinding,
+  milestoneSourceLabels,
+} from "@/features/assurance/lib/schedule-comparison";
 import { reviewEvidenceIssue } from "@/features/assurance/lib/evidence-readiness";
 import { requireProjectMembership } from "@/features/projects/lib/queries";
 import { canApproveAssuranceBaseline, canManageProject } from "@/features/projects/lib/roles";
@@ -272,10 +282,15 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
   const excerptRequests: { role: "baseline" | "current"; excerpt: string | null; required: boolean }[] = [
     { role: "baseline", excerpt: extraction.risk.baselineExcerpt, required: false },
     { role: "current", excerpt: extraction.risk.currentExcerpt, required: extraction.risk.hasCurrentEvidence },
-    ...extraction.schedule.milestones.flatMap((milestone) => [
-      { role: "baseline" as const, excerpt: milestone.baselineExcerpt, required: milestone.baselineDate !== null },
-      { role: "current" as const, excerpt: milestone.currentExcerpt, required: milestone.currentDate !== null },
-    ]),
+    ...extraction.schedule.baselineMilestones.map((milestone) => ({
+      role: "baseline" as const, excerpt: milestone.excerpt, required: milestone.date !== null,
+    })),
+    ...extraction.schedule.currentMilestones.map((milestone) => ({
+      role: "current" as const, excerpt: milestone.excerpt, required: milestone.date !== null,
+    })),
+    ...extraction.progress.observations.map((observation) => ({
+      role: observation.role, excerpt: observation.excerpt, required: observation.percent !== null,
+    })),
   ];
   const verifiedSources: VerifiedSource[] = [];
   let unverifiable = false;
@@ -307,7 +322,8 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
     currentIds,
     reportingPeriod,
   );
-  const findings = evaluateAssuranceReview(extraction, budgetFinding).map((finding) => ({
+  const schedule = await buildScheduleComparison(supabase, projectId, extraction);
+  const findings = evaluateAssuranceReview(extraction, budgetFinding, schedule.finding).map((finding) => ({
     ...finding,
     sourceExcerpts: finding.sourceExcerpts.map((source) => ({
       ...source,
@@ -351,12 +367,19 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
               comparison_engine: "pmo_cost_contract_v1",
               thresholds: "pmo_budget_variance_v1",
             }
-          : {
-              extraction_provider: response.provider,
-              extraction_model: response.model,
-              comparison_engine: "deterministic_phase_4_v1",
-              thresholds: "phase_3_usable_mvp_defaults",
-            },
+          : finding.domain === "schedule"
+            ? {
+                extraction_provider: response.provider,
+                extraction_model: response.model,
+                comparison_engine: "pmo_schedule_contract_v1",
+                thresholds: "pmo_schedule_variance_v1",
+              }
+            : {
+                extraction_provider: response.provider,
+                extraction_model: response.model,
+                comparison_engine: "deterministic_phase_4_v1",
+                thresholds: "phase_3_usable_mvp_defaults",
+              },
       })),
     )
     .select("id, domain, condition");
@@ -390,6 +413,11 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
         // WBS comparisons sit beside the single project-total Budget finding.
         wbs_budget_findings: wbs.findings,
         wbs_scope_candidates: wbs.scopeCandidates,
+        // Per-milestone schedule comparisons and reported progress sit beside
+        // the single Schedule finding; progress is preserved, never scored.
+        schedule_milestone_comparisons: schedule.comparisons,
+        schedule_milestone_labels: schedule.milestoneLabels,
+        progress_observations: schedule.progress,
       },
       updated_at: new Date().toISOString(),
     })
@@ -548,6 +576,74 @@ export async function removeWbsMapping(formData: FormData): Promise<void> {
 
   const { error } = await supabase
     .from("wbs_mappings")
+    .delete()
+    .eq("project_id", projectId)
+    .eq("id", mappingId);
+  if (error) throw new Error(error.message);
+
+  revalidateAssurance(projectId);
+}
+
+/**
+ * Accepts a reviewer-stated mapping that two differing milestone labels are the
+ * same milestone, reusable within the project. Only after acceptance does the
+ * schedule comparison group them; identical labels already match directly.
+ */
+export async function acceptMilestoneMapping(formData: FormData): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const sourceLabel = String(formData.get("sourceLabel") ?? "").trim();
+  const canonicalLabel = String(formData.get("canonicalLabel") ?? "").trim();
+  const note = String(formData.get("note") ?? "").trim();
+
+  if (!projectId || !sourceLabel || !canonicalLabel) {
+    throw new Error("Provide the source milestone label and the canonical label it maps to.");
+  }
+  if (sourceLabel === canonicalLabel) {
+    throw new Error("A label mapped to itself is not a mapping; identical labels already match.");
+  }
+
+  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  // One accepted canonical target per source label: replace any prior one.
+  const { error: clearError } = await supabase
+    .from("milestone_mappings")
+    .delete()
+    .eq("project_id", projectId)
+    .eq("source_label", sourceLabel)
+    .eq("state", "accepted");
+  if (clearError) throw new Error(clearError.message);
+
+  const { error: insertError } = await supabase.from("milestone_mappings").insert({
+    project_id: projectId,
+    source_label: sourceLabel,
+    canonical_label: canonicalLabel,
+    state: "accepted",
+    proposed_by_model: false,
+    note: note || null,
+    created_by: user.id,
+    accepted_by: user.id,
+    accepted_at: new Date().toISOString(),
+  });
+  if (insertError) throw new Error(insertError.message);
+
+  revalidateAssurance(projectId);
+}
+
+/**
+ * Removes a milestone mapping. The comparison stops grouping its labels together
+ * immediately; nothing about the underlying evidence changes.
+ */
+export async function removeMilestoneMapping(formData: FormData): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const mappingId = String(formData.get("mappingId") ?? "");
+  if (!projectId || !mappingId) throw new Error("Choose a mapping to remove.");
+
+  const { supabase, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  const { error } = await supabase
+    .from("milestone_mappings")
     .delete()
     .eq("project_id", projectId)
     .eq("id", mappingId);
@@ -815,6 +911,56 @@ async function buildWbsComparison(
   return { findings, scopeCandidates };
 }
 
+/**
+ * Per-milestone schedule comparisons, the single Schedule finding, and reported
+ * progress for this review. Milestones are grouped only through reviewer-accepted
+ * mappings; identical labels match directly. Progress values are preserved as
+ * reported — never aggregated into a project total and never turned into dates —
+ * and compared across periods only within a comparable scope. WBS progress scope
+ * is canonicalized through the existing accepted WBS mappings.
+ */
+async function buildScheduleComparison(
+  supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
+  projectId: string,
+  extraction: ReviewExtraction,
+) {
+  const [milestoneMappingResult, wbsMappingResult] = await Promise.all([
+    supabase
+      .from("milestone_mappings")
+      .select(milestoneMappingColumns)
+      .eq("project_id", projectId)
+      .eq("state", "accepted"),
+    supabase
+      .from("wbs_mappings")
+      .select(wbsMappingColumns)
+      .eq("project_id", projectId)
+      .eq("state", "accepted"),
+  ]);
+  if (milestoneMappingResult.error) throw new Error(milestoneMappingResult.error.message);
+  if (wbsMappingResult.error) throw new Error(wbsMappingResult.error.message);
+
+  const milestoneMappings = ((milestoneMappingResult.data ?? []) as MilestoneMappingRow[]).map(
+    mapMilestoneMappingRow,
+  );
+  const wbsMappings = ((wbsMappingResult.data ?? []) as WbsMappingRow[]).map(mapWbsMappingRow);
+
+  const comparisons = buildMilestoneComparisons({
+    baselineMilestones: extraction.schedule.baselineMilestones,
+    currentMilestones: extraction.schedule.currentMilestones,
+    mappings: milestoneMappings,
+  });
+  const finding = buildScheduleFinding(comparisons, extraction.schedule.confidence);
+  const progress = buildProgressComparison({
+    observations: extraction.progress.observations,
+    wbsMappings,
+  });
+  const milestoneLabels = milestoneSourceLabels({
+    baselineMilestones: extraction.schedule.baselineMilestones,
+    currentMilestones: extraction.schedule.currentMilestones,
+  });
+  return { finding, comparisons, progress, milestoneLabels };
+}
+
 // The reviewed month's last day: a baseline accepted later does not apply.
 function reportingPeriodEnd(reportingPeriod: string) {
   const start = new Date(`${reportingPeriod.slice(0, 10)}T00:00:00Z`);
@@ -825,29 +971,53 @@ function reportingPeriodEnd(reportingPeriod: string) {
 }
 
 function buildReviewPrompt(baseline: string, current: string) {
-  return `Extract comparable Schedule and Risk values from the two evidence groups.
+  return `Extract comparable Schedule, Progress, and Risk values from the two evidence groups.
 
 Rules:
-- Never calculate a condition, score, percentage, or health label. The application calculates those deterministically.
-- A baseline value must come from BASELINE EVIDENCE.
-- A current value must come from CURRENT EVIDENCE.
-- Use null when a value or date is not explicit.
+- Never calculate a condition, score, variance, delay, or health label. The application calculates those deterministically.
+- Never pair, match, or rename milestones across the two groups. List each milestone under the label its own evidence uses; the application matches milestones by label.
+- A baseline value must come from BASELINE EVIDENCE. A current value must come from CURRENT EVIDENCE.
+- Use null when a value or date is not explicit. Copy each date as YYYY-MM-DD only when the source states it; never infer a date from a percentage or a status.
+- Report each progress percentage exactly as stated, at the level it is stated (project or WBS). Never sum or average WBS percentages into a project figure.
 - has_current_evidence is true only when current evidence contains identifiable risk information.
 - Counts must represent explicit open risks. Do not treat an absent statement as zero unless the evidence explicitly indicates none.
-- Copy short source excerpts verbatim enough for a reviewer to locate the evidence.
+- Copy short source excerpts verbatim enough for a reviewer to locate the evidence. Record each source's own period or as-of date when it states one.
 
 Do not extract cost or budget values here; project cost evidence is collected separately.
 
 Return exactly:
 {
   "schedule": {
-    "milestones": [
+    "baseline_milestones": [
       {
-        "name": "Milestone name",
-        "baseline_date": "YYYY-MM-DD or null",
-        "current_forecast_date": "YYYY-MM-DD or null",
-        "baseline_excerpt": null,
-        "current_excerpt": null
+        "label": "Milestone name as baseline evidence states it",
+        "date": "YYYY-MM-DD or null",
+        "period_label": "source period or null",
+        "as_of_date": "YYYY-MM-DD or null",
+        "excerpt": "verbatim source text or null"
+      }
+    ],
+    "current_milestones": [
+      {
+        "label": "Milestone name as current evidence states it",
+        "date": "YYYY-MM-DD or null",
+        "period_label": "source period or null",
+        "as_of_date": "YYYY-MM-DD or null",
+        "excerpt": "verbatim source text or null"
+      }
+    ],
+    "confidence": 0.0
+  },
+  "progress": {
+    "observations": [
+      {
+        "role": "baseline or current",
+        "scope_level": "project or wbs",
+        "scope_label": "WBS label, or null for project",
+        "percent": 0,
+        "period_label": "source period or null",
+        "as_of_date": "YYYY-MM-DD or null",
+        "excerpt": "verbatim source text or null"
       }
     ],
     "confidence": 0.0

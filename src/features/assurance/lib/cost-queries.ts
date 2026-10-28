@@ -5,6 +5,7 @@ import type {
   CostScopeLevel,
   WbsMapping,
 } from "@/features/assurance/lib/cost-evidence";
+import type { MilestoneMapping } from "@/features/assurance/lib/schedule-comparison";
 
 export const costObservationColumns =
   "id, document_id, measure, source_value, normalized_amount, currency, scope_level, scope_label, wbs_code, wbs_parent_code, wbs_name, scope_description, period_label, as_of_date, status_label, evidence_chunk_index, excerpt, page_number, section_label, source_location, documents(title)";
@@ -13,6 +14,9 @@ export const costBaselineColumns =
   "id, scope_level, scope_label, amount, currency, effective_date, state, observation_id, source_document_id, approval_note, approved_at";
 
 export const wbsMappingColumns =
+  "id, source_label, canonical_label, state, proposed_by_model, note, accepted_by, accepted_at";
+
+export const milestoneMappingColumns =
   "id, source_label, canonical_label, state, proposed_by_model, note, accepted_by, accepted_at";
 
 export type CostObservationRow = {
@@ -92,6 +96,30 @@ export type WbsMappingRow = {
 };
 
 export function mapWbsMappingRow(row: WbsMappingRow): WbsMapping {
+  return {
+    id: row.id,
+    sourceLabel: row.source_label,
+    canonicalLabel: row.canonical_label,
+    state: row.state,
+    proposedByModel: row.proposed_by_model,
+    note: row.note,
+    acceptedBy: row.accepted_by,
+    acceptedAt: row.accepted_at,
+  };
+}
+
+export type MilestoneMappingRow = {
+  id: string;
+  source_label: string;
+  canonical_label: string;
+  state: MilestoneMapping["state"];
+  proposed_by_model: boolean;
+  note: string | null;
+  accepted_by: string | null;
+  accepted_at: string | null;
+};
+
+export function mapMilestoneMappingRow(row: MilestoneMappingRow): MilestoneMapping {
   return {
     id: row.id,
     sourceLabel: row.source_label,

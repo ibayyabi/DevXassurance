@@ -19,11 +19,13 @@ import {
 } from "@/features/assurance/actions/assurance-actions";
 import { CostBaselinePanel } from "@/features/assurance/components/cost-baseline-panel";
 import { WbsComparisonPanel } from "@/features/assurance/components/wbs-comparison-panel";
+import { ScheduleProgressPanel } from "@/features/assurance/components/schedule-progress-panel";
 import type {
   CostBaseline,
   CostObservation,
   WbsMapping,
 } from "@/features/assurance/lib/cost-evidence";
+import type { MilestoneMapping } from "@/features/assurance/lib/schedule-comparison";
 import { ProcessingRefresh } from "@/features/assurance/components/processing-refresh";
 import type {
   AssuranceDocument,
@@ -44,6 +46,7 @@ export function AssuranceWorkspace({
   costBaselines,
   wbsScopeLabels,
   wbsMappings,
+  milestoneMappings,
   canApproveBaseline,
 }: {
   projectId: string;
@@ -53,6 +56,7 @@ export function AssuranceWorkspace({
   costBaselines: CostBaseline[];
   wbsScopeLabels: string[];
   wbsMappings: WbsMapping[];
+  milestoneMappings: MilestoneMapping[];
   canApproveBaseline: boolean;
 }) {
   const activeProcessing = documents.some((document) =>
@@ -167,6 +171,13 @@ export function AssuranceWorkspace({
         review={review}
         wbsScopeLabels={wbsScopeLabels}
         wbsMappings={wbsMappings}
+        canApprove={canApproveBaseline}
+      />
+
+      <ScheduleProgressPanel
+        projectId={projectId}
+        review={review}
+        milestoneMappings={milestoneMappings}
         canApprove={canApproveBaseline}
       />
 

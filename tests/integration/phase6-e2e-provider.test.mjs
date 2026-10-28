@@ -29,14 +29,17 @@ test("fixture extraction output is schema-shaped and cites exact generated chunk
 test("fixture review extraction uses source lines and returns only a valid OpenAI-compatible envelope", () => {
   const baseline = "APPROVED PROJECT BASELINE\nApproved budget: USD 500000.\nMilestone: Operational readiness review is scheduled for 2026-04-18.\nThe approved risk review records no open critical or high risks.";
   const current = "MONTHLY PROGRESS REPORT\nThe forecast cost is USD 487000.\nThe operational readiness review is scheduled for 2026-04-18.\nThe current risk review records no open critical or high risks.";
-  const prompt = `Extract comparable Schedule and Risk values from the two evidence groups.\n\nBASELINE EVIDENCE:\n[baseline.txt]\n${baseline}\n\nCURRENT EVIDENCE:\n[current.txt]\n${current}`;
+  const prompt = `Extract comparable Schedule, Progress, and Risk values from the two evidence groups.\n\nBASELINE EVIDENCE:\n[baseline.txt]\n${baseline}\n\nCURRENT EVIDENCE:\n[current.txt]\n${current}`;
   const response = fixtureModelResponse({ messages: [{ role: "user", content: prompt }] }, "/v1/chat/completions");
   const output = JSON.parse(response.choices[0].message.content);
   // Cost values are not part of the review prompt; Budget uses persisted cost
-  // observations and a reviewer-accepted baseline.
+  // observations and a reviewer-accepted baseline. Baseline and current
+  // milestones stay in separate lists for the application to match by label.
   assert.equal(output.budget, undefined);
-  assert.equal(output.schedule.milestones[0].baseline_date, "2026-04-18");
-  assert.ok(baseline.includes(output.schedule.milestones[0].baseline_excerpt));
+  assert.equal(output.schedule.baseline_milestones[0].date, "2026-04-18");
+  assert.equal(output.schedule.current_milestones[0].date, "2026-04-18");
+  assert.ok(baseline.includes(output.schedule.baseline_milestones[0].excerpt));
+  assert.ok(Array.isArray(output.progress.observations));
   assert.equal(output.risk.open_critical_count, 0);
   assert.ok(baseline.includes(output.risk.baseline_excerpt));
   assert.ok(current.includes(output.risk.current_excerpt));

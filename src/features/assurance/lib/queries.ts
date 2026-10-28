@@ -4,13 +4,17 @@ import {
   costObservationColumns,
   mapCostBaselineRow,
   mapCostObservationRow,
+  mapMilestoneMappingRow,
   mapWbsMappingRow,
+  milestoneMappingColumns,
   wbsMappingColumns,
   type CostBaselineRow,
   type CostObservationRow,
+  type MilestoneMappingRow,
   type WbsMappingRow,
 } from "@/features/assurance/lib/cost-queries";
 import type { WbsMapping } from "@/features/assurance/lib/cost-evidence";
+import type { MilestoneMapping } from "@/features/assurance/lib/schedule-comparison";
 import type {
   ReviewCondition,
   ReviewDomain,
@@ -145,7 +149,7 @@ type ActionRow = {
 
 export async function getAssuranceWorkspace(projectId: string) {
   const { supabase, membership } = await requireProjectMembership(projectId);
-  const [costResult, baselineResult, wbsLabelResult, mappingResult] = await Promise.all([
+  const [costResult, baselineResult, wbsLabelResult, mappingResult, milestoneMappingResult] = await Promise.all([
     supabase
       .from("cost_observations")
       .select(costObservationColumns)
@@ -170,11 +174,17 @@ export async function getAssuranceWorkspace(projectId: string) {
       .select(wbsMappingColumns)
       .eq("project_id", projectId)
       .order("created_at", { ascending: false }),
+    supabase
+      .from("milestone_mappings")
+      .select(milestoneMappingColumns)
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false }),
   ]);
   if (costResult.error) throw new Error(costResult.error.message);
   if (baselineResult.error) throw new Error(baselineResult.error.message);
   if (wbsLabelResult.error) throw new Error(wbsLabelResult.error.message);
   if (mappingResult.error) throw new Error(mappingResult.error.message);
+  if (milestoneMappingResult.error) throw new Error(milestoneMappingResult.error.message);
 
   const costObservations = ((costResult.data ?? []) as CostObservationRow[]).map(
     mapCostObservationRow,
@@ -192,6 +202,9 @@ export async function getAssuranceWorkspace(projectId: string) {
   const wbsMappings: WbsMapping[] = ((mappingResult.data ?? []) as WbsMappingRow[]).map(
     mapWbsMappingRow,
   );
+  const milestoneMappings: MilestoneMapping[] = (
+    (milestoneMappingResult.data ?? []) as MilestoneMappingRow[]
+  ).map(mapMilestoneMappingRow);
   const [documentsResult, reviewsResult] = await Promise.all([
     supabase
       .from("documents")
@@ -254,6 +267,7 @@ export async function getAssuranceWorkspace(projectId: string) {
       costBaselines,
       wbsScopeLabels,
       wbsMappings,
+      milestoneMappings,
     };
   }
 
@@ -342,5 +356,6 @@ export async function getAssuranceWorkspace(projectId: string) {
     costBaselines,
     wbsScopeLabels,
     wbsMappings,
+    milestoneMappings,
   };
 }

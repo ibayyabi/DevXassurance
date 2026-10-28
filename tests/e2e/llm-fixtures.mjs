@@ -8,7 +8,7 @@ export function fixtureModelResponse(requestBody, requestPath) {
   let result;
   if (prompt.startsWith("Extract grounded project assurance intelligence")) {
     result = extractionFixture(prompt);
-  } else if (prompt.startsWith("Extract comparable Schedule and Risk values")) {
+  } else if (prompt.startsWith("Extract comparable Schedule, Progress, and Risk values")) {
     result = reviewFixture(prompt);
   } else if (prompt.includes("current_verified_sources")) {
     result = advisorFixture(prompt);
@@ -92,17 +92,42 @@ function reviewFixture(prompt) {
   if (!baselineRisk || !currentRisk) throw new Error("Fixture review requires explicit synthetic risk evidence.");
   const extractDate = (line) => line?.match(/20\d{2}-\d{2}-\d{2}/u)?.[0] ?? null;
   const milestoneName = "Operational readiness review";
-  // Cost evidence is not extracted here; Budget uses persisted cost
-  // observations and a reviewer-accepted baseline.
+  // Baseline and current milestones stay in separate lists; the application
+  // matches them by label. Cost evidence is not extracted here; Budget uses
+  // persisted cost observations and a reviewer-accepted baseline.
+  const baselinePercent = baseline.match(/(\d{1,3})%\s*(?:complete|completion)/iu);
+  const currentPercent = current.match(/(\d{1,3})%\s*(?:complete|completion)/iu);
   return {
     schedule: {
-      milestones: baselineMilestone && currentMilestone ? [{
-        name: milestoneName,
-        baseline_date: extractDate(baselineMilestone?.[0]),
-        current_forecast_date: extractDate(currentMilestone?.[0]),
-        baseline_excerpt: baselineMilestone[0].trim(),
-        current_excerpt: currentMilestone[0].trim(),
-      }] : [],
+      baseline_milestones: baselineMilestone
+        ? [{
+            label: milestoneName,
+            date: extractDate(baselineMilestone[0]),
+            period_label: null,
+            as_of_date: null,
+            excerpt: baselineMilestone[0].trim(),
+          }]
+        : [],
+      current_milestones: currentMilestone
+        ? [{
+            label: milestoneName,
+            date: extractDate(currentMilestone[0]),
+            period_label: null,
+            as_of_date: null,
+            excerpt: currentMilestone[0].trim(),
+          }]
+        : [],
+      confidence: 0.9,
+    },
+    progress: {
+      observations: [
+        ...(baselinePercent
+          ? [{ role: "baseline", scope_level: "project", scope_label: null, percent: Number(baselinePercent[1]), period_label: null, as_of_date: null, excerpt: baselinePercent[0].trim() }]
+          : []),
+        ...(currentPercent
+          ? [{ role: "current", scope_level: "project", scope_label: null, percent: Number(currentPercent[1]), period_label: null, as_of_date: null, excerpt: currentPercent[0].trim() }]
+          : []),
+      ],
       confidence: 0.9,
     },
     risk: {
