@@ -8,9 +8,9 @@ import {
   Trash2,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 
-import { AutomaticAssessment } from "@/features/assurance/components/automatic-assessment";
 import {
   deleteDocument,
   retryDocumentProcessing,
@@ -44,6 +44,13 @@ const roleLabels = {
   supporting: "Supporting Evidence",
 } as const;
 
+const SourceNavigation = createContext<(documentId: string) => void>(() => {});
+
+function SourceReference({ documentId, title }: { documentId: string; title: string }) {
+  const navigate = useContext(SourceNavigation);
+  return <button type="button" onClick={() => navigate(documentId)} className="break-words text-left font-medium text-brand underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">{title}</button>;
+}
+
 export function DocumentIntelligence({
   projectId,
   documents,
@@ -57,6 +64,33 @@ export function DocumentIntelligence({
   summaries: DocumentSummary[];
   uploadSubmissions: UploadSubmission[];
 }) {
+  const [step, setStep] = useState("prepare");
+  const focusStep = useRef(false);
+  const [sourceRequest, setSourceRequest] = useState<{ documentId: string } | null>(null);
+  const [sourceMessage, setSourceMessage] = useState("");
+
+  function navigateStep(next: string) {
+    focusStep.current = true;
+    setStep(next);
+    if (step === next) document.getElementById(`evidence-${next}`)?.focus();
+  }
+
+  useEffect(() => {
+    if (!focusStep.current) return;
+    focusStep.current = false;
+    document.getElementById(`evidence-${step}`)?.focus({ preventScroll: true });
+  }, [step]);
+
+  function navigateSource(documentId: string) {
+    if (!documents.some((document) => document.id === documentId)) {
+      setSourceMessage("This source document is not available in the loaded collection.");
+      return;
+    }
+    setSourceMessage("");
+    setStep("check");
+    setSourceRequest({ documentId });
+  }
+
   const router = useRouter();
   const hasActiveProcessing =
     documents.some((document) => ["uploaded", "queued", "processing"].includes(document.processingStatus)) ||
@@ -69,11 +103,20 @@ export function DocumentIntelligence({
   }, [hasActiveProcessing, router]);
 
   return (
+    <SourceNavigation.Provider value={navigateSource}>
     <div className="space-y-5">
-      <AutomaticAssessment projectId={projectId} documents={documents} />
-
-      <div className="grid gap-5 xl:grid-cols-[minmax(300px,0.72fr)_minmax(0,1.28fr)]">
-        <div className="space-y-5">
+      <div className="grid gap-5 md:grid-cols-[200px_minmax(0,1fr)]">
+        <nav aria-label="Evidence steps" className="flex flex-col gap-2">
+          {[
+            ["prepare", "1. Siapkan evidence", true],
+            ["check", "2. Baca & periksa", documents.length > 0],
+            ["review", "3. Tinjau hasil", true],
+          ].map(([key, label, hasContent]) => (
+            <Button key={String(key)} type="button" variant={step === key ? "default" : "outline"} className={`justify-start ${step !== key && !hasContent ? "text-ink-muted" : ""}`} aria-current={step === key ? "step" : undefined} aria-controls={`evidence-${key}`} onClick={() => navigateStep(String(key))}>{label}</Button>
+          ))}
+        </nav>
+        <div className="min-w-0 space-y-5">
+          <div id="evidence-prepare" hidden={step !== "prepare"} tabIndex={-1} className="space-y-5 scroll-mt-24 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
           <UploadDocumentForm
             projectId={projectId}
             retryCandidates={[
@@ -93,15 +136,16 @@ export function DocumentIntelligence({
                 })),
             ]}
           />
-          <UploadBatchStatus projectId={projectId} documents={documents} submissions={uploadSubmissions} />
-        </div>
-        <DocumentLibrary
-          projectId={projectId}
-          documents={documents}
-          summaries={summaries}
-        />
-      </div>
-
+          <details>
+            <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Upload batches and file status</summary>
+            <UploadBatchStatus projectId={projectId} documents={documents} submissions={uploadSubmissions} />
+          </details>
+          <Button type="button" variant="outline" onClick={() => navigateStep("check")}>Baca &amp; periksa</Button>
+          </div>
+          <div id="evidence-check" hidden={step !== "check"} tabIndex={-1} className="space-y-5 scroll-mt-24 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+            <h2 className="text-lg font-semibold text-ink">Baca &amp; periksa</h2>
+            <p className="text-sm text-ink-muted">Inspect document status, metadata, reading limitations, and supporting sources before continuing to Assurance Review.</p>
+            <DocumentLibrary projectId={projectId} documents={documents} summaries={summaries} sourceRequest={sourceRequest} />
       <details className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
         <summary className="cursor-pointer font-semibold text-ink">
           Review extracted details
@@ -115,7 +159,23 @@ export function DocumentIntelligence({
           <ExtractedInformationPanel projectId={projectId} facts={facts} />
         </div>
       </details>
+          </div>
+      <section id="evidence-review" hidden={step !== "review"} tabIndex={-1} className="scroll-mt-24 rounded-2xl border border-ui-border bg-surface p-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+        <h2 className="text-lg font-semibold text-ink">Review results</h2>
+        <p className="mt-2 text-sm text-ink-muted">Assessment results are not available on this screen. Open Assurance Review to inspect the review or select evidence and run the existing assessment workflow.</p>
+        <Button asChild className="mt-3">
+          <Link prefetch={false} href={`/app/projects/${projectId}/assurance`}>Open Assurance Review</Link>
+        </Button>
+        <div className="mt-3 flex flex-wrap gap-4 text-sm text-brand underline">
+          <Link prefetch={false} href={`/app/projects/${projectId}/dashboard`}>Open Overview</Link>
+          <Link prefetch={false} href={`/app/projects/${projectId}/reports`}>Open Reports</Link>
+        </div>
+      </section>
+        </div>
+      </div>
+      <p role="status" className="text-sm text-ink-muted">{sourceMessage}</p>
     </div>
+    </SourceNavigation.Provider>
   );
 }
 
@@ -320,22 +380,49 @@ function DocumentLibrary({
   projectId,
   documents,
   summaries,
+  sourceRequest,
 }: {
   projectId: string;
   documents: EvidenceDocument[];
   summaries: DocumentSummary[];
+  sourceRequest: { documentId: string } | null;
 }) {
   const [filters, setFilters] = useState({ type: "all", period: "all", workstream: "all", status: "all" });
+  const [search, setSearch] = useState("");
+  const focusedRequest = useRef<typeof sourceRequest>(null);
+  function clearFilters() {
+    setFilters({ type: "all", period: "all", workstream: "all", status: "all" });
+    setSearch("");
+  }
+  useEffect(() => {
+    if (sourceRequest) {
+      setFilters({ type: "all", period: "all", workstream: "all", status: "all" });
+      setSearch("");
+    }
+  }, [sourceRequest]);
+  useEffect(() => {
+    if (!sourceRequest || focusedRequest.current === sourceRequest || search || Object.values(filters).some((value) => value !== "all")) return;
+    const target = document.getElementById(`document-${sourceRequest.documentId}`);
+    if (!target) return;
+    const group = target.closest("details[data-document-group]");
+    if (group instanceof HTMLDetailsElement) group.open = true;
+    target.querySelectorAll<HTMLDetailsElement>("details[data-document-details]").forEach((details) => { details.open = true; });
+    focusedRequest.current = sourceRequest;
+    target.focus({ preventScroll: true });
+    target.scrollIntoView({ block: "center" });
+  }, [sourceRequest, filters, search]);
   const filteredDocuments = documents.filter((document) =>
+    document.fileName.toLowerCase().includes(search.trim().toLowerCase()) &&
     (filters.type === "all" || document.effectiveDocumentType === filters.type) &&
     (filters.period === "all" || document.effectiveReportingPeriod === filters.period) &&
     (filters.workstream === "all" || document.effectiveWorkstream === filters.workstream) &&
     (filters.status === "all" || document.processingStatus === filters.status),
   );
-  const groups = groupDocuments(filteredDocuments);
+  const groups = groupDocuments(documents);
+  const visibleIds = new Set(filteredDocuments.map((document) => document.id));
 
   return (
-    <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
+    <section id="evidence-library" tabIndex={-1} className="scroll-mt-24 rounded-2xl border border-ui-border bg-surface p-5 shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
       <div className="flex items-end justify-between gap-3 border-b border-ui-border pb-4">
         <div>
         <h2 className="text-xl font-semibold text-ink">Project documents</h2>
@@ -343,10 +430,24 @@ function DocumentLibrary({
           Project archive. Review roles are separate from artifact type.
         </p>
       </div>
-      <p className="text-sm text-ink-muted">
+      <p className="text-sm text-ink-muted" role="status" aria-live="polite">
         {filteredDocuments.length} of {documents.length} file{documents.length === 1 ? "" : "s"}
       </p>
       </div>
+      <div className="mt-4 flex flex-wrap items-end gap-2">
+        <label className="grid min-w-0 flex-1 gap-1 text-sm text-ink">Search filenames
+          <Input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a loaded document" />
+        </label>
+        <Button type="button" variant="outline" onClick={() => setFilters({ ...filters, status: "failed" })} aria-pressed={filters.status === "failed"}>Failed</Button>
+        <Button type="button" variant="outline" onClick={() => setFilters({ ...filters, status: "needs_review" })} aria-pressed={filters.status === "needs_review"}>Needs review</Button>
+        <Button type="button" variant="outline" onClick={clearFilters}>Clear filters</Button>
+        <Button type="button" variant="outline" onClick={() => {
+          clearFilters();
+          document.querySelectorAll<HTMLDetailsElement>("#evidence-library details[data-document-group]").forEach((group) => { group.open = true; });
+        }}>All documents</Button>
+      </div>
+      <details className="mt-4">
+        <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Additional filters</summary>
       <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <label className="grid gap-1 text-xs font-medium text-ink-muted">
           Artifact type
@@ -377,6 +478,8 @@ function DocumentLibrary({
           </select>
         </label>
       </div>
+      </details>
+      {documents.length > 0 && filteredDocuments.length === 0 && <p className="mt-4 text-sm text-ink-muted" role="status">No documents match these filters.</p>}
       <div className="mt-4 grid gap-5">
         {documents.length === 0 ? (
           <div className="rounded-xl border border-dashed border-ui-border bg-base p-6">
@@ -386,29 +489,28 @@ function DocumentLibrary({
               Upload evidence files to build the project archive. Assign review roles only when the review context is known.
             </p>
           </div>
-        ) : groups.length === 0 ? (
-          <p className="py-4 text-sm text-ink-muted">No documents match these filters.</p>
         ) : (
 
           groups.map((group) => (
-            <section key={group.key}>
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <h3 className="text-sm font-semibold text-ink">{group.label}</h3>
+            <details key={group.key} data-document-group={group.key} open hidden={!group.documents.some((document) => visibleIds.has(document.id))}>
+              <summary className="mb-2 cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+                <span className="text-sm font-semibold text-ink">{group.label}</span>
                 <span className="text-xs text-ink-muted">
-                  {group.documents.length} file{group.documents.length === 1 ? "" : "s"}
+                  {group.documents.filter((document) => visibleIds.has(document.id)).length} matching files
                 </span>
-              </div>
+              </summary>
               <div className="grid gap-3">
                 {group.documents.map((document) => (
                   <DocumentRow
                     key={document.id}
                     projectId={projectId}
                     document={document}
+                    hidden={!visibleIds.has(document.id)}
                     summary={summaries.find((item) => item.selectedDocumentIds.includes(document.id))}
                   />
                 ))}
               </div>
-            </section>
+            </details>
           ))
         )}
       </div>
@@ -420,13 +522,15 @@ function DocumentRow({
   projectId,
   document,
   summary,
+  hidden,
 }: {
   projectId: string;
   document: EvidenceDocument;
+  hidden: boolean;
   summary?: DocumentSummary;
 }) {
   return (
-    <article id={`document-${document.id}`} className="rounded-xl border border-ui-border bg-surface p-4 transition-colors hover:border-ui-border">
+    <article hidden={hidden} tabIndex={-1} id={`document-${document.id}`} className="rounded-xl border border-ui-border bg-surface p-4 transition-colors hover:border-ui-border">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex min-w-0 gap-3">
           <span className={`rounded-xl p-2.5 ${document.processingStatus === "completed" ? "bg-status-ok-bg text-status-ok-text" : document.processingStatus === "failed" ? "bg-status-critical-bg text-status-critical-text" : "bg-status-warn-bg text-status-warn-text"}`}>
@@ -438,8 +542,9 @@ function DocumentRow({
           </span>
           <div className="min-w-0">
             <h3 className="break-words font-semibold text-ink">
-              {document.title}
+              {document.fileName}
             </h3>
+            {document.title !== document.fileName && <p className="mt-1 text-sm text-ink-muted">{document.title}</p>}
             <p className="mt-1 text-xs leading-5 text-ink-muted">
               {fileKindLabel(document.mimeType, document.fileName)} · {formatBytes(document.fileSize)} · {document.effectiveDocumentDate ? `Document date ${formatDate(document.effectiveDocumentDate)}` : "No document date"} · Uploaded ${formatDate(document.createdAt)}
             </p>
@@ -481,7 +586,7 @@ function DocumentRow({
           source={metadataSource(document.confirmedDocumentType, document.suggestedDocumentType, document.documentTypeHint)}
         />
         <MetadataBadge
-          label="Role"
+          label="Evidence role"
           value={document.effectiveEvidenceRole ? roleLabels[document.effectiveEvidenceRole] : "Unassigned"}
           source={metadataSource(document.confirmedEvidenceRole, document.suggestedEvidenceRole, null)}
         />
@@ -536,6 +641,9 @@ function DocumentRow({
         </form>
       )}
 
+      {summary?.qualityWarning && <p className="mt-3 rounded-lg bg-status-warn-bg p-3 text-sm text-status-warn-text">Reading limitation: {summary.qualityWarning}</p>}
+      <details data-document-details className="mt-3 text-sm">
+        <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Review details: summary, rationale, and metadata</summary>
       {document.classificationReason && (
         <p className="mt-3 text-sm leading-6 text-ink-muted">
           <span className="font-medium text-ink">Suggestion basis:</span>{" "}
@@ -549,7 +657,7 @@ function DocumentRow({
       )}
 
 
-      {summary?.summaryText && (
+      {summary && (summary.summaryText || summary.sources.length > 0) && (
         <div className="mt-3 rounded-lg bg-base px-3 py-3">
           <p className="text-xs font-semibold uppercase tracking-[0.12em] text-ink-muted">
             Document summary
@@ -563,7 +671,7 @@ function DocumentRow({
               <ul className="mt-2 grid gap-2">
                 {summary.sources.map((source) => (
                   <li key={source.id} className="rounded-md bg-surface p-2">
-                    <p className="font-medium text-ink">{source.documentTitle}</p>
+                    <p className="font-medium text-ink"><SourceReference documentId={source.documentId} title={source.documentTitle} /></p>
                     {source.location && <p className="mt-1 text-sm font-medium text-ink-muted">{source.location}</p>}
                     {source.excerpt && <p className="mt-1 break-words leading-6 text-ink-muted">{source.excerpt}</p>}
                   </li>
@@ -588,7 +696,7 @@ function DocumentRow({
             </select>
           </label>
           <label className="grid gap-1 text-xs font-medium text-ink-muted">
-            Review role
+            Evidence role (not user access)
             <select name="evidenceRole" defaultValue={document.confirmedEvidenceRole ?? document.suggestedEvidenceRole ?? ""} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
               <option value="">Not assigned</option>
               <option value="baseline">Approved Baseline</option>
@@ -610,6 +718,7 @@ function DocumentRow({
           </label>
           <Button type="submit" size="sm" className="sm:col-span-2">Save review metadata</Button>
         </form>
+      </details>
       </details>
     </article>
   );
@@ -640,11 +749,16 @@ function ExtractedInformationPanel({
                     <p className="break-words text-sm leading-6 text-ink">
                       {fact.editedValue ?? fact.extractedText}
                     </p>
-                    {fact.evidenceLinks[0] && (
-                      <p className="mt-2 break-words text-sm leading-6 text-ink-muted">
-                        Source: {fact.evidenceLinks[0].documentTitle}
-                      </p>
-                    )}
+                    <p className="mt-1 text-sm text-ink-muted">{fact.confirmationState === "user_confirmed" ? "Reviewer confirmed" : fact.confirmationState === "user_edited" ? "Reviewer edited" : "AI-extracted suggestion"}</p>
+                    <p className="mt-1 break-words text-sm text-ink-muted">Original extraction: {fact.originalValue}</p>
+                    <ul className="mt-2 space-y-2 text-sm text-ink-muted" aria-label="Fact sources">
+                      {fact.evidenceLinks.map((source) => (
+                        <li key={source.id}>
+                          <SourceReference documentId={source.documentId} title={source.documentTitle} />
+                          {source.excerpt && <p className="break-words leading-6">{source.excerpt}</p>}
+                        </li>
+                      ))}
+                    </ul>
                     <form action={updateExtractedFact} className="mt-3 flex gap-2">
                       <input type="hidden" name="projectId" value={projectId} />
                       <input type="hidden" name="factId" value={fact.id} />
