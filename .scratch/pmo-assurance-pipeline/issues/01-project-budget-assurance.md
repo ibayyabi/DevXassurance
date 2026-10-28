@@ -131,6 +131,20 @@
 - `npm test` on this machine's Node 22.15 needs `--experimental-strip-types`
   because the suite imports TypeScript directly. The README now states Node
   22.18 or newer.
+
+- The `cost_observations` uniqueness key omits `scope_label`, so two WBS rows
+  differing only by work package can overwrite each other on upsert. Carried
+  to ticket 02 with the fix, since project scope cannot reach it.
+- `approveCostBaseline` supersedes the active baseline and inserts the new one
+  as two statements, not one transaction. A failed insert leaves the scope with
+  no accepted baseline, which shows as More Evidence Required rather than a
+  wrong number, so it fails safe. A transactional database function would close
+  it.
+- `correctBudgetFinding` reads `baseline_value.baseline_id`, which
+  `evaluateProjectBudget` never writes, so the fallback to the finding id is
+  always what applies. Harmless, since the id is not used in the computation.
+- `cost_observations.provider` and `.model` are never written by the worker
+  route and are not selected by any query.
 - WBS-scope cost observations are captured but not compared; that is ticket 02.
   Corrections apply to the Budget domain's assessed EAC and currency only.
 - Budget is still saved as part of `runAssuranceAnalysis`, so a failed
