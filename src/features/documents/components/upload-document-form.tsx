@@ -224,10 +224,18 @@ export function UploadDocumentForm({
       <div className="flex items-start gap-3">
         <div className="shrink-0 rounded-xl bg-plan-track p-2.5 text-ink-muted"><UploadCloud className="h-5 w-5" aria-hidden="true" /></div>
         <div className="min-w-0">
-          <h2 className="text-lg font-semibold text-ink">Upload everything you have</h2>
-          <p className="mt-1 text-sm leading-6 text-ink-muted">Upload a batch without classifying files, or add optional metadata for one document. Each file uploads independently.</p>
+          <h2 className="text-lg font-semibold text-ink">Prepare project evidence</h2>
+          <p className="mt-1 text-sm leading-6 text-ink-muted">Upload approved plans and current-period evidence in bulk without classifying each file first. One document can support multiple domains. Optional metadata is available for one document.</p>
         </div>
       </div>
+      <details className="mt-4 rounded-lg border border-ui-border bg-base p-3 text-sm text-ink-muted">
+        <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">What evidence should I prepare?</summary>
+        <div className="mt-2 space-y-2 leading-6">
+          <p>Approved plans describe the agreed baseline, such as the approved budget or schedule. Current evidence describes progress for the reporting period, such as a cost report, progress report, or risk register.</p>
+          <p>Use the reporting period covered by the evidence, which may differ from its upload date. Review suggested metadata in the Evidence Library after reading finishes.</p>
+          <p>Upload acceptance does not mean reading or assessment is complete. Confirm metadata, then select completed Approved Baseline and Current Period evidence in Assurance Review and run the assessment there.</p>
+        </div>
+      </details>
       <div className="mt-4 grid gap-3">
         <fieldset className="grid gap-2">
           <legend className="text-sm font-semibold text-ink">Upload mode</legend>
@@ -238,8 +246,8 @@ export function UploadDocumentForm({
         </fieldset>
         <div className="grid gap-2">
           <label htmlFor="file" className="text-sm font-semibold text-ink">{mode === "single" ? "Document file" : "Project files"}</label>
-          <Input id="file" name="file" type="file" accept={evidenceFileAccept} multiple={mode === "bulk"} required className="h-12 bg-surface file:mr-3 file:rounded-md file:border file:border-ui-border file:bg-plan-track file:px-3 file:py-1.5 file:text-ink hover:file:bg-base" />
-          <p className="text-xs leading-5 text-ink-muted">PDF, TXT, CSV, DOCX, XLSX, PPTX, and common images are analyzed automatically. ZIP archives are expanded into individual evidence files; unsafe or unsupported members are listed. Other accepted files remain stored for review. Maximum {maxFileSizeLabel} per file.</p>
+          <Input id="file" name="file" type="file" aria-describedby="evidence-file-guidance" accept={evidenceFileAccept} multiple={mode === "bulk"} required className="h-12 bg-surface file:mr-3 file:rounded-md file:border file:border-ui-border file:bg-plan-track file:px-3 file:py-1.5 file:text-ink hover:file:bg-base" />
+          <p id="evidence-file-guidance" className="text-sm leading-6 text-ink-muted">PDF, TXT, CSV, DOCX, XLSX, PPTX, and supported images can be processed for reading and extraction. Accepted PPT files are stored for review. ZIP archives are expanded into individual evidence files; unsafe or unsupported members are listed. Scanned pages and images depend on available OCR and may need review; extraction is not guaranteed. Maximum {maxFileSizeLabel} per file.</p>
         </div>
         {mode === "single" && (
           <div className="grid gap-3 sm:grid-cols-2">

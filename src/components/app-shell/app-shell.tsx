@@ -80,13 +80,15 @@ export function AppShell({
                   key={item.href}
                   href={href}
                   title={collapsed ? item.label : undefined}
+                  aria-label={item.label}
+                  aria-current={active ? "page" : undefined}
                   className={cn(
                     "relative flex h-11 items-center gap-3 rounded-md border-l-[3px] border-transparent px-3 text-sm font-medium text-sidebar-muted outline-none transition hover:bg-sidebar-hover hover:text-sidebar-text focus-visible:ring-2 focus-visible:ring-sidebar-text",
                     active && "border-l-brand-foreground bg-brand text-brand-foreground hover:bg-brand hover:text-brand-foreground",
                     collapsed && "justify-center",
                   )}
                 >
-                  <Icon className="h-5 w-5 shrink-0" />
+                  <Icon className="h-5 w-5 shrink-0" aria-hidden="true" />
                   {!collapsed && <span>{item.label}</span>}
                 </Link>
               );
@@ -95,6 +97,7 @@ export function AppShell({
 
           <Link
             href="/app/projects"
+            aria-label="Switch project"
             className={cn(
               "mt-auto flex items-center gap-3 rounded-md border border-sidebar-muted/30 px-3 py-3 text-sm text-sidebar-muted outline-none hover:border-sidebar-muted/60 hover:text-sidebar-text focus-visible:ring-2 focus-visible:ring-sidebar-text",
               collapsed && "justify-center",
@@ -140,12 +143,13 @@ export function AppShell({
                   <Link
                     key={item.href}
                     href={href}
+                    aria-current={active ? "page" : undefined}
                     className={cn(
                       "flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-ink-muted",
                       active && "bg-brand text-brand-foreground",
                     )}
                   >
-                    <Icon className="h-4 w-4" />
+                    <Icon className="h-4 w-4" aria-hidden="true" />
                     {item.label}
                   </Link>
                 );

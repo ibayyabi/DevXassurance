@@ -49,11 +49,12 @@ export function UsableOverview({
               Start with evidence
             </p>
             <h2 className="mt-3 max-w-2xl text-4xl font-semibold tracking-tight text-ink md:text-5xl">
-              Upload the project files. AI handles the rest.
+              Prepare evidence, then review and assess.
             </h2>
             <p className="mt-4 max-w-2xl text-base leading-7 text-ink-muted">
-              X-Assurance will organize the files and compare the approved plan
-              with current Budget, Schedule, and Risk evidence for {projectName}.
+              Upload evidence for {projectName}, review suggested metadata, then
+              select approved baseline and current-period evidence in Assurance
+              Review to run the Budget, Schedule, and Risk assessment.
             </p>
             <Button asChild className="mt-7">
               <Link href={`/app/projects/${projectId}/documents`}>
@@ -65,11 +66,11 @@ export function UsableOverview({
             <div className="max-w-xs">
               <FileSearch className="h-10 w-10 text-ink-muted" />
               <p className="mt-5 text-xl font-semibold text-ink">
-                One automatic flow
+                From evidence to assessment
               </p>
               <p className="mt-2 text-sm leading-6 text-ink-muted">
-                Upload files, wait for analysis, read the project condition,
-                then produce a report.
+                Upload files, review the extracted information, select evidence
+                and run an assessment in Assurance Review, then prepare a report.
               </p>
             </div>
           </div>
@@ -119,7 +120,7 @@ export function UsableOverview({
           <div className="p-6 md:p-8">
             <div className="flex flex-wrap items-center gap-3">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-ink-muted">
-                Latest automatic assessment
+                Latest assessment
               </p>
               <ConditionBadge condition={overall.condition} />
             </div>
@@ -190,8 +191,8 @@ export function UsableOverview({
             icon={ClipboardCheck}
             label="Evidence coverage"
             value={`${review.documents.length} files`}
-            detail="Automatically selected for this assessment"
-            badgeLabel="Automatic"
+            detail="Selected evidence included in this assessment"
+            badgeLabel="Included"
           />
         </div>
       </section>

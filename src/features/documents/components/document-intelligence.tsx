@@ -108,7 +108,8 @@ export function DocumentIntelligence({
         </summary>
         <p className="mt-2 max-w-3xl text-sm leading-6 text-ink-muted">
           These source-linked facts are available when a reviewer needs to
-          inspect or correct the extraction. Most users can rely on the Overview.
+          inspect or correct the extraction. Review metadata, then select evidence
+          and run an assessment in Assurance Review before reviewing results.
         </p>
         <div className="mt-5">
           <ExtractedInformationPanel projectId={projectId} facts={facts} />
@@ -135,7 +136,7 @@ function UploadBatchStatus({ projectId, documents, submissions }: {
             <li key={batchId} className="rounded-xl border border-ui-border bg-base p-3">
               <p className="text-sm font-semibold text-ink">Batch {batchId.slice(0, 8)}</p>
               <p className="mt-1 text-xs text-ink-muted">
-                {batchDocuments.length} file(s) · {batchState === "partial_failure" ? "Partial success; failed items can be retried" : batchState === "processing" ? "Processing" : "Results saved"}
+                {batchDocuments.length} file(s) · {batchState === "partial_failure" ? "Partial success; failed items can be retried" : batchState === "processing" ? "Processing" : "File processing results available"}
               </p>
               {batchDocuments.length > 0 && (
                 <ul className="mt-2 space-y-1 text-xs text-ink-muted">
@@ -496,7 +497,7 @@ function DocumentRow({
         {["uploaded", "queued", "processing"].includes(document.processingStatus) && (
           <span className="inline-flex items-center gap-1.5 text-xs font-medium text-status-warn-text">
             <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-            Analyzing
+            Reading pending or in progress
           </span>
         )}
       </div>
@@ -530,7 +531,7 @@ function DocumentRow({
           <input type="hidden" name="documentId" value={document.id} />
           <Button type="submit" size="sm" variant="outline" className="border-status-critical bg-surface text-status-critical-text hover:bg-status-critical-bg">
             <RefreshCw className="h-4 w-4" />
-            Retry analysis
+            Retry document processing
           </Button>
         </form>
       )}
@@ -557,14 +558,14 @@ function DocumentRow({
             {summary.summaryText}
           </p>
           {summary.sources.length > 0 && (
-            <details className="mt-2 text-xs">
-              <summary className="cursor-pointer font-medium text-ink">Source details ({summary.sources.length})</summary>
+            <details className="mt-2 text-sm">
+              <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Source details ({summary.sources.length})</summary>
               <ul className="mt-2 grid gap-2">
                 {summary.sources.map((source) => (
                   <li key={source.id} className="rounded-md bg-surface p-2">
                     <p className="font-medium text-ink">{source.documentTitle}</p>
-                    {source.location && <p className="mt-1 text-xs font-medium text-ink-muted">{source.location}</p>}
-                    {source.excerpt && <p className="mt-1 leading-5 text-ink-muted">{source.excerpt}</p>}
+                    {source.location && <p className="mt-1 text-sm font-medium text-ink-muted">{source.location}</p>}
+                    {source.excerpt && <p className="mt-1 break-words leading-6 text-ink-muted">{source.excerpt}</p>}
                   </li>
                 ))}
               </ul>
@@ -640,7 +641,7 @@ function ExtractedInformationPanel({
                       {fact.editedValue ?? fact.extractedText}
                     </p>
                     {fact.evidenceLinks[0] && (
-                      <p className="mt-2 text-xs leading-5 text-ink-muted">
+                      <p className="mt-2 break-words text-sm leading-6 text-ink-muted">
                         Source: {fact.evidenceLinks[0].documentTitle}
                       </p>
                     )}
@@ -649,6 +650,7 @@ function ExtractedInformationPanel({
                       <input type="hidden" name="factId" value={fact.id} />
                       <Input
                         name="editedValue"
+                        aria-label={`Correct extracted ${factTypeLabels[type]} value`}
                         placeholder="Correct extracted value"
                         defaultValue={fact.editedValue ?? ""}
                         className="h-9"
