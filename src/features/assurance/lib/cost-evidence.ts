@@ -28,6 +28,10 @@ export type CostObservation = {
   currency: string | null;
   scopeLevel: CostScopeLevel;
   scopeLabel: string | null;
+  wbsCode: string | null;
+  wbsParentCode: string | null;
+  wbsName: string | null;
+  scopeDescription: string | null;
   periodLabel: string | null;
   asOfDate: string | null;
   statusLabel: string | null;
@@ -50,6 +54,22 @@ export type CostBaseline = {
   sourceDocumentId: string | null;
   approvalNote: string | null;
   approvedAt: string;
+};
+
+/**
+ * A reviewer-accepted statement that a source WBS label is the same work
+ * package as a canonical label, scoped to the project. Only `accepted` mappings
+ * are applied by the comparison; the model never merges work packages itself.
+ */
+export type WbsMapping = {
+  id: string;
+  sourceLabel: string;
+  canonicalLabel: string;
+  state: "proposed" | "accepted" | "rejected";
+  proposedByModel: boolean;
+  note: string | null;
+  acceptedBy: string | null;
+  acceptedAt: string | null;
 };
 
 export type CostGapReason =

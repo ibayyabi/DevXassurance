@@ -94,6 +94,13 @@ export type ExtractedCostObservation = {
   currency: string | null;
   scope_level: "project" | "wbs";
   scope_label: string | null;
+  // Work-package identity as stated by the source. Null for project scope and
+  // for any field the source does not state. A canonical code is never captured
+  // here; it is assigned only by a reviewer-accepted mapping.
+  wbs_code: string | null;
+  wbs_parent_code: string | null;
+  wbs_name: string | null;
+  scope_description: string | null;
   period_label: string | null;
   as_of_date: string | null;
   status_label: string | null;
@@ -250,7 +257,7 @@ type GroupAttemptResult = {
 type GroupAttemptError = Error & { attempts: number; errorCode: string };
 class TransientProviderError extends Error {}
 
-const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/12";
+const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/13";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -1083,7 +1090,7 @@ Required JSON schema:
   "health_snapshots": [{"dimension":"overall|schedule|cost|risk|governance|audit_readiness","score":null,"status":"green|amber|red|insufficient_evidence","evidence_coverage":0.0,"status_text":"...","source_summary":"...","snapshot_date":null,"source_id":null}],
   "alerts": [{"severity":"low|medium|high|critical","impacted_area":"...","explanation":"...","evidence_count":1,"recommended_action":"...","source_id":"..."}],
   "actions": [{"title":"...","owner_name":null,"priority":"low|medium|high","status":"open","source_id":"..."}],
-  "cost_observations": [{"measure":"approved_baseline|actual_to_date|committed|eac","source_value":"exact source text of the amount","scope_level":"project|wbs","scope_label":null,"period_label":null,"as_of_date":null,"status_label":null,"source_id":"..."}],
+  "cost_observations": [{"measure":"approved_baseline|actual_to_date|committed|eac","source_value":"exact source text of the amount","scope_level":"project|wbs","scope_label":null,"wbs_code":null,"wbs_parent_code":null,"wbs_name":null,"scope_description":null,"period_label":null,"as_of_date":null,"status_label":null,"source_id":"..."}],
   "group_metadata_suggestions": {"suggested_document_date":null,"detected_reporting_period":null,"suggested_workstream":null,"source_id":null},
   "sheet_interpretation": {"interpretation_status":"resolved|ambiguous|unknown","structure_type":"table|key_value|timeline_gantt|narrative|instructions_template|mixed|unknown","sheet_name":"...","source_ids":["..."],"header_candidates":[{"label":"exact source header text","source_ids":["..."]}],"column_roles":[{"column":"A","role":"...","source_ids":["..."]}],"candidate_observations":[{"raw_value":"exact source value","normalized_value":null,"value_type":null,"unit":null,"period":null,"source_ids":["..."]}],"warnings":["..."]}
 }
@@ -1092,7 +1099,7 @@ For health snapshots, return exactly one entry for every listed dimension. Use e
 Other statuses require a matching source_id and a score within green 80-100, amber 50-79, or red 0-49.
 Health status_text and source_summary fields must each be nonempty strings no longer than 500 characters.
 Group metadata suggestions are limited to document date, reporting period, and workstream. Every non-null suggestion requires a valid source_id.
-For cost observations, source_value must be text present in the cited source and scope_level "wbs" requires the work-package code or name in scope_label. Report as_of_date as YYYY-MM-DD and leave period_label as the source's own wording. Omit the array when these sources state no cost value.
+For cost observations, source_value must be text present in the cited source and scope_level "wbs" requires the work-package code or name in scope_label. For a WBS value, also capture the work package's stated identity from the source: wbs_code (its own code), wbs_parent_code (its parent's code), wbs_name (its name), and scope_description (its stated deliverable or scope). Leave any of these null when the source does not state it, and never invent a code or a canonical identity. For a project-total value leave all four null. Report as_of_date as YYYY-MM-DD and leave period_label as the source's own wording. Omit the array when these sources state no cost value.
 Report document dates as YYYY-MM-DD and reporting periods as their first day YYYY-MM-01.
 sheet_interpretation is candidate-only and may appear only for parser-flagged ambiguous XLSX groups. Never invent cells, sheets, headers, cached values, dates, owners, or formula results. Cite each header, column role, and observation with source_ids from this group. The worker resolves those IDs to parser-authored sheet/cell/range locators; never provide locators yourself. Each header label and observation raw_value must be exact text present in its cited source. Normalized values remain candidates and must not replace raw evidence. If the group is not flagged ambiguous, omit the field.${correction}`;
 }
@@ -1539,6 +1546,10 @@ function validateGroupExtraction(
         const scopeLevel = stringField(observation.scope_level);
         const sourceValue = boundedString(observation.source_value, `${path}.source_value`, rowErrors, 500);
         const scopeLabel = nullableBoundedString(observation.scope_label, `${path}.scope_label`, rowErrors, 500);
+        const wbsCode = nullableBoundedString(observation.wbs_code ?? null, `${path}.wbs_code`, rowErrors, 200);
+        const wbsParentCode = nullableBoundedString(observation.wbs_parent_code ?? null, `${path}.wbs_parent_code`, rowErrors, 200);
+        const wbsName = nullableBoundedString(observation.wbs_name ?? null, `${path}.wbs_name`, rowErrors, 500);
+        const scopeDescription = nullableBoundedString(observation.scope_description ?? null, `${path}.scope_description`, rowErrors, 2000);
         const periodLabel = nullableBoundedString(observation.period_label, `${path}.period_label`, rowErrors, 200);
         const statusLabel = nullableBoundedString(observation.status_label, `${path}.status_label`, rowErrors, 200);
         const asOfDate = nullableIsoDate(observation.as_of_date ?? null, `${path}.as_of_date`, rowErrors);
@@ -1568,9 +1579,14 @@ function validateGroupExtraction(
           normalized_amount: normalizeCostAmount(sourceValue!),
           currency: normalizeCostCurrency(sourceValue!),
           scope_level: scopeLevel as ExtractedCostObservation["scope_level"],
-          // A project total has one scope, so a label there carries no
-          // comparison meaning and is dropped to keep selection unambiguous.
+          // A project total has one scope, so a label and any work-package
+          // identity there carry no comparison meaning and are dropped to keep
+          // selection unambiguous.
           scope_label: scopeLevel === "project" ? null : scopeLabel!,
+          wbs_code: scopeLevel === "project" ? null : wbsCode,
+          wbs_parent_code: scopeLevel === "project" ? null : wbsParentCode,
+          wbs_name: scopeLevel === "project" ? null : wbsName,
+          scope_description: scopeLevel === "project" ? null : scopeDescription,
           period_label: periodLabel!,
           as_of_date: asOfDate ?? null,
           status_label: statusLabel!,

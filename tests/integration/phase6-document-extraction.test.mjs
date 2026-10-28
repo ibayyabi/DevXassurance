@@ -1001,6 +1001,47 @@ test("an unknown cost measure or scope is excluded with a review warning", async
   );
 });
 
+test("a WBS cost value captures the work-package identity, and a project total drops it", async () => {
+  const outcome = await extractCostObservations([
+    {
+      measure: "eac",
+      source_value: "USD 1,312,500",
+      scope_level: "wbs",
+      scope_label: "1.2 Build",
+      wbs_code: "1.2",
+      wbs_parent_code: "1",
+      wbs_name: "Build phase",
+      scope_description: "Construction of the core platform",
+    },
+    // A project total carries no work-package identity even if one is stated.
+    {
+      measure: "approved_baseline",
+      source_value: "USD 1,250,000",
+      wbs_code: "1",
+      wbs_name: "Whole project",
+      scope_description: "Everything",
+    },
+  ]);
+
+  assert.equal(outcome.ok, true, `${outcome.errorCode}: ${outcome.errorMessage}`);
+  const observations = outcome.extraction.cost_observations;
+
+  const wbs = observations.find((observation) => observation.scope_level === "wbs");
+  assert.ok(wbs, "expected a WBS observation");
+  assert.deepEqual(
+    [wbs.wbs_code, wbs.wbs_parent_code, wbs.wbs_name, wbs.scope_description],
+    ["1.2", "1", "Build phase", "Construction of the core platform"],
+  );
+  assert.equal(wbs.scope_label, "1.2 Build");
+
+  const project = observations.find((observation) => observation.scope_level === "project");
+  assert.ok(project, "expected a project observation");
+  assert.deepEqual(
+    [project.wbs_code, project.wbs_parent_code, project.wbs_name, project.scope_description],
+    [null, null, null, null],
+  );
+});
+
 test("a provider quota defers the remaining groups for retry instead of reporting absent evidence", async () => {
   const store = memoryGroupStore();
   const source = sourceDocument("QUOTA");

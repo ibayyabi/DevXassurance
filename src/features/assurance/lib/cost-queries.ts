@@ -3,13 +3,17 @@ import type {
   CostMeasure,
   CostObservation,
   CostScopeLevel,
+  WbsMapping,
 } from "@/features/assurance/lib/cost-evidence";
 
 export const costObservationColumns =
-  "id, document_id, measure, source_value, normalized_amount, currency, scope_level, scope_label, period_label, as_of_date, status_label, evidence_chunk_index, excerpt, page_number, section_label, source_location, documents(title)";
+  "id, document_id, measure, source_value, normalized_amount, currency, scope_level, scope_label, wbs_code, wbs_parent_code, wbs_name, scope_description, period_label, as_of_date, status_label, evidence_chunk_index, excerpt, page_number, section_label, source_location, documents(title)";
 
 export const costBaselineColumns =
   "id, scope_level, scope_label, amount, currency, effective_date, state, observation_id, source_document_id, approval_note, approved_at";
+
+export const wbsMappingColumns =
+  "id, source_label, canonical_label, state, proposed_by_model, note, accepted_by, accepted_at";
 
 export type CostObservationRow = {
   id: string;
@@ -20,6 +24,10 @@ export type CostObservationRow = {
   currency: string | null;
   scope_level: CostScopeLevel;
   scope_label: string | null;
+  wbs_code: string | null;
+  wbs_parent_code: string | null;
+  wbs_name: string | null;
+  scope_description: string | null;
   period_label: string | null;
   as_of_date: string | null;
   status_label: string | null;
@@ -57,6 +65,10 @@ export function mapCostObservationRow(row: CostObservationRow): CostObservation 
     currency: row.currency,
     scopeLevel: row.scope_level,
     scopeLabel: row.scope_label,
+    wbsCode: row.wbs_code,
+    wbsParentCode: row.wbs_parent_code,
+    wbsName: row.wbs_name,
+    scopeDescription: row.scope_description,
     periodLabel: row.period_label,
     asOfDate: row.as_of_date,
     statusLabel: row.status_label,
@@ -65,6 +77,30 @@ export function mapCostObservationRow(row: CostObservationRow): CostObservation 
     pageNumber: row.page_number,
     sectionLabel: row.section_label,
     sourceLocation: scalarRecord(row.source_location),
+  };
+}
+
+export type WbsMappingRow = {
+  id: string;
+  source_label: string;
+  canonical_label: string;
+  state: WbsMapping["state"];
+  proposed_by_model: boolean;
+  note: string | null;
+  accepted_by: string | null;
+  accepted_at: string | null;
+};
+
+export function mapWbsMappingRow(row: WbsMappingRow): WbsMapping {
+  return {
+    id: row.id,
+    sourceLabel: row.source_label,
+    canonicalLabel: row.canonical_label,
+    state: row.state,
+    proposedByModel: row.proposed_by_model,
+    note: row.note,
+    acceptedBy: row.accepted_by,
+    acceptedAt: row.accepted_at,
   };
 }
 

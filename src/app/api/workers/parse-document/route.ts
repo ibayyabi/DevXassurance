@@ -346,6 +346,10 @@ async function persistCostObservations(
       currency: observation.currency,
       scope_level: observation.scope_level,
       scope_label: observation.scope_label,
+      wbs_code: observation.wbs_code,
+      wbs_parent_code: observation.wbs_parent_code,
+      wbs_name: observation.wbs_name,
+      scope_description: observation.scope_description,
       period_label: observation.period_label,
       as_of_date: observation.as_of_date,
       status_label: observation.status_label,
@@ -360,12 +364,15 @@ async function persistCostObservations(
     };
   });
 
+  // This document's prior observations were just deleted, and aggregateGroups
+  // already deduped on the full scope-aware identity (measure, scope_level,
+  // scope_label, source_value, chunk), which is exactly the database's
+  // cost_observations_scope_identity_idx key. So no row in this batch collides,
+  // and a plain insert keeps every work package's evidence. An upsert cannot be
+  // used here anyway: that index is over coalesce(scope_label, ''), and
+  // PostgREST's onConflict can only name columns, not an expression.
   return await retryDocumentWrite(async () =>
-    await supabase
-      .from("cost_observations")
-      .upsert(rows, {
-        onConflict: "document_id,measure,scope_level,evidence_chunk_index,source_value",
-      }),
+    await supabase.from("cost_observations").insert(rows),
   );
 }
 
