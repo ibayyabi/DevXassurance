@@ -8,6 +8,7 @@ import { documentSuggestionUpdateFields } from "../../../../../worker/src/servic
 import type {
   DocumentExtractionGroupCacheRow,
   DocumentExtractionGroupStore,
+  ExtractedCostObservation,
 } from "../../../../../worker/src/services/document-extraction";
 
 type WorkerRequest = {
@@ -32,6 +33,7 @@ type StoredDocument = {
 const CACHE_QUERY_BATCH_SIZE = 100;
 const JOB_LEASE_MS = 15 * 60 * 1000;
 const TRANSIENT_JOB_ERRORS: Record<string, true> = {
+  cost_observation_persistence_failed: true,
   document_lookup_failed: true,
   extraction_group_cache_unavailable: true,
   extraction_group_checkpoint_failed: true,
@@ -203,6 +205,26 @@ export async function POST(request: NextRequest) {
         ? retryableResponse(supabase, failure)
         : terminalFailureResponse(supabase, failure, 502);
     }
+    const costWrite = await persistCostObservations(
+      supabase,
+      projectId,
+      documentId,
+      result.cost_observations,
+      result.chunks,
+    );
+    if (costWrite?.error) {
+      const failure = {
+        jobId,
+        projectId,
+        documentId,
+        errorCode: "cost_observation_persistence_failed",
+        errorMessage: "Validated cost evidence could not be persisted.",
+      };
+      return costWrite.transient
+        ? retryableResponse(supabase, failure)
+        : terminalFailureResponse(supabase, failure, 502);
+    }
+
     const suggestionWrite = await retryDocumentWrite(async () =>
       await supabase
         .from("documents")
@@ -252,6 +274,7 @@ export async function POST(request: NextRequest) {
       health_snapshots: result.health_snapshots,
       alerts: result.alerts,
       actions: result.actions,
+      cost_observations: result.cost_observations,
       document_suggestions: result.document_suggestions,
       anomalies: result.anomalies,
       parser_metadata: result.parserMetadata,
@@ -281,6 +304,69 @@ export async function POST(request: NextRequest) {
       outcome: workerOutcome,
     });
 }
+}
+
+/**
+ * Replaces this document's cost evidence with the validated observations from
+ * this run. Each row keeps the source wording and resolves its exact location
+ * from the chunk it cited.
+ */
+async function persistCostObservations(
+  supabase: SupabaseClient,
+  projectId: string,
+  documentId: string,
+  observations: ExtractedCostObservation[],
+  chunks: {
+    chunk_index: number;
+    page_number: number | null;
+    section_label: string | null;
+    parser_metadata: Record<string, unknown>;
+  }[],
+) {
+  const deleteWrite = await retryDocumentWrite(async () =>
+    await supabase
+      .from("cost_observations")
+      .delete()
+      .eq("project_id", projectId)
+      .eq("document_id", documentId),
+  );
+  if (deleteWrite.error) return deleteWrite;
+  if (!observations.length) return null;
+
+  const chunksByIndex = new Map(chunks.map((chunk) => [chunk.chunk_index, chunk]));
+  const rows = observations.map((observation) => {
+    const chunk = chunksByIndex.get(observation.evidence_chunk_index);
+    const sourceLocation = chunk?.parser_metadata?.sourceLocation;
+    return {
+      project_id: projectId,
+      document_id: documentId,
+      measure: observation.measure,
+      source_value: observation.source_value,
+      normalized_amount: observation.normalized_amount,
+      currency: observation.currency,
+      scope_level: observation.scope_level,
+      scope_label: observation.scope_label,
+      period_label: observation.period_label,
+      as_of_date: observation.as_of_date,
+      status_label: observation.status_label,
+      evidence_chunk_index: observation.evidence_chunk_index,
+      excerpt: observation.excerpt,
+      page_number: chunk?.page_number ?? null,
+      section_label: chunk?.section_label ?? null,
+      source_location:
+        sourceLocation && typeof sourceLocation === "object" && !Array.isArray(sourceLocation)
+          ? sourceLocation
+          : null,
+    };
+  });
+
+  return await retryDocumentWrite(async () =>
+    await supabase
+      .from("cost_observations")
+      .upsert(rows, {
+        onConflict: "document_id,measure,scope_level,evidence_chunk_index,source_value",
+      }),
+  );
 }
 
 function createExtractionGroupStore(

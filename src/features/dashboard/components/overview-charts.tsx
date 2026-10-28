@@ -72,7 +72,7 @@ export function BudgetTrendChart({
   return (
     <ChartCard
       title="Budget forecast against plan"
-      description="Approved budget and current forecast from each assessment period."
+      description="Accepted baseline and reported estimate at completion from each assessment period."
       badge={<ConditionLabel condition={condition} />}
     >
       {chartPoints.length === 0 ? (
@@ -81,7 +81,7 @@ export function BudgetTrendChart({
         <div
           className="h-72 min-h-0 min-w-0 w-full"
           role="img"
-          aria-label="Budget plan and current forecast by assessment period"
+          aria-label="Accepted baseline and reported estimate at completion by assessment period"
         >
           <ResponsiveContainer
             width="100%"
@@ -123,13 +123,13 @@ export function BudgetTrendChart({
                 contentStyle={tooltipStyle}
                 formatter={(value, name) => [
                   formatMoney(Number(value), currency),
-                  name === "budgetPlan" ? "Approved plan" : "Current forecast",
+                  name === "budgetPlan" ? "Accepted baseline" : "Reported EAC",
                 ]}
                 labelFormatter={(label) => String(label)}
               />
               <Legend
                 formatter={(value) =>
-                  value === "budgetPlan" ? "Approved plan" : "Current forecast"
+                  value === "budgetPlan" ? "Accepted baseline" : "Reported EAC"
                 }
                 iconType="line"
                 wrapperStyle={{ color: "var(--text-muted)", fontSize: "0.75rem" }}

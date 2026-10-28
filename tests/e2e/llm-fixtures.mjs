@@ -8,7 +8,7 @@ export function fixtureModelResponse(requestBody, requestPath) {
   let result;
   if (prompt.startsWith("Extract grounded project assurance intelligence")) {
     result = extractionFixture(prompt);
-  } else if (prompt.startsWith("Extract comparable Budget, Schedule, and Risk values")) {
+  } else if (prompt.startsWith("Extract comparable Schedule and Risk values")) {
     result = reviewFixture(prompt);
   } else if (prompt.includes("current_verified_sources")) {
     result = advisorFixture(prompt);
@@ -85,8 +85,6 @@ function documentType(text) {
 function reviewFixture(prompt) {
   const baseline = between(prompt, "BASELINE EVIDENCE:\n", "\n\nCURRENT EVIDENCE:");
   const current = prompt.slice(prompt.indexOf("\n\nCURRENT EVIDENCE:") + "\n\nCURRENT EVIDENCE:\n".length);
-  const baselineBudget = baseline.match(/^.*(?:Approved budget|baseline budget)\s*:?\s*(?:USD\s*)?([\d,]+).*$/imu);
-  const currentBudget = current.match(/^.*(?:forecast cost|current forecast)(?:\s+is|\s*:)?\s*(?:USD\s*)?([\d,]+).*$/imu);
   const baselineMilestone = baseline.match(/^.*(?:milestone|readiness review).*20\d{2}-\d{2}-\d{2}.*$/imu);
   const currentMilestone = current.match(/^.*(?:milestone|readiness review).*20\d{2}-\d{2}-\d{2}.*$/imu);
   const baselineRisk = baseline.match(/^.*no open critical or high risks.*$/imu);
@@ -94,16 +92,9 @@ function reviewFixture(prompt) {
   if (!baselineRisk || !currentRisk) throw new Error("Fixture review requires explicit synthetic risk evidence.");
   const extractDate = (line) => line?.match(/20\d{2}-\d{2}-\d{2}/u)?.[0] ?? null;
   const milestoneName = "Operational readiness review";
+  // Cost evidence is not extracted here; Budget uses persisted cost
+  // observations and a reviewer-accepted baseline.
   return {
-    budget: {
-      baseline_amount: baselineBudget ? Number(baselineBudget[1].replaceAll(",", "")) : null,
-      current_forecast: currentBudget ? Number(currentBudget[1].replaceAll(",", "")) : null,
-      current_actual: null,
-      currency: baselineBudget || currentBudget ? "USD" : null,
-      baseline_excerpt: baselineBudget?.[0].trim() ?? null,
-      current_excerpt: currentBudget?.[0].trim() ?? null,
-      confidence: 0.9,
-    },
     schedule: {
       milestones: baselineMilestone && currentMilestone ? [{
         name: milestoneName,

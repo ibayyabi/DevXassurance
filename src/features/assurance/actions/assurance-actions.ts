@@ -7,9 +7,22 @@ import {
   parseReviewExtraction,
   type EvaluatedFinding,
 } from "@/features/assurance/lib/analysis";
+import {
+  evaluateProjectBudget,
+  selectAcceptedCostBaseline,
+  selectReportedEac,
+} from "@/features/assurance/lib/cost-evidence";
+import {
+  costBaselineColumns,
+  costObservationColumns,
+  mapCostBaselineRow,
+  mapCostObservationRow,
+  type CostBaselineRow,
+  type CostObservationRow,
+} from "@/features/assurance/lib/cost-queries";
 import { reviewEvidenceIssue } from "@/features/assurance/lib/evidence-readiness";
 import { requireProjectMembership } from "@/features/projects/lib/queries";
-import { canManageProject } from "@/features/projects/lib/roles";
+import { canApproveAssuranceBaseline, canManageProject } from "@/features/projects/lib/roles";
 import { parseJsonObject, runOllamaChat } from "@/lib/ai/ollama";
 import { reviewEvidenceFits } from "@/features/assurance/lib/review-prompt";
 import { verifySourceExcerpt, type VerifiedSource } from "@/features/assurance/lib/source-evidence";
@@ -138,6 +151,16 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
   const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanManage(membership.role);
 
+  const { data: review, error: reviewLookupError } = await supabase
+    .from("assurance_reviews")
+    .select("reporting_period")
+    .eq("id", reviewId)
+    .eq("project_id", projectId)
+    .maybeSingle();
+  if (reviewLookupError) throw new Error(reviewLookupError.message);
+  if (!review) throw new Error("Assurance review is required.");
+  const reportingPeriod = reportingPeriodEnd(review.reporting_period);
+
   const { data: links, error: linksError } = await supabase
     .from("assurance_review_documents")
     .select("document_id, evidence_role, documents!inner(title, document_date, processing_status)")
@@ -240,8 +263,6 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
   const baselineSet = new Set(baselineIds);
   const currentSet = new Set(currentIds);
   const excerptRequests: { role: "baseline" | "current"; excerpt: string | null; required: boolean }[] = [
-    { role: "baseline", excerpt: extraction.budget.baselineExcerpt, required: extraction.budget.baselineAmount !== null },
-    { role: "current", excerpt: extraction.budget.currentExcerpt, required: extraction.budget.currentForecast !== null || extraction.budget.currentActual !== null },
     { role: "baseline", excerpt: extraction.risk.baselineExcerpt, required: false },
     { role: "current", excerpt: extraction.risk.currentExcerpt, required: extraction.risk.hasCurrentEvidence },
     ...extraction.schedule.milestones.flatMap((milestone) => [
@@ -266,7 +287,13 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
     return;
   }
 
-  const findings = evaluateAssuranceReview(extraction).map((finding) => ({
+  const budgetFinding = await buildProjectBudgetFinding(
+    supabase,
+    projectId,
+    currentIds,
+    reportingPeriod,
+  );
+  const findings = evaluateAssuranceReview(extraction, budgetFinding).map((finding) => ({
     ...finding,
     sourceExcerpts: finding.sourceExcerpts.map((source) => ({
       ...source,
@@ -304,12 +331,18 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
         current_document_ids: currentIds,
         source_excerpts: finding.sourceExcerpts,
         confidence: finding.confidence,
-        provenance: {
-          extraction_provider: response.provider,
-          extraction_model: response.model,
-          comparison_engine: "deterministic_phase_4_v1",
-          thresholds: "phase_3_usable_mvp_defaults",
-        },
+        provenance: finding.domain === "budget"
+          ? {
+              evidence_source: "cost_observations_and_accepted_baseline",
+              comparison_engine: "pmo_cost_contract_v1",
+              thresholds: "pmo_budget_variance_v1",
+            }
+          : {
+              extraction_provider: response.provider,
+              extraction_model: response.model,
+              comparison_engine: "deterministic_phase_4_v1",
+              thresholds: "phase_3_usable_mvp_defaults",
+            },
       })),
     )
     .select("id, domain, condition");
@@ -371,6 +404,176 @@ export async function confirmAssuranceFinding(formData: FormData): Promise<void>
   revalidateAssurance(projectId);
 }
 
+/**
+ * Activates a source-backed cost observation as the comparison baseline for a
+ * scope and effective date. The document's own "approved" wording never
+ * reaches this point by itself; a reviewer does.
+ */
+export async function approveCostBaseline(formData: FormData): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const observationId = String(formData.get("observationId") ?? "");
+  const effectiveDate = String(formData.get("effectiveDate") ?? "").trim();
+  const note = String(formData.get("approvalNote") ?? "").trim();
+
+  if (!projectId || !observationId) throw new Error("Choose a baseline candidate to accept.");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate)) {
+    throw new Error("Enter the baseline effective date as YYYY-MM-DD.");
+  }
+
+  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  const { data: observation, error: observationError } = await supabase
+    .from("cost_observations")
+    .select(
+      "id, document_id, measure, source_value, normalized_amount, currency, scope_level, scope_label",
+    )
+    .eq("id", observationId)
+    .eq("project_id", projectId)
+    .maybeSingle();
+  if (observationError) throw new Error(observationError.message);
+  if (!observation) throw new Error("That baseline candidate is not in this project.");
+  if (observation.measure !== "approved_baseline") {
+    throw new Error("Only an approved-baseline cost observation can be accepted as a baseline.");
+  }
+  if (observation.normalized_amount === null || !observation.currency) {
+    throw new Error(
+      "That candidate's amount or currency could not be read safely from the source. It stays a source value and cannot be accepted.",
+    );
+  }
+
+  const activeScope = supabase
+    .from("cost_baselines")
+    .update({ state: "superseded", superseded_at: new Date().toISOString() })
+    .eq("project_id", projectId)
+    .eq("scope_level", observation.scope_level)
+    .eq("state", "accepted");
+  const { error: supersedeError } = await (observation.scope_label === null
+    ? activeScope.is("scope_label", null)
+    : activeScope.eq("scope_label", observation.scope_label));
+  if (supersedeError) throw new Error(supersedeError.message);
+
+  const { error: insertError } = await supabase.from("cost_baselines").insert({
+    project_id: projectId,
+    scope_level: observation.scope_level,
+    scope_label: observation.scope_label,
+    amount: observation.normalized_amount,
+    currency: observation.currency,
+    effective_date: effectiveDate,
+    observation_id: observation.id,
+    source_document_id: observation.document_id,
+    approved_by: user.id,
+    approval_note: note || null,
+  });
+  if (insertError) throw new Error(insertError.message);
+
+  revalidateAssurance(projectId);
+}
+
+/**
+ * Records a reviewer correction to the value used in assessment. The original
+ * extraction, its source wording, and its location stay untouched; the
+ * correction carries its own attribution and reason.
+ */
+export async function correctBudgetFinding(formData: FormData): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const reviewId = String(formData.get("reviewId") ?? "");
+  const findingId = String(formData.get("findingId") ?? "");
+  const reason = String(formData.get("correctionReason") ?? "").trim();
+  const correctedEac = String(formData.get("correctedEacAmount") ?? "").trim();
+  const correctedCurrency = String(formData.get("correctedCurrency") ?? "").trim().toUpperCase();
+
+  if (!projectId || !reviewId || !findingId) throw new Error("Assurance finding is required.");
+  if (!reason) throw new Error("Record why the assessed value is corrected.");
+  if (correctedCurrency && !/^[A-Z]{3}$/.test(correctedCurrency)) {
+    throw new Error("Enter the corrected currency as a three-letter code.");
+  }
+
+  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  const { data: finding, error: findingError } = await supabase
+    .from("assurance_findings")
+    .select("id, domain, condition, severity, headline, explanation, baseline_value, current_value")
+    .eq("id", findingId)
+    .eq("review_id", reviewId)
+    .eq("project_id", projectId)
+    .maybeSingle();
+  if (findingError) throw new Error(findingError.message);
+  if (!finding) throw new Error("That finding is not part of this review.");
+  if (finding.domain !== "budget") {
+    throw new Error("Only the Budget finding supports a corrected cost value here.");
+  }
+
+  const baselineValue = finding.baseline_value as Record<string, unknown> | null;
+  const currentValue = finding.current_value as Record<string, unknown> | null;
+  const baselineAmount = Number(baselineValue?.amount);
+  const baselineCurrency = String(baselineValue?.currency ?? "");
+  if (!Number.isFinite(baselineAmount) || !/^[A-Z]{3}$/.test(baselineCurrency)) {
+    throw new Error(
+      "Accept a cost baseline before correcting the assessed value; a correction cannot create a baseline.",
+    );
+  }
+
+  const originalEac = Number(currentValue?.amount);
+  const amount = correctedEac ? Number(correctedEac.replace(/[,\s]/g, "")) : originalEac;
+  if (!Number.isFinite(amount)) {
+    throw new Error("Enter the corrected estimate at completion as a number.");
+  }
+  const currency = correctedCurrency || String(currentValue?.currency ?? baselineCurrency);
+
+  const corrected = evaluateProjectBudget({
+    baseline: {
+      id: String(baselineValue?.baseline_id ?? finding.id),
+      scopeLevel: "project",
+      scopeLabel: null,
+      amount: baselineAmount,
+      currency: baselineCurrency,
+      effectiveDate: String(baselineValue?.effective_date ?? ""),
+      state: "accepted",
+      observationId: null,
+      sourceDocumentId: null,
+      approvalNote: null,
+      approvedAt: String(baselineValue?.accepted_at ?? ""),
+    },
+    baselineObservation: null,
+    eac: { state: "reported", amount, currency, observations: [] },
+    separateMeasures: [],
+  });
+
+  const { error: updateError } = await supabase
+    .from("assurance_findings")
+    .update({
+      condition: corrected.condition,
+      severity: corrected.severity,
+      headline: corrected.headline,
+      explanation: corrected.explanation,
+      confirmation_state: "user_edited",
+      correction: {
+        corrected_measure: "eac",
+        corrected_amount: amount,
+        corrected_currency: currency,
+        variance: corrected.variance,
+        superseded_assessment: {
+          condition: finding.condition,
+          severity: finding.severity,
+          headline: finding.headline,
+          explanation: finding.explanation,
+        },
+      },
+      correction_reason: reason.slice(0, 1000),
+      corrected_by: user.id,
+      corrected_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", findingId)
+    .eq("review_id", reviewId)
+    .eq("project_id", projectId);
+  if (updateError) throw new Error(updateError.message);
+
+  revalidateAssurance(projectId);
+}
+
 export async function updateAssuranceAction(formData: FormData): Promise<void> {
   const projectId = String(formData.get("projectId") ?? "");
   const reviewId = String(formData.get("reviewId") ?? "");
@@ -402,8 +605,75 @@ export async function updateAssuranceAction(formData: FormData): Promise<void> {
 
 
 
+/**
+ * The project-total Budget finding for this review: the accepted baseline
+ * active for the period, compared only with an explicitly reported EAC from
+ * the selected current evidence.
+ */
+async function buildProjectBudgetFinding(
+  supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
+  projectId: string,
+  currentDocumentIds: string[],
+  asOf: string,
+) {
+  const [baselineResult, observationResult] = await Promise.all([
+    supabase
+      .from("cost_baselines")
+      .select(costBaselineColumns)
+      .eq("project_id", projectId)
+      .eq("state", "accepted"),
+    currentDocumentIds.length
+      ? supabase
+          .from("cost_observations")
+          .select(costObservationColumns)
+          .eq("project_id", projectId)
+          .in("document_id", currentDocumentIds)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+  if (baselineResult.error) throw new Error(baselineResult.error.message);
+  if (observationResult.error) throw new Error(observationResult.error.message);
+
+  const baselines = ((baselineResult.data ?? []) as CostBaselineRow[]).map(mapCostBaselineRow);
+  const observations = ((observationResult.data ?? []) as CostObservationRow[]).map(
+    mapCostObservationRow,
+  );
+  const baseline = selectAcceptedCostBaseline(baselines, { scopeLevel: "project", asOf });
+
+  let baselineObservation = null;
+  if (baseline?.observationId) {
+    const { data, error } = await supabase
+      .from("cost_observations")
+      .select(costObservationColumns)
+      .eq("project_id", projectId)
+      .eq("id", baseline.observationId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    baselineObservation = data ? mapCostObservationRow(data as CostObservationRow) : null;
+  }
+
+  return evaluateProjectBudget({
+    baseline,
+    baselineObservation,
+    eac: selectReportedEac(observations, { scopeLevel: "project" }),
+    separateMeasures: observations.filter(
+      (observation) =>
+        observation.scopeLevel === "project" &&
+        (observation.measure === "actual_to_date" || observation.measure === "committed"),
+    ),
+  });
+}
+
+// The reviewed month's last day: a baseline accepted later does not apply.
+function reportingPeriodEnd(reportingPeriod: string) {
+  const start = new Date(`${reportingPeriod.slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(start.getTime())) return reportingPeriod.slice(0, 10);
+  return new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0))
+    .toISOString()
+    .slice(0, 10);
+}
+
 function buildReviewPrompt(baseline: string, current: string) {
-  return `Extract comparable Budget, Schedule, and Risk values from the two evidence groups.
+  return `Extract comparable Schedule and Risk values from the two evidence groups.
 
 Rules:
 - Never calculate a condition, score, percentage, or health label. The application calculates those deterministically.
@@ -414,17 +684,10 @@ Rules:
 - Counts must represent explicit open risks. Do not treat an absent statement as zero unless the evidence explicitly indicates none.
 - Copy short source excerpts verbatim enough for a reviewer to locate the evidence.
 
+Do not extract cost or budget values here; project cost evidence is collected separately.
+
 Return exactly:
 {
-  "budget": {
-    "baseline_amount": null,
-    "current_forecast": null,
-    "current_actual": null,
-    "currency": null,
-    "baseline_excerpt": null,
-    "current_excerpt": null,
-    "confidence": 0.0
-  },
   "schedule": {
     "milestones": [
       {
@@ -486,7 +749,7 @@ function buildActionRows(
 ) {
   const titles = {
     budget:
-      "Confirm the cost forecast, explain the variance, and agree a budget recovery decision.",
+      "Confirm the reported estimate at completion, explain the variance against the accepted baseline, and agree a budget decision.",
     schedule:
       "Confirm the delayed milestone owner and approve a dated schedule recovery plan.",
     risk:
@@ -534,6 +797,12 @@ function uniqueStrings(values: FormDataEntryValue[]) {
 function assertCanManage(role: Parameters<typeof canManageProject>[0]) {
   if (!canManageProject(role)) {
     throw new Error("Your project role cannot manage an assurance review.");
+  }
+}
+
+function assertCanApproveBaseline(role: Parameters<typeof canApproveAssuranceBaseline>[0]) {
+  if (!canApproveAssuranceBaseline(role)) {
+    throw new Error("Your project role cannot accept a baseline or correct an assessed value.");
   }
 }
 

@@ -21,3 +21,12 @@ export const roleLabels: Record<ProjectRole, string> = {
 export function canManageProject(role: ProjectRole) {
   return role === "admin" || role === "pmc_consultant" || role === "project_manager";
 }
+
+/**
+ * The authorized reviewer roles for accepting a domain baseline or correcting
+ * an assessed value. It matches the `can_upload_project_evidence` policy that
+ * guards the same rows in the database.
+ */
+export function canApproveAssuranceBaseline(role: ProjectRole) {
+  return canManageProject(role) || role === "pmo_reviewer";
+}

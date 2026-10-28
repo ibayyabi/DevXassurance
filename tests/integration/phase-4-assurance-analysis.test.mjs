@@ -6,18 +6,28 @@ import {
   parseReviewExtraction,
 } from "../../src/features/assurance/lib/analysis.ts";
 
+// Budget is evaluated from cost observations and an accepted baseline; see
+// ticket-01-project-budget-assurance.test.mjs. Here it is supplied as an
+// already-evaluated finding.
+function budgetFinding(overrides = {}) {
+  return {
+    domain: "budget",
+    condition: "more_evidence_required",
+    severity: "information",
+    headline: "Budget comparison needs an accepted cost baseline",
+    explanation: "No reviewer-accepted project cost baseline is active.",
+    baselineValue: null,
+    currentValue: null,
+    variance: { comparable: false, reason: "baseline_not_accepted" },
+    requiredEvidence: ["Reviewer-accepted project cost baseline"],
+    sourceExcerpts: [],
+    confidence: null,
+    ...overrides,
+  };
+}
+
 function extraction(overrides = {}) {
   return {
-    budget: {
-      baselineAmount: 100,
-      currentForecast: 100,
-      currentActual: null,
-      currency: "USD",
-      baselineExcerpt: "Approved budget USD 100.",
-      currentExcerpt: "Forecast remains USD 100.",
-      confidence: 0.9,
-      ...overrides.budget,
-    },
     schedule: {
       milestones: [
         {
@@ -51,29 +61,14 @@ function finding(result, domain) {
   return result.find((item) => item.domain === domain);
 }
 
-test("budget thresholds are deterministic at 0%, 5%, and above 5%", () => {
-  assert.equal(
-    finding(evaluateAssuranceReview(extraction()), "budget").condition,
-    "on_track",
+test("the evaluated budget finding is reported alongside schedule and risk", () => {
+  const result = evaluateAssuranceReview(
+    extraction(),
+    budgetFinding({ condition: "critical", severity: "critical" }),
   );
-  assert.equal(
-    finding(
-      evaluateAssuranceReview(
-        extraction({ budget: { currentForecast: 105 } }),
-      ),
-      "budget",
-    ).condition,
-    "needs_attention",
-  );
-  assert.equal(
-    finding(
-      evaluateAssuranceReview(
-        extraction({ budget: { currentForecast: 105.01 } }),
-      ),
-      "budget",
-    ).condition,
-    "critical",
-  );
+
+  assert.deepEqual(result.map((item) => item.domain), ["budget", "schedule", "risk"]);
+  assert.equal(finding(result, "budget").condition, "critical");
 });
 
 test("schedule thresholds are deterministic at 0, 14, and 15 days", () => {
@@ -90,13 +85,14 @@ test("schedule thresholds are deterministic at 0, 14, and 15 days", () => {
   });
 
   assert.equal(
-    finding(evaluateAssuranceReview(extraction()), "schedule").condition,
+    finding(evaluateAssuranceReview(extraction(), budgetFinding()), "schedule").condition,
     "on_track",
   );
   assert.equal(
     finding(
       evaluateAssuranceReview(
         extraction({ schedule: schedule("2026-07-15") }),
+        budgetFinding(),
       ),
       "schedule",
     ).condition,
@@ -106,6 +102,7 @@ test("schedule thresholds are deterministic at 0, 14, and 15 days", () => {
     finding(
       evaluateAssuranceReview(
         extraction({ schedule: schedule("2026-07-16") }),
+        budgetFinding(),
       ),
       "schedule",
     ).condition,
@@ -116,10 +113,10 @@ test("schedule thresholds are deterministic at 0, 14, and 15 days", () => {
 test("missing comparison evidence stays incomplete rather than optimistic", () => {
   const result = evaluateAssuranceReview(
     extraction({
-      budget: { baselineAmount: null },
       schedule: { milestones: [] },
       risk: { hasCurrentEvidence: false },
     }),
+    budgetFinding(),
   );
 
   assert.deepEqual(
@@ -137,6 +134,7 @@ test("risk becomes critical for an open critical risk or missing high-risk contr
     finding(
       evaluateAssuranceReview(
         extraction({ risk: { openCriticalCount: 1 } }),
+        budgetFinding(),
       ),
       "risk",
     ).condition,
@@ -146,6 +144,7 @@ test("risk becomes critical for an open critical risk or missing high-risk contr
     finding(
       evaluateAssuranceReview(
         extraction({ risk: { highRisksMissingControl: 1 } }),
+        budgetFinding(),
       ),
       "risk",
     ).condition,
@@ -154,5 +153,5 @@ test("risk becomes critical for an open critical risk or missing high-risk contr
 });
 
 test("AI extraction parser rejects an incomplete response contract", () => {
-  assert.equal(parseReviewExtraction({ budget: {}, schedule: {} }), null);
+  assert.equal(parseReviewExtraction({ schedule: {} }), null);
 });

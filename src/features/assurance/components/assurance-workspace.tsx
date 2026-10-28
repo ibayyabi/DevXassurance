@@ -12,10 +12,16 @@ import {
 
 import {
   confirmAssuranceFinding,
+  correctBudgetFinding,
   createAssuranceReview,
   runAssuranceAnalysis,
   updateAssuranceAction,
 } from "@/features/assurance/actions/assurance-actions";
+import { CostBaselinePanel } from "@/features/assurance/components/cost-baseline-panel";
+import type {
+  CostBaseline,
+  CostObservation,
+} from "@/features/assurance/lib/cost-evidence";
 import { ProcessingRefresh } from "@/features/assurance/components/processing-refresh";
 import type {
   AssuranceDocument,
@@ -32,10 +38,16 @@ export function AssuranceWorkspace({
   projectId,
   review,
   documents,
+  costObservations,
+  costBaselines,
+  canApproveBaseline,
 }: {
   projectId: string;
   review: AssuranceReview | null;
   documents: AssuranceDocument[];
+  costObservations: CostObservation[];
+  costBaselines: CostBaseline[];
+  canApproveBaseline: boolean;
 }) {
   const activeProcessing = documents.some((document) =>
     ["uploaded", "queued", "processing"].includes(document.processingStatus),
@@ -137,7 +149,19 @@ export function AssuranceWorkspace({
         />
       </section>
 
-      <FindingsStep projectId={projectId} review={review} evidenceReady={reviewReady} />
+      <CostBaselinePanel
+        projectId={projectId}
+        observations={costObservations}
+        baselines={costBaselines}
+        canApprove={canApproveBaseline}
+      />
+
+      <FindingsStep
+        projectId={projectId}
+        review={review}
+        evidenceReady={reviewReady}
+        canCorrect={canApproveBaseline}
+      />
       <ActionsStep projectId={projectId} review={review} />
 
       <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
@@ -281,7 +305,7 @@ function AnalysisStep({
       </p>
 
       <div className="mt-4 grid gap-3 sm:grid-cols-3">
-        <AnalysisDomain icon={CircleDollarSign} title="Budget" help="Approved budget vs current forecast" />
+        <AnalysisDomain icon={CircleDollarSign} title="Budget" help="Accepted baseline vs reported EAC" />
         <AnalysisDomain icon={CalendarDays} title="Schedule" help="Baseline dates vs current forecast" />
         <AnalysisDomain icon={ShieldAlert} title="Risk" help="Current critical and uncontrolled risks" />
       </div>
@@ -336,10 +360,12 @@ function FindingsStep({
   projectId,
   review,
   evidenceReady,
+  canCorrect,
 }: {
   projectId: string;
   review: AssuranceReview;
   evidenceReady: boolean;
+  canCorrect: boolean;
 }) {
   return (
     <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
@@ -376,6 +402,7 @@ function FindingsStep({
               projectId={projectId}
               reviewId={review.id}
               finding={finding}
+              canCorrect={canCorrect}
             />
           ))}
         </div>
@@ -388,10 +415,12 @@ function FindingCard({
   projectId,
   reviewId,
   finding,
+  canCorrect,
 }: {
   projectId: string;
   reviewId: string;
   finding: AssuranceFinding;
+  canCorrect: boolean;
 }) {
   return (
     <article className="rounded-xl border border-ui-border p-4">
@@ -443,6 +472,14 @@ function FindingCard({
           </div>
         </details>
       )}
+      {finding.domain === "budget" && (
+        <BudgetCorrection
+          projectId={projectId}
+          reviewId={reviewId}
+          finding={finding}
+          canCorrect={canCorrect}
+        />
+      )}
       <form action={confirmAssuranceFinding} className="mt-4">
         <input type="hidden" name="projectId" value={projectId} />
         <input type="hidden" name="reviewId" value={reviewId} />
@@ -458,6 +495,80 @@ function FindingCard({
         </Button>
       </form>
     </article>
+  );
+}
+
+/**
+ * A reviewer may correct the value used in assessment. The extracted values and
+ * their citations above stay as extracted; the correction is recorded with who
+ * made it and why.
+ */
+function BudgetCorrection({
+  projectId,
+  reviewId,
+  finding,
+  canCorrect,
+}: {
+  projectId: string;
+  reviewId: string;
+  finding: AssuranceFinding;
+  canCorrect: boolean;
+}) {
+  const correction = finding.correction;
+  const comparableBaseline =
+    typeof finding.baselineValue?.amount === "number" &&
+    typeof finding.baselineValue?.currency === "string";
+
+  return (
+    <div className="mt-3 rounded-lg border border-ui-border p-3 text-xs">
+      {correction && (
+        <div className="mb-3 rounded-md bg-base p-2 text-ink-muted">
+          <p className="font-semibold text-ink">Assessed value corrected by a reviewer</p>
+          <p className="mt-1">
+            Now assessed against {String(correction.corrected_currency ?? "")}{" "}
+            {String(correction.corrected_amount ?? "")}
+            {finding.correctedAt ? ` · ${finding.correctedAt.slice(0, 10)}` : ""}
+          </p>
+          {finding.correctionReason && <p className="mt-1">Reason: {finding.correctionReason}</p>}
+          <p className="mt-1">
+            The extracted values and source citations above are unchanged.
+          </p>
+        </div>
+      )}
+      {!canCorrect ? null : !comparableBaseline ? (
+        <p className="text-ink-muted">
+          Accept a cost baseline before correcting the assessed value.
+        </p>
+      ) : (
+        <form action={correctBudgetFinding} className="grid gap-2">
+          <input type="hidden" name="projectId" value={projectId} />
+          <input type="hidden" name="reviewId" value={reviewId} />
+          <input type="hidden" name="findingId" value={finding.id} />
+          <p className="font-semibold text-ink">Correct the assessed EAC</p>
+          <div className="grid gap-2 sm:grid-cols-[1fr_90px]">
+            <Input
+              name="correctedEacAmount"
+              placeholder={
+                typeof finding.currentValue?.amount === "number"
+                  ? String(finding.currentValue.amount)
+                  : "Reported EAC amount"
+              }
+              className="h-8"
+            />
+            <Input
+              name="correctedCurrency"
+              placeholder={String(finding.baselineValue?.currency ?? "CUR")}
+              maxLength={3}
+              className="h-8"
+            />
+          </div>
+          <Input name="correctionReason" placeholder="Why this value is corrected" required className="h-8" />
+          <Button type="submit" size="sm" variant="outline" className="w-fit">
+            Save correction
+          </Button>
+        </form>
+      )}
+    </div>
   );
 }
 

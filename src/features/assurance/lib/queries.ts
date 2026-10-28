@@ -1,4 +1,12 @@
 import { resolveDocumentMetadata } from "@/features/documents/lib/metadata";
+import {
+  costBaselineColumns,
+  costObservationColumns,
+  mapCostBaselineRow,
+  mapCostObservationRow,
+  type CostBaselineRow,
+  type CostObservationRow,
+} from "@/features/assurance/lib/cost-queries";
 import type {
   ReviewCondition,
   ReviewDomain,
@@ -69,6 +77,9 @@ export type AssuranceFinding = {
   }[];
   confidence: number | null;
   confirmationState: string;
+  correction: Record<string, unknown> | null;
+  correctionReason: string | null;
+  correctedAt: string | null;
 };
 
 export type AssuranceAction = {
@@ -112,6 +123,9 @@ type FindingRow = {
   source_excerpts: AssuranceFinding["sourceExcerpts"] | null;
   confidence: number | null;
   confirmation_state: string;
+  correction: Record<string, unknown> | null;
+  correction_reason: string | null;
+  corrected_at: string | null;
 };
 
 type ActionRow = {
@@ -127,6 +141,28 @@ type ActionRow = {
 
 export async function getAssuranceWorkspace(projectId: string) {
   const { supabase, membership } = await requireProjectMembership(projectId);
+  const [costResult, baselineResult] = await Promise.all([
+    supabase
+      .from("cost_observations")
+      .select(costObservationColumns)
+      .eq("project_id", projectId)
+      .eq("scope_level", "project")
+      .order("as_of_date", { ascending: false, nullsFirst: false }),
+    supabase
+      .from("cost_baselines")
+      .select(costBaselineColumns)
+      .eq("project_id", projectId)
+      .order("effective_date", { ascending: false }),
+  ]);
+  if (costResult.error) throw new Error(costResult.error.message);
+  if (baselineResult.error) throw new Error(baselineResult.error.message);
+
+  const costObservations = ((costResult.data ?? []) as CostObservationRow[]).map(
+    mapCostObservationRow,
+  );
+  const costBaselines = ((baselineResult.data ?? []) as CostBaselineRow[]).map(
+    mapCostBaselineRow,
+  );
   const [documentsResult, reviewsResult] = await Promise.all([
     supabase
       .from("documents")
@@ -180,7 +216,14 @@ export async function getAssuranceWorkspace(projectId: string) {
 
   const reviewRows = (reviewsResult.data ?? []) as ReviewRow[];
   if (reviewRows.length === 0) {
-    return { membership, documents, review: null, reviews: [] as AssuranceReview[] };
+    return {
+      membership,
+      documents,
+      review: null,
+      reviews: [] as AssuranceReview[],
+      costObservations,
+      costBaselines,
+    };
   }
 
   const reviewIds = reviewRows.map((row) => row.id);
@@ -192,7 +235,7 @@ export async function getAssuranceWorkspace(projectId: string) {
     supabase
       .from("assurance_findings")
       .select(
-        "id, review_id, domain, condition, severity, headline, explanation, baseline_value, current_value, variance, required_evidence, source_excerpts, confidence, confirmation_state",
+        "id, review_id, domain, condition, severity, headline, explanation, baseline_value, current_value, variance, required_evidence, source_excerpts, confidence, confirmation_state, correction, correction_reason, corrected_at",
       )
       .in("review_id", reviewIds)
       .order("domain"),
@@ -242,6 +285,9 @@ export async function getAssuranceWorkspace(projectId: string) {
         sourceExcerpts: finding.source_excerpts ?? [],
         confidence: finding.confidence,
         confirmationState: finding.confirmation_state,
+        correction: finding.correction,
+        correctionReason: finding.correction_reason,
+        correctedAt: finding.corrected_at,
       })),
     actions: actions
       .filter((action) => action.review_id === row.id)
@@ -256,5 +302,12 @@ export async function getAssuranceWorkspace(projectId: string) {
       })),
   }));
 
-  return { membership, documents, review: reviews[0], reviews };
+  return {
+    membership,
+    documents,
+    review: reviews[0],
+    reviews,
+    costObservations,
+    costBaselines,
+  };
 }

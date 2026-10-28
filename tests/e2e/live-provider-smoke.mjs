@@ -14,10 +14,18 @@ const extractionSource = fileURLToPath(
 const guardSource = fileURLToPath(
   new URL("../../worker/src/types/guards.ts", import.meta.url),
 );
+const constantsSource = fileURLToPath(
+  new URL("../../src/features/documents/lib/constants.ts", import.meta.url),
+);
+const costEvidenceSource = fileURLToPath(
+  new URL("../../src/features/assurance/lib/cost-evidence.ts", import.meta.url),
+);
 const tempDir = mkdtempSync(join(tmpdir(), "xass-live-provider-smoke-"));
 
 try {
   const guardModule = join(tempDir, "guards.mjs");
+  const constantsModule = join(tempDir, "constants.mjs");
+  const costEvidenceModule = join(tempDir, "cost-evidence.mjs");
   const extractionModule = join(tempDir, "document-extraction.mjs");
   const compile = (source) => ts.transpileModule(readFileSync(source, "utf8"), {
     compilerOptions: {
@@ -27,12 +35,23 @@ try {
   }).outputText;
 
   writeFileSync(guardModule, compile(guardSource));
+  writeFileSync(constantsModule, compile(constantsSource));
+  writeFileSync(costEvidenceModule, compile(costEvidenceSource));
   writeFileSync(
     extractionModule,
-    compile(extractionSource).replace(
-      'from "../types/guards"',
-      `from "${pathToFileURL(guardModule).href}"`,
-    ),
+    compile(extractionSource)
+      .replace(
+        'from "../types/guards"',
+        `from "${pathToFileURL(guardModule).href}"`,
+      )
+      .replace(
+        'from "../../../src/features/documents/lib/constants"',
+        `from "${pathToFileURL(constantsModule).href}"`,
+      )
+      .replace(
+        'from "../../../src/features/assurance/lib/cost-evidence"',
+        `from "${pathToFileURL(costEvidenceModule).href}"`,
+      ),
   );
   const { extractDocumentGroups } = await import(pathToFileURL(extractionModule).href);
   const source = `SYNTHETIC PROJECT STATUS REPORT\nDocument date: 2026-03-10.\nReporting period: 2026-03-01.\nWorkstream: Civil works.\nThe approved forecast cost is USD 487000.\nThe operational readiness review is scheduled for 2026-04-18.`;

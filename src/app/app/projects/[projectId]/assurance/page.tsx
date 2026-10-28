@@ -1,5 +1,6 @@
 import { AssuranceWorkspace } from "@/features/assurance/components/assurance-workspace";
 import { getAssuranceWorkspace } from "@/features/assurance/lib/queries";
+import { canApproveAssuranceBaseline } from "@/features/projects/lib/roles";
 
 export default async function AssurancePage({
   params,
@@ -13,6 +14,9 @@ export default async function AssurancePage({
       projectId={projectId}
       review={workspace.review}
       documents={workspace.documents}
+      costObservations={workspace.costObservations}
+      costBaselines={workspace.costBaselines}
+      canApproveBaseline={canApproveAssuranceBaseline(workspace.membership.role)}
     />
   );
 }

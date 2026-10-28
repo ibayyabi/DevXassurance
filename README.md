@@ -25,6 +25,18 @@ supported evidence files and calls the configured LLM when available.
 - The worker persists AI suggestions separately from intake hints and human
   confirmations. Review roles are `baseline`, `current`, and `supporting`;
   confirmation does not overwrite the original hints or AI suggestions.
+- The same grouped extraction call also collects project cost evidence
+  (approved baseline, actual to date, committed, and reported EAC) from any
+  document type into `cost_observations`, keeping the source wording and its
+  exact location. Amount and currency are normalized deterministically and stay
+  null when the source wording is ambiguous.
+- Project Budget assurance compares a reviewer-accepted baseline
+  (`cost_baselines`) only with an explicitly reported EAC in the same currency.
+  A document's own "approved" label does not activate a baseline, missing EAC is
+  an evidence gap rather than a comparison against actual cost, and differing
+  currencies stay source values without conversion. A reviewer may correct the
+  assessed value with an attributed reason; the original extraction and its
+  citations are unchanged.
 - The Advisor searches fresh project evidence with active-review, role, and
   period scope, preserves follow-up conversation context, and shows only
   citations verified against the exact retrieved chunk and source location.
@@ -46,7 +58,8 @@ supported evidence files and calls the configured LLM when available.
 
 ## Required Tools
 
-- Node.js 20 or newer
+- Node.js 22.18 or newer (the test suite imports TypeScript modules directly;
+  on an older Node 22, run the suite with `--experimental-strip-types`)
 - Supabase development project (verify the linked project before any writes)
 - Docker Desktop and the included n8n workflow for queue/polling integration
 - A configured Ollama Cloud provider, or local Ollama for fully local model runs
@@ -111,6 +124,12 @@ Phase 6's additive migrations apply in this order:
 202610180006_upload_submission_batches.sql
 202610180007_advisor_ranked_or_search.sql
 202610180008_advisor_relaxed_match_guard.sql
+```
+
+The PMO cost evidence migration applies after the Phase 6 set:
+
+```text
+202610260001_pmo_cost_evidence.sql
 ```
 
 Do not link, push, or test against production as part of development work.
@@ -237,18 +256,23 @@ a public HTTPS tunnel and a matching `WEBHOOK_URL`; never use its
 6. Correct the suggested artifact type and assign an evidence role:
    `baseline`, `current`, or `supporting`. Confirm the saved value while
    retaining the original hint and AI suggestion.
-7. Start an assurance review and verify missing baseline/current evidence keeps
+7. On the Assurance page, review the cost baseline candidates extracted from
+   evidence and accept one for a scope and effective date. Confirm Budget stays
+   More Evidence Required until a baseline is accepted, that a document calling
+   itself approved does not activate one, and that a candidate whose amount or
+   currency could not be read safely cannot be accepted.
+8. Start an assurance review and verify missing baseline/current evidence keeps
    analysis and reporting unready. Select approved baseline and current-period
    evidence, filter by a dimension, change a visible selection, and save;
    confirm selected off-filter evidence remains linked. Run analysis, inspect
    its source document/location link, and continue to a report only after
    verified findings exist. A failed model analysis stays visibly unready; do
    not invent findings.
-8. Ask the Advisor a project question. Inspect its exact source ID/location,
+9. Ask the Advisor a project question. Inspect its exact source ID/location,
    ask a follow-up in the same conversation, and try a historical/comparative
    question and a no-match question. Unsupported claims should not be presented
    as facts.
-9. Use the existing Dashboard, Reports, and Members pages as needed.
+10. Use the existing Dashboard, Reports, and Members pages as needed.
 
 Phase 6 extraction limits and OCR setup are also documented in `worker/README.md`.
 The full release, rollback, browser-run, and moderator checklist is

@@ -26,12 +26,16 @@ const guardSource = fileURLToPath(
 const constantsSource = fileURLToPath(
   new URL("../../src/features/documents/lib/constants.ts", import.meta.url),
 );
+const costEvidenceSource = fileURLToPath(
+  new URL("../../src/features/assurance/lib/cost-evidence.ts", import.meta.url),
+);
 const parserModule = join(dirname(parserSource), `.parser-${randomUUID()}.mjs`);
 const extractionModule = join(dirname(extractionSource), `.extraction-${randomUUID()}.mjs`);
 const jobModule = join(dirname(jobSource), `.job-${randomUUID()}.mjs`);
 const guardModule = join(dirname(guardSource), `.guards-${randomUUID()}.mjs`);
 const zipSafetyModule = join(dirname(zipSafetySource), `.zip-safety-${randomUUID()}.mjs`);
 const constantsModule = join(dirname(constantsSource), `.constants-${randomUUID()}.mjs`);
+const costEvidenceModule = join(dirname(costEvidenceSource), `.cost-evidence-${randomUUID()}.mjs`);
 const compile = (source) =>
   ts.transpileModule(readFileSync(source, "utf8"), {
     compilerOptions: {
@@ -42,6 +46,7 @@ const compile = (source) =>
 
 writeFileSync(zipSafetyModule, compile(zipSafetySource));
 writeFileSync(constantsModule, compile(constantsSource));
+writeFileSync(costEvidenceModule, compile(costEvidenceSource));
 writeFileSync(
   parserModule,
   compile(parserSource).replace(
@@ -56,6 +61,10 @@ writeFileSync(
     .replace(
       'from "../../../src/features/documents/lib/constants"',
       `from "${pathToFileURL(constantsModule).href}"`,
+    )
+    .replace(
+      'from "../../../src/features/assurance/lib/cost-evidence"',
+      `from "${pathToFileURL(costEvidenceModule).href}"`,
     )
     .replace(
       'from "../types/guards"',
@@ -85,6 +94,7 @@ try {
   unlinkSync(zipSafetyModule);
   unlinkSync(guardModule);
   unlinkSync(constantsModule);
+  unlinkSync(costEvidenceModule);
   unlinkSync(extractionModule);
   unlinkSync(jobModule);
 }
@@ -864,4 +874,176 @@ test("normalizes known document type labels but rejects unsupported categories",
       assert.equal(calls, 3);
     });
   }
+});
+
+const costSource =
+  "COST EVIDENCE Approved project budget USD 1,250,000 approved on 2026-01-05. " +
+  "Estimate at completion is USD 1,312,500 for October 2026. " +
+  "Actual cost to date USD 600,000. Contingency is about USD 1.2 million.";
+
+function costModelOutput(prompt, observations) {
+  const group = validModelOutput(prompt);
+  if (prompt.startsWith("Classify the entire document")) return group;
+  const sourceId = documentContextFromPrompt(prompt)[0].source_id;
+  return {
+    ...group,
+    cost_observations: observations.map((observation) => ({
+      scope_level: "project",
+      scope_label: null,
+      period_label: null,
+      as_of_date: null,
+      status_label: null,
+      source_id: sourceId,
+      ...observation,
+    })),
+  };
+}
+
+async function extractCostObservations(observations) {
+  return await withLocalOllama(
+    async (_url, init) =>
+      modelResponse(costModelOutput(JSON.parse(init.body).messages[1].content, observations)),
+    async () =>
+      await extractDocumentGroups(
+        job(costSource, { fileName: "cost-report.txt", title: "Cost Report" }),
+        [{ chunkIndex: 0, chunkText: costSource, sectionLabel: "Cost summary" }],
+        { parserVersion: "cost-evidence-test-v1" },
+        memoryGroupStore(),
+      ),
+  );
+}
+
+test("cost observations keep the source value and carry deterministic normalization", async () => {
+  const outcome = await extractCostObservations([
+    {
+      measure: "approved_baseline",
+      source_value: "USD 1,250,000",
+      status_label: "Approved",
+      as_of_date: "2026-01-05",
+    },
+    {
+      measure: "eac",
+      source_value: "USD 1,312,500",
+      period_label: "October 2026",
+    },
+    { measure: "actual_to_date", source_value: "USD 600,000" },
+    { measure: "committed", source_value: "USD 1.2 million" },
+    {
+      measure: "eac",
+      source_value: "USD 1,312,500",
+      scope_label: "Project total",
+      period_label: "Restated",
+    },
+  ]);
+
+  assert.equal(outcome.ok, true, `${outcome.errorCode}: ${outcome.errorMessage}`);
+  const observations = outcome.extraction.cost_observations;
+  assert.deepEqual(
+    observations.map((observation) => [
+      observation.measure,
+      observation.source_value,
+      observation.normalized_amount,
+      observation.currency,
+    ]),
+    [
+      ["approved_baseline", "USD 1,250,000", 1_250_000, "USD"],
+      ["eac", "USD 1,312,500", 1_312_500, "USD"],
+      ["actual_to_date", "USD 600,000", 600_000, "USD"],
+      // A scale word stays unread, so the value remains an uncompared source value.
+      ["committed", "USD 1.2 million", null, "USD"],
+    ],
+  );
+  assert.equal(observations[0].status_label, "Approved");
+  assert.equal(observations[0].as_of_date, "2026-01-05");
+  assert.equal(observations[1].period_label, "October 2026");
+  // A project total has one scope, so a stated label is dropped there and the
+  // restated duplicate of the same reported value collapses into one row.
+  assert.equal(observations.length, 4);
+  assert.deepEqual(
+    observations.map((item) => item.scope_label),
+    [null, null, null, null],
+  );
+  assert.equal(observations[1].evidence_chunk_index, 0);
+  assert.ok(costSource.includes(observations[1].excerpt));
+});
+
+test("a cost value absent from its cited source is excluded, not accepted", async () => {
+  const outcome = await extractCostObservations([
+    { measure: "eac", source_value: "USD 9,999,999" },
+  ]);
+
+  assert.equal(outcome.ok, true, `${outcome.errorCode}: ${outcome.errorMessage}`);
+  assert.deepEqual(outcome.extraction.cost_observations, []);
+  assert.ok(
+    outcome.extraction.quality_warnings.some((warning) =>
+      warning.includes("cost_observations[0]") &&
+      warning.includes("source_value is not present in the cited source"),
+    ),
+    outcome.extraction.quality_warnings.join(" "),
+  );
+});
+
+test("an unknown cost measure or scope is excluded with a review warning", async () => {
+  const outcome = await extractCostObservations([
+    { measure: "forecast", source_value: "USD 1,312,500" },
+    { measure: "eac", source_value: "USD 1,312,500", scope_level: "wbs", scope_label: null },
+  ]);
+
+  assert.equal(outcome.ok, true, `${outcome.errorCode}: ${outcome.errorMessage}`);
+  assert.deepEqual(outcome.extraction.cost_observations, []);
+  assert.ok(
+    outcome.extraction.quality_warnings.some((warning) => warning.includes("measure is invalid")),
+  );
+  assert.ok(
+    outcome.extraction.quality_warnings.some((warning) =>
+      warning.includes("scope_label is required for a work-package cost value"),
+    ),
+  );
+});
+
+test("a provider quota defers the remaining groups for retry instead of reporting absent evidence", async () => {
+  const store = memoryGroupStore();
+  const source = sourceDocument("QUOTA");
+  let quotaExhausted = true;
+  let groupCalls = [];
+
+  await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (prompt.startsWith("Classify the entire document")) {
+      return modelResponse(validModelOutput(prompt));
+    }
+    const chunkIndex = documentContextFromPrompt(prompt)[0].chunk_index;
+    groupCalls.push(chunkIndex);
+    if (quotaExhausted && chunkIndex === 2) {
+      return new Response(JSON.stringify({ error: "quota exceeded" }), {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return modelResponse(validModelOutput(prompt));
+  }, async () => {
+    const deferred = await processDocumentJob(job(source, { fileName: "quota.txt" }), store);
+    assert.equal(deferred.status, "failed");
+    assert.equal(deferred.errorCode, "llm_provider_transient_failure");
+
+    const rows = [...store.rows.values()];
+    const deferredRows = rows.filter((row) => row.status === "failed");
+    assert.equal(deferredRows.length, 1);
+    assert.ok(rows.some((row) => row.status === "completed"));
+    const [deferredRow] = deferredRows;
+    assert.equal(deferredRow.result, null);
+    assert.ok(deferredRow.attemptCount >= 1);
+    assert.match(deferredRow.lastError, /HTTP 429/);
+
+    // The retry resumes only the deferred group; completed work is not re-sent.
+    quotaExhausted = false;
+    groupCalls = [];
+    const retried = await processDocumentJob(job(source, { fileName: "quota.txt" }), store);
+    assert.equal(retried.status, "completed", `${retried.errorCode}: ${retried.errorMessage}`);
+    assert.deepEqual([...new Set(groupCalls)], [2]);
+    assert.deepEqual(
+      [...new Set([...store.rows.values()].map((row) => row.status))],
+      ["completed"],
+    );
+  });
 });

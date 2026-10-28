@@ -101,6 +101,7 @@ export async function processDocumentJob(
     health_snapshots: extraction.health_snapshots,
     alerts: extraction.alerts,
     actions: extraction.actions,
+    cost_observations: extraction.cost_observations,
     document_suggestions: extraction.document_suggestions,
     anomalies: buildAnomalies(extraction.alerts, extraction.facts),
     parserMetadata: {

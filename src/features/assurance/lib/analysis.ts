@@ -6,16 +6,12 @@ export type ReviewCondition =
 
 export type ReviewDomain = "budget" | "schedule" | "risk";
 
+/**
+ * Review-time extraction for the domains that still use the single review
+ * prompt. Budget no longer appears here: project cost evidence comes from the
+ * grouped extraction's cost observations and a reviewer-accepted baseline.
+ */
 export type ReviewExtraction = {
-  budget: {
-    baselineAmount: number | null;
-    currentForecast: number | null;
-    currentActual: number | null;
-    currency: string | null;
-    baselineExcerpt: string | null;
-    currentExcerpt: string | null;
-    confidence: number;
-  };
   schedule: {
     milestones: {
       name: string;
@@ -50,28 +46,24 @@ export type EvaluatedFinding = {
   currentValue: Record<string, unknown> | null;
   variance: Record<string, unknown> | null;
   requiredEvidence: string[];
-  sourceExcerpts: { role: "baseline" | "current"; excerpt: string; documentId?: string; documentTitle?: string; pageNumber?: number | null; sectionLabel?: string | null }[];
-  confidence: number;
+  sourceExcerpts: { role: "baseline" | "current"; excerpt: string; documentId?: string; documentTitle?: string; pageNumber?: number | null; sectionLabel?: string | null; sourceLocation?: Record<string, string | number> | null }[];
+  confidence: number | null;
 };
 
 export function parseReviewExtraction(
   value: Record<string, unknown>,
 ): ReviewExtraction | null {
-  const budget = record(value.budget);
   const schedule = record(value.schedule);
   const risk = record(value.risk);
 
   if (
-    !budget ||
     !schedule ||
     !risk ||
     !Array.isArray(schedule.milestones) ||
     typeof risk.has_current_evidence !== "boolean" ||
-    !validConfidence(budget.confidence) ||
     !validConfidence(schedule.confidence) ||
     !validConfidence(risk.confidence) ||
-    ![budget.baseline_amount, budget.current_forecast, budget.current_actual].every(validOptionalNumber) ||
-    ![budget.currency, budget.baseline_excerpt, budget.current_excerpt, risk.baseline_excerpt, risk.current_excerpt].every(validOptionalText) ||
+    ![risk.baseline_excerpt, risk.current_excerpt].every(validOptionalText) ||
     ![
       risk.open_critical_count,
       risk.open_high_count,
@@ -116,15 +108,6 @@ export function parseReviewExtraction(
     .filter((item): item is NonNullable<typeof item> => item !== null);
 
   return {
-    budget: {
-      baselineAmount: nullableNumber(budget.baseline_amount),
-      currentForecast: nullableNumber(budget.current_forecast),
-      currentActual: nullableNumber(budget.current_actual),
-      currency: nullableText(budget.currency),
-      baselineExcerpt: nullableText(budget.baseline_excerpt),
-      currentExcerpt: nullableText(budget.current_excerpt),
-      confidence: confidence(budget.confidence),
-    },
     schedule: {
       milestones,
       confidence: confidence(schedule.confidence),
@@ -150,80 +133,9 @@ export function parseReviewExtraction(
 
 export function evaluateAssuranceReview(
   extraction: ReviewExtraction,
+  budget: EvaluatedFinding,
 ): EvaluatedFinding[] {
-  return [
-    evaluateBudget(extraction),
-    evaluateSchedule(extraction),
-    evaluateRisk(extraction),
-  ];
-}
-
-function evaluateBudget(extraction: ReviewExtraction): EvaluatedFinding {
-  const budget = extraction.budget;
-  const currentValue = budget.currentForecast ?? budget.currentActual;
-  const excerpts = sourceExcerpts(
-    budget.baselineExcerpt,
-    budget.currentExcerpt,
-  );
-
-  if (budget.baselineAmount === null || currentValue === null) {
-    return missingFinding(
-      "budget",
-      "Budget comparison needs more evidence",
-      "An approved budget and a current forecast or actual cost are both required.",
-      [
-        ...(budget.baselineAmount === null ? ["Approved baseline budget"] : []),
-        ...(currentValue === null ? ["Current forecast or actual cost"] : []),
-      ],
-      excerpts,
-      budget.confidence,
-    );
-  }
-
-  const varianceAmount = currentValue - budget.baselineAmount;
-  const variancePercent =
-    budget.baselineAmount === 0
-      ? null
-      : (varianceAmount / budget.baselineAmount) * 100;
-  const condition: ReviewCondition =
-    variancePercent === null
-      ? "more_evidence_required"
-      : variancePercent > 5
-        ? "critical"
-        : variancePercent > 0
-          ? "needs_attention"
-          : "on_track";
-
-  return {
-    domain: "budget",
-    condition,
-    severity: severityFor(condition),
-    headline:
-      condition === "on_track"
-        ? "Current forecast is within the approved budget"
-        : condition === "needs_attention"
-          ? `Current forecast is ${formatPercent(variancePercent)} above budget`
-          : condition === "critical"
-            ? `Budget overrun exceeds the 5% critical threshold`
-            : "Budget comparison needs a non-zero approved baseline",
-    explanation: `Approved budget ${formatMoney(budget.baselineAmount, budget.currency)}; current value ${formatMoney(currentValue, budget.currency)}. The variance is ${formatMoney(varianceAmount, budget.currency)} (${formatPercent(variancePercent)}).`,
-    baselineValue: {
-      amount: budget.baselineAmount,
-      currency: budget.currency,
-    },
-    currentValue: {
-      amount: currentValue,
-      currency: budget.currency,
-      source: budget.currentForecast !== null ? "forecast" : "actual",
-    },
-    variance: { amount: varianceAmount, percent: variancePercent },
-    requiredEvidence:
-      condition === "more_evidence_required"
-        ? ["Approved baseline budget greater than zero"]
-        : [],
-    sourceExcerpts: excerpts,
-    confidence: budget.confidence,
-  };
+  return [budget, evaluateSchedule(extraction), evaluateRisk(extraction)];
 }
 
 function evaluateSchedule(extraction: ReviewExtraction): EvaluatedFinding {
@@ -394,15 +306,7 @@ function dateDifferenceDays(baseline: string | null, current: string | null) {
   return Math.round((currentTime - baselineTime) / 86_400_000);
 }
 
-function formatMoney(value: number, currency: string | null) {
-  return `${currency ?? "amount"} ${new Intl.NumberFormat("en", {
-    maximumFractionDigits: 2,
-  }).format(value)}`;
-}
 
-function formatPercent(value: number | null) {
-  return value === null ? "not calculable" : `${value.toFixed(1)}%`;
-}
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -418,13 +322,6 @@ function nullableText(value: unknown) {
   return text(value) || null;
 }
 
-function nullableNumber(value: unknown) {
-  if (value === null || value === undefined || value === "") return null;
-  const normalized =
-    typeof value === "string" ? value.replace(/[^0-9.-]/g, "") : value;
-  const number = Number(normalized);
-  return Number.isFinite(number) ? number : null;
-}
 
 function nonNegativeInteger(value: unknown) {
   return value as number;
@@ -442,9 +339,6 @@ function validConfidence(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
-function validOptionalNumber(value: unknown) {
-  return value === null || value === undefined || (typeof value === "number" && Number.isFinite(value));
-}
 
 function validOptionalText(value: unknown) {
   return value === null || value === undefined || typeof value === "string";

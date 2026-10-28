@@ -1,4 +1,9 @@
 import { createHash } from "node:crypto";
+import {
+  costMeasures,
+  normalizeCostAmount,
+  normalizeCostCurrency,
+} from "../../../src/features/assurance/lib/cost-evidence";
 import { documentTypes } from "../../../src/features/documents/lib/constants";
 import type { ParsedChunk, ParsedSourceReference } from "./document-parser";
 import { isRecord } from "../types/guards";
@@ -77,6 +82,25 @@ export type SourceCitation = {
   excerpt: string;
 };
 
+/**
+ * One PMO cost evidence observation. The source wording is kept exactly as
+ * reported; normalized_amount and currency are derived deterministically from
+ * it by the worker and stay null when the source value is ambiguous.
+ */
+export type ExtractedCostObservation = {
+  measure: "approved_baseline" | "actual_to_date" | "committed" | "eac";
+  source_value: string;
+  normalized_amount: number | null;
+  currency: string | null;
+  scope_level: "project" | "wbs";
+  scope_label: string | null;
+  period_label: string | null;
+  as_of_date: string | null;
+  status_label: string | null;
+  evidence_chunk_index: number;
+  excerpt: string;
+};
+
 export type DocumentSuggestions = {
   suggested_document_type: string | null;
   suggested_document_date: string | null;
@@ -124,6 +148,7 @@ export type DocumentExtraction = {
   health_snapshots: ExtractedHealthSnapshot[];
   alerts: ExtractedAlert[];
   actions: ExtractedAction[];
+  cost_observations: ExtractedCostObservation[];
   document_suggestions: DocumentSuggestions;
   sheet_interpretations: SheetInterpretation[];
   quality_warnings: string[];
@@ -196,6 +221,7 @@ type GroupExtraction = {
   health_snapshots: GroupHealthSnapshot[];
   alerts: ExtractedAlert[];
   actions: ExtractedAction[];
+  cost_observations: ExtractedCostObservation[];
   group_metadata_suggestions: GroupMetadataSuggestions;
   sheet_interpretation?: SheetInterpretation;
   quality_warnings: string[];
@@ -224,7 +250,7 @@ type GroupAttemptResult = {
 type GroupAttemptError = Error & { attempts: number; errorCode: string };
 class TransientProviderError extends Error {}
 
-const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/11";
+const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/12";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -233,6 +259,10 @@ const MAX_PROVIDER_RESPONSE_BYTES = 1_000_000;
 const MAX_FACTS_PER_GROUP = 50;
 const MAX_ALERTS_PER_GROUP = 20;
 const MAX_ACTIONS_PER_GROUP = 20;
+const MAX_COST_OBSERVATIONS_PER_GROUP = 40;
+const MAX_COST_EXCERPT_CONTEXT = 240;
+const COST_MEASURES = costMeasures;
+const COST_SCOPE_LEVELS = ["project", "wbs"] as const;
 const MAX_MODEL_STRING_LENGTH = 5000;
 const MAX_DOCUMENT_GROUPS = 32;
 const MAX_DOCUMENT_CHUNKS = MAX_DOCUMENT_GROUPS * MAX_GROUP_CHUNKS;
@@ -1030,7 +1060,10 @@ Rules:
 - Use insufficient_evidence when a health dimension lacks direct evidence; absence of a negative statement is not evidence of green status.
 - A source-group health assessment is not a document comparison. Do not claim change or variance unless both values appear in these sources.
 - Formula expressions are not evaluated. Only cached values explicitly labeled as stored cache may be described. Missing, empty, or error cache yields formula_result_unavailable and must not generate numeric values, statuses, variances, progress, or facts. Do not recalculate, interpolate, or infer any formula result.
-- Return exactly one complete top-level JSON object: no leading text, trailing text, second JSON value, markdown, or code fence; nothing may follow its final closing brace. Use at most 50 facts, 20 alerts, and 20 actions.
+- cost_observations collect project cost evidence found anywhere in these sources, whatever the artifact's primary type. Report one entry per stated cost value, copying source_value exactly as written in its cited source, including its currency wording and digit separators. Never convert, total, or restate a value.
+- Choose the cost measure from what the source says: approved_baseline (an approved or controlled budget reference), actual_to_date (cost already incurred), committed (contractually committed or ordered cost), eac (an explicitly reported total forecast or estimate at completion). Never record an actual or committed value as eac, and never record a value whose meaning the source does not state.
+- The application decides which cost values are comparable, normalizes amounts, and accepts baselines. Do not compare, calculate a variance, or claim that any value is approved for comparison.
+- Return exactly one complete top-level JSON object: no leading text, trailing text, second JSON value, markdown, or code fence; nothing may follow its final closing brace. Use at most 50 facts, 20 alerts, 20 actions, and ${MAX_COST_OBSERVATIONS_PER_GROUP} cost observations.
 
 Document context:
 - title: ${JSON.stringify(job.title ?? job.fileName)}
@@ -1050,6 +1083,7 @@ Required JSON schema:
   "health_snapshots": [{"dimension":"overall|schedule|cost|risk|governance|audit_readiness","score":null,"status":"green|amber|red|insufficient_evidence","evidence_coverage":0.0,"status_text":"...","source_summary":"...","snapshot_date":null,"source_id":null}],
   "alerts": [{"severity":"low|medium|high|critical","impacted_area":"...","explanation":"...","evidence_count":1,"recommended_action":"...","source_id":"..."}],
   "actions": [{"title":"...","owner_name":null,"priority":"low|medium|high","status":"open","source_id":"..."}],
+  "cost_observations": [{"measure":"approved_baseline|actual_to_date|committed|eac","source_value":"exact source text of the amount","scope_level":"project|wbs","scope_label":null,"period_label":null,"as_of_date":null,"status_label":null,"source_id":"..."}],
   "group_metadata_suggestions": {"suggested_document_date":null,"detected_reporting_period":null,"suggested_workstream":null,"source_id":null},
   "sheet_interpretation": {"interpretation_status":"resolved|ambiguous|unknown","structure_type":"table|key_value|timeline_gantt|narrative|instructions_template|mixed|unknown","sheet_name":"...","source_ids":["..."],"header_candidates":[{"label":"exact source header text","source_ids":["..."]}],"column_roles":[{"column":"A","role":"...","source_ids":["..."]}],"candidate_observations":[{"raw_value":"exact source value","normalized_value":null,"value_type":null,"unit":null,"period":null,"source_ids":["..."]}],"warnings":["..."]}
 }
@@ -1058,6 +1092,7 @@ For health snapshots, return exactly one entry for every listed dimension. Use e
 Other statuses require a matching source_id and a score within green 80-100, amber 50-79, or red 0-49.
 Health status_text and source_summary fields must each be nonempty strings no longer than 500 characters.
 Group metadata suggestions are limited to document date, reporting period, and workstream. Every non-null suggestion requires a valid source_id.
+For cost observations, source_value must be text present in the cited source and scope_level "wbs" requires the work-package code or name in scope_label. Report as_of_date as YYYY-MM-DD and leave period_label as the source's own wording. Omit the array when these sources state no cost value.
 Report document dates as YYYY-MM-DD and reporting periods as their first day YYYY-MM-01.
 sheet_interpretation is candidate-only and may appear only for parser-flagged ambiguous XLSX groups. Never invent cells, sheets, headers, cached values, dates, owners, or formula results. Cite each header, column role, and observation with source_ids from this group. The worker resolves those IDs to parser-authored sheet/cell/range locators; never provide locators yourself. Each header label and observation raw_value must be exact text present in its cited source. Normalized values remain candidates and must not replace raw evidence. If the group is not flagged ambiguous, omit the field.${correction}`;
 }
@@ -1488,6 +1523,64 @@ function validateGroupExtraction(
     });
   }
 
+  const costObservations: ExtractedCostObservation[] = [];
+  if (value.cost_observations !== undefined) {
+    if (!Array.isArray(value.cost_observations) || value.cost_observations.length > MAX_COST_OBSERVATIONS_PER_GROUP) {
+      errors.push(`cost_observations must be an array with at most ${MAX_COST_OBSERVATIONS_PER_GROUP} entries`);
+    } else {
+      value.cost_observations.forEach((observation, index) => {
+        const path = `cost_observations[${index}]`;
+        const rowErrors: string[] = [];
+        if (!isRecord(observation)) {
+          warnInvalidRow(path, [`${path} must be an object`]);
+          return;
+        }
+        const measure = stringField(observation.measure);
+        const scopeLevel = stringField(observation.scope_level);
+        const sourceValue = boundedString(observation.source_value, `${path}.source_value`, rowErrors, 500);
+        const scopeLabel = nullableBoundedString(observation.scope_label, `${path}.scope_label`, rowErrors, 500);
+        const periodLabel = nullableBoundedString(observation.period_label, `${path}.period_label`, rowErrors, 200);
+        const statusLabel = nullableBoundedString(observation.status_label, `${path}.status_label`, rowErrors, 200);
+        const asOfDate = nullableIsoDate(observation.as_of_date ?? null, `${path}.as_of_date`, rowErrors);
+        const citation = requiredCitation(observation, allowedSources, path, rowErrors, fromCache);
+        if (!COST_MEASURES.includes(measure as (typeof COST_MEASURES)[number])) {
+          rowErrors.push(`${path}.measure is invalid`);
+        }
+        if (!COST_SCOPE_LEVELS.includes(scopeLevel as (typeof COST_SCOPE_LEVELS)[number])) {
+          rowErrors.push(`${path}.scope_level is invalid`);
+        }
+        if (scopeLevel === "wbs" && !scopeLabel) {
+          rowErrors.push(`${path}.scope_label is required for a work-package cost value`);
+        }
+        if (citation && citationHasUnavailableFormula(group, citation)) {
+          rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support a cost value`);
+        }
+        if (citation && sourceValue && !citation.excerpt.includes(sourceValue)) {
+          rowErrors.push(`${path}.source_value is not present in the cited source`);
+        }
+        if (rowErrors.length) {
+          warnInvalidRow(path, rowErrors);
+          return;
+        }
+        costObservations.push({
+          measure: measure as ExtractedCostObservation["measure"],
+          source_value: sourceValue!,
+          normalized_amount: normalizeCostAmount(sourceValue!),
+          currency: normalizeCostCurrency(sourceValue!),
+          scope_level: scopeLevel as ExtractedCostObservation["scope_level"],
+          // A project total has one scope, so a label there carries no
+          // comparison meaning and is dropped to keep selection unambiguous.
+          scope_label: scopeLevel === "project" ? null : scopeLabel!,
+          period_label: periodLabel!,
+          as_of_date: asOfDate ?? null,
+          status_label: statusLabel!,
+          evidence_chunk_index: citation!.evidence_chunk_index,
+          excerpt: costExcerpt(citation!.excerpt, sourceValue!),
+        });
+      });
+    }
+  }
+
   const suggestions = validateGroupMetadataSuggestions(
     value.group_metadata_suggestions,
     allowedSources,
@@ -1512,6 +1605,7 @@ function validateGroupExtraction(
       health_snapshots: snapshots,
       alerts,
       actions,
+      cost_observations: costObservations,
       sheet_interpretation: sheetInterpretation,
       group_metadata_suggestions: suggestions,
       quality_warnings: [...new Set(qualityWarnings)],
@@ -1901,6 +1995,11 @@ function aggregateGroups(
     actions: uniqueBy(groups.flatMap((group) => group.value.actions), (action) =>
       `${action.title}\0${action.evidence_chunk_index}`,
     ),
+    cost_observations: uniqueBy(
+      groups.flatMap((group) => group.value.cost_observations),
+      (observation) =>
+        `${observation.measure}\0${observation.scope_level}\0${observation.scope_label ?? ""}\0${observation.source_value}\0${observation.evidence_chunk_index}`,
+    ),
     document_suggestions: suggestionAggregation.suggestions,
     sheet_interpretations: groups.flatMap((group, index) => {
       const interpretation = group.value.sheet_interpretation;
@@ -2121,6 +2220,19 @@ function boundedPositiveInteger(value: unknown, path: string, errors: string[]) 
 
 function stringField(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+// A bounded window of the cited source around the reported value, so the
+// stored citation stays an exact substring of the persisted chunk text.
+function costExcerpt(sourceText: string, sourceValue: string) {
+  const index = sourceText.indexOf(sourceValue);
+  if (index === -1) return sourceText.slice(0, MAX_COST_EXCERPT_CONTEXT * 2).trim();
+  return sourceText
+    .slice(
+      Math.max(0, index - MAX_COST_EXCERPT_CONTEXT),
+      Math.min(sourceText.length, index + sourceValue.length + MAX_COST_EXCERPT_CONTEXT),
+    )
+    .trim();
 }
 
 

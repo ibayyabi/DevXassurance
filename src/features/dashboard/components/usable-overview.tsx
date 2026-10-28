@@ -378,11 +378,11 @@ function BudgetComparison({ finding }: { finding: AssuranceFinding }) {
   return (
     <dl className="mt-5 grid gap-2 border-t border-ui-border pt-4">
       <ComparisonRow
-        label="Approved budget"
+        label="Accepted baseline"
         value={formatAmount(baseline, currency)}
       />
       <ComparisonRow
-        label="Current forecast"
+        label="Reported EAC"
         value={formatAmount(current, currency)}
       />
       <ComparisonRow
