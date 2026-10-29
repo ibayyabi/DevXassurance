@@ -404,21 +404,25 @@ function DocumentLibrary({
     if (!sourceRequest || focusedRequest.current === sourceRequest || search || Object.values(filters).some((value) => value !== "all")) return;
     const target = document.getElementById(`document-${sourceRequest.documentId}`);
     if (!target) return;
-    const group = target.closest("details[data-document-group]");
-    if (group instanceof HTMLDetailsElement) group.open = true;
     target.querySelectorAll<HTMLDetailsElement>("details[data-document-details]").forEach((details) => { details.open = true; });
     focusedRequest.current = sourceRequest;
     target.focus({ preventScroll: true });
     target.scrollIntoView({ block: "center" });
   }, [sourceRequest, filters, search]);
-  const filteredDocuments = documents.filter((document) =>
+  const categoryDocuments = documents.filter((document) =>
     document.fileName.toLowerCase().includes(search.trim().toLowerCase()) &&
-    (filters.type === "all" || document.effectiveDocumentType === filters.type) &&
     (filters.period === "all" || document.effectiveReportingPeriod === filters.period) &&
     (filters.workstream === "all" || document.effectiveWorkstream === filters.workstream) &&
     (filters.status === "all" || document.processingStatus === filters.status),
   );
-  const groups = groupDocuments(documents);
+  const filteredDocuments = categoryDocuments.filter((document) => filters.type === "all" || document.effectiveDocumentType === filters.type);
+  const activeFilters = [
+    search.trim() && `Filename: ${search.trim()}`,
+    filters.type !== "all" && `Category: ${documentTypeLabels[filters.type as keyof typeof documentTypeLabels]}`,
+    filters.period !== "all" && `Period: ${periodLabel(filters.period)}`,
+    filters.workstream !== "all" && `Workstream: ${filters.workstream}`,
+    filters.status !== "all" && `State: ${statusLabels[filters.status as keyof typeof statusLabels]}`,
+  ].filter(Boolean);
   const visibleIds = new Set(filteredDocuments.map((document) => document.id));
 
   return (
@@ -430,21 +434,18 @@ function DocumentLibrary({
           Project archive. Review roles are separate from artifact type.
         </p>
       </div>
-      <p className="text-sm text-ink-muted" role="status" aria-live="polite">
+      <p className="shrink-0 whitespace-nowrap text-sm text-ink-muted" role="status" aria-live="polite">
         {filteredDocuments.length} of {documents.length} file{documents.length === 1 ? "" : "s"}
       </p>
       </div>
       <div className="mt-4 flex flex-wrap items-end gap-2">
-        <label className="grid min-w-0 flex-1 gap-1 text-sm text-ink">Search filenames
+        <label className="grid min-w-0 flex-1 basis-full gap-1 text-sm text-ink sm:basis-64">Search filenames
           <Input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a loaded document" />
         </label>
         <Button type="button" variant="outline" onClick={() => setFilters({ ...filters, status: "failed" })} aria-pressed={filters.status === "failed"}>Failed</Button>
         <Button type="button" variant="outline" onClick={() => setFilters({ ...filters, status: "needs_review" })} aria-pressed={filters.status === "needs_review"}>Needs review</Button>
         <Button type="button" variant="outline" onClick={clearFilters}>Clear filters</Button>
-        <Button type="button" variant="outline" onClick={() => {
-          clearFilters();
-          document.querySelectorAll<HTMLDetailsElement>("#evidence-library details[data-document-group]").forEach((group) => { group.open = true; });
-        }}>All documents</Button>
+        <Button type="button" variant="outline" onClick={clearFilters}>All documents</Button>
       </div>
       <details className="mt-4">
         <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Additional filters</summary>
@@ -479,8 +480,18 @@ function DocumentLibrary({
         </label>
       </div>
       </details>
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <label className="flex min-w-0 flex-wrap items-center gap-2 text-xs font-medium text-ink-muted">
+          Document category
+          <select aria-label="Document category" aria-controls="document-results" value={filters.type} onChange={(event) => setFilters({ ...filters, type: event.target.value })} className="h-9 max-w-full rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+            <option value="all">All categories ({categoryDocuments.length})</option>
+            {documentTypes.map((type) => <option key={type} value={type}>{documentTypeLabels[type]} ({categoryDocuments.filter((document) => document.effectiveDocumentType === type).length})</option>)}
+          </select>
+        </label>
+        {activeFilters.length > 0 && <p className="min-w-0 break-words text-xs text-ink-muted">{activeFilters.join(" / ")}</p>}
+      </div>
       {documents.length > 0 && filteredDocuments.length === 0 && <p className="mt-4 text-sm text-ink-muted" role="status">No documents match these filters.</p>}
-      <div className="mt-4 grid gap-5">
+      <div id="document-results" hidden={documents.length > 0 && filteredDocuments.length === 0} className="mt-3 overflow-hidden rounded-lg border border-ui-border">
         {documents.length === 0 ? (
           <div className="rounded-xl border border-dashed border-ui-border bg-base p-6">
             <FileClock className="h-7 w-7 text-ink-muted" />
@@ -491,27 +502,22 @@ function DocumentLibrary({
           </div>
         ) : (
 
-          groups.map((group) => (
-            <details key={group.key} data-document-group={group.key} open hidden={!group.documents.some((document) => visibleIds.has(document.id))}>
-              <summary className="mb-2 cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
-                <span className="text-sm font-semibold text-ink">{group.label}</span>
-                <span className="text-xs text-ink-muted">
-                  {group.documents.filter((document) => visibleIds.has(document.id)).length} matching files
-                </span>
-              </summary>
-              <div className="grid gap-3">
-                {group.documents.map((document) => (
-                  <DocumentRow
-                    key={document.id}
-                    projectId={projectId}
-                    document={document}
-                    hidden={!visibleIds.has(document.id)}
-                    summary={summaries.find((item) => item.selectedDocumentIds.includes(document.id))}
-                  />
-                ))}
+          <>
+            {filteredDocuments.length > 0 && (
+              <div aria-hidden="true" className="hidden grid-cols-[minmax(0,1fr)_10rem_8rem_10rem] items-center gap-3 border-b border-ui-border bg-base px-3 py-2 text-xs font-medium text-ink-muted xl:grid">
+                <span>Document</span><span>Artifact type</span><span>Reporting period</span><span>Processing state</span>
               </div>
-            </details>
-          ))
+            )}
+            {documents.map((document) => (
+              <DocumentRow
+                key={document.id}
+                projectId={projectId}
+                document={document}
+                hidden={!visibleIds.has(document.id)}
+                summary={summaries.find((item) => item.selectedDocumentIds.includes(document.id))}
+              />
+            ))}
+          </>
         )}
       </div>
     </section>
@@ -530,7 +536,18 @@ function DocumentRow({
   summary?: DocumentSummary;
 }) {
   return (
-    <article hidden={hidden} tabIndex={-1} id={`document-${document.id}`} className="rounded-xl border border-ui-border bg-surface p-4 transition-colors hover:border-ui-border">
+    <article hidden={hidden} tabIndex={-1} id={`document-${document.id}`} className="border-b border-ui-border last:border-b-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand">
+      <details data-document-details className="group">
+        <summary className="grid cursor-pointer list-none grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-3 py-3 text-sm text-ink hover:bg-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand xl:grid-cols-[minmax(0,1fr)_10rem_8rem_10rem] [&::-webkit-details-marker]:hidden">
+          <span className="col-span-2 flex min-w-0 items-center gap-2 xl:col-span-1">
+            <span aria-hidden="true" className="text-ink-muted group-open:rotate-90">&#8250;</span>
+            <span className="truncate font-medium" title={document.fileName}>{document.fileName}</span>
+          </span>
+          <span className="min-w-0 truncate text-xs text-ink-muted">{documentTypeLabels[document.effectiveDocumentType]}</span>
+          <span className="hidden truncate text-xs text-ink-muted xl:block">{document.effectiveReportingPeriod ? periodLabel(document.effectiveReportingPeriod) : "Not assigned"}</span>
+          <span className="justify-self-end xl:justify-self-start"><StatusBadge status={document.processingStatus} /></span>
+        </summary>
+        <div className="border-t border-ui-border bg-base p-4">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex min-w-0 gap-3">
           <span className={`rounded-xl p-2.5 ${document.processingStatus === "completed" ? "bg-status-ok-bg text-status-ok-text" : document.processingStatus === "failed" ? "bg-status-critical-bg text-status-critical-text" : "bg-status-warn-bg text-status-warn-text"}`}>
@@ -579,7 +596,6 @@ function DocumentRow({
       </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        <StatusBadge status={document.processingStatus} />
         <MetadataBadge
           label="Type"
           value={documentTypeLabels[document.effectiveDocumentType]}
@@ -642,8 +658,7 @@ function DocumentRow({
       )}
 
       {summary?.qualityWarning && <p className="mt-3 rounded-lg bg-status-warn-bg p-3 text-sm text-status-warn-text">Reading limitation: {summary.qualityWarning}</p>}
-      <details data-document-details className="mt-3 text-sm">
-        <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Review details: summary, rationale, and metadata</summary>
+      <section className="mt-3 text-sm" aria-label="Summary, rationale, and metadata">
       {document.classificationReason && (
         <p className="mt-3 text-sm leading-6 text-ink-muted">
           <span className="font-medium text-ink">Suggestion basis:</span>{" "}
@@ -719,6 +734,8 @@ function DocumentRow({
           <Button type="submit" size="sm" className="sm:col-span-2">Save review metadata</Button>
         </form>
       </details>
+      </section>
+        </div>
       </details>
     </article>
   );
@@ -851,19 +868,6 @@ function formatDate(value: string) {
     day: "numeric",
     year: "numeric",
   }).format(new Date(value));
-}
-
-function groupDocuments(documents: EvidenceDocument[]) {
-  const groups = new Map<string, EvidenceDocument[]>();
-  for (const document of documents) {
-    const key = document.effectiveDocumentType;
-    const group = groups.get(key);
-    if (group) group.push(document);
-    else groups.set(key, [document]);
-  }
-  return documentTypes
-    .filter((type) => groups.has(type))
-    .map((type) => ({ key: type, label: documentTypeLabels[type], documents: groups.get(type)! }));
 }
 
 function uniqueDocumentValues(

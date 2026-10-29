@@ -243,6 +243,7 @@ test("Phase 6 browser journey: multi-file, ZIP safety, guided correction, retrie
   await page.reload();
   await page.getByRole("button", { name: "2. Baca & periksa", exact: true }).click();
   const failedArticle = documentArticle(page, failureFile.name);
+  await failedArticle.locator("details[data-document-details]").locator(":scope > summary").click();
   await expect(failedArticle.getByText("Failed", { exact: true })).toBeVisible();
   await failedArticle.getByRole("button", { name: "Retry document processing" }).click();
   await waitForJob(projectId, failureFile.name, failedWorker.jobId);
@@ -718,6 +719,7 @@ async function confirmMetadata(page: Page, fileName: string, values: {
   await page.reload();
   const updated = documentArticle(page, fileName);
   await page.getByRole("button", { name: "2. Baca & periksa", exact: true }).click();
+  await updated.locator("details[data-document-details]").locator(":scope > summary").click();
   await expect(updated.getByText(new RegExp(`Type: .*Confirmed`))).toBeVisible();
   await expect(updated.getByText(new RegExp(`Evidence role: .*Confirmed`))).toBeVisible();
   await expect(updated.getByText("Completed", { exact: true })).toBeVisible();
@@ -847,7 +849,7 @@ async function verifyGuidedInlineD2(page: Page) {
     await controls.getByRole("button", { name: "Clear filters", exact: true }).click();
     await expect(article).toBeVisible();
     await controls.getByText("Additional filters", { exact: true }).click();
-    const artifactFilter = library.locator("select").first();
+    const artifactFilter = library.getByLabel("Artifact type").first();
     const artifactValue = await metadata.locator('select[name="documentType"]').inputValue();
     await artifactFilter.selectOption(artifactValue);
     await controls.getByLabel("Search filenames").fill("no-matching-D2-filename");
@@ -861,13 +863,13 @@ async function verifyGuidedInlineD2(page: Page) {
       await expect(controls.getByLabel("Processing state")).toHaveValue(name === "Failed" ? "failed" : "needs_review");
     }
     await controls.getByRole("button", { name: "All documents", exact: true }).click();
-    const group = article.locator("xpath=ancestor::details[@data-document-group]");
-    await group.locator(":scope > summary").focus();
+    const rowDetails = article.locator("details[data-document-details]");
+    await rowDetails.locator(":scope > summary").focus();
     await page.keyboard.press("Enter");
     await expect(field).toBeHidden();
     await page.keyboard.press("Tab");
-    expect(await page.evaluate(() => document.activeElement?.closest("article") !== null)).toBe(false);
-    await group.locator(":scope > summary").focus();
+    expect(await page.evaluate(() => document.activeElement?.closest("details[data-document-details][open]") !== null)).toBe(false);
+    await rowDetails.locator(":scope > summary").focus();
     await page.keyboard.press("Enter");
     await expect(field).toHaveValue("D2 unsaved workstream");
     for (const name of ["1. Siapkan evidence", "2. Baca & periksa", "3. Tinjau hasil"]) {
