@@ -39,6 +39,30 @@ export type ProgressObservation = {
 };
 
 /**
+ * A single risk item as one source states it, preserved verbatim where stated.
+ * Identity is the source risk ID (matched exactly or via a reviewer-accepted
+ * mapping); a name alone never proves identity. The rating keeps its source
+ * label, its source numeric/ordinal value when stated, and its source scale, so
+ * ratings are compared only within the same scale or an accepted scale mapping.
+ */
+export type RiskSnapshot = {
+  sourceId: string | null;
+  name: string | null;
+  description: string | null;
+  status: string | null;
+  ratingLabel: string | null;
+  ratingValue: number | null;
+  scaleLabel: string | null;
+  owner: string | null;
+  mitigation: string | null;
+  dueDate: string | null;
+  wbs: string | null;
+  periodLabel: string | null;
+  asOfDate: string | null;
+  excerpt: string | null;
+};
+
+/**
  * Review-time extraction for the domains that still use the single review
  * prompt. Budget no longer appears here: project cost evidence comes from the
  * grouped extraction's cost observations and a reviewer-accepted baseline. The
@@ -52,6 +76,11 @@ export type ReviewExtraction = {
   };
   progress: {
     observations: ProgressObservation[];
+    confidence: number;
+  };
+  riskItems: {
+    baselineSnapshots: RiskSnapshot[];
+    currentSnapshots: RiskSnapshot[];
     confidence: number;
   };
   risk: {
@@ -87,18 +116,23 @@ export function parseReviewExtraction(
 ): ReviewExtraction | null {
   const schedule = record(value.schedule);
   const progress = record(value.progress);
+  const riskItems = record(value.risk_items);
   const risk = record(value.risk);
 
   if (
     !schedule ||
     !progress ||
+    !riskItems ||
     !risk ||
     !Array.isArray(schedule.baseline_milestones) ||
     !Array.isArray(schedule.current_milestones) ||
     !Array.isArray(progress.observations) ||
+    !Array.isArray(riskItems.baseline_snapshots) ||
+    !Array.isArray(riskItems.current_snapshots) ||
     typeof risk.has_current_evidence !== "boolean" ||
     !validConfidence(schedule.confidence) ||
     !validConfidence(progress.confidence) ||
+    !validConfidence(riskItems.confidence) ||
     !validConfidence(risk.confidence) ||
     ![risk.baseline_excerpt, risk.current_excerpt].every(validOptionalText) ||
     ![
@@ -114,10 +148,14 @@ export function parseReviewExtraction(
   const baselineMilestones = parseMilestones(schedule.baseline_milestones);
   const currentMilestones = parseMilestones(schedule.current_milestones);
   const progressObservations = parseProgress(progress.observations);
+  const baselineSnapshots = parseRiskSnapshots(riskItems.baseline_snapshots);
+  const currentSnapshots = parseRiskSnapshots(riskItems.current_snapshots);
   if (
     baselineMilestones === null ||
     currentMilestones === null ||
-    progressObservations === null
+    progressObservations === null ||
+    baselineSnapshots === null ||
+    currentSnapshots === null
   ) return null;
 
   return {
@@ -129,6 +167,11 @@ export function parseReviewExtraction(
     progress: {
       observations: progressObservations,
       confidence: confidence(progress.confidence),
+    },
+    riskItems: {
+      baselineSnapshots,
+      currentSnapshots,
+      confidence: confidence(riskItems.confidence),
     },
     risk: {
       hasCurrentEvidence: Boolean(risk.has_current_evidence),
@@ -201,6 +244,55 @@ function parseProgress(items: unknown[]): ProgressObservation[] | null {
       asOfDate: isoDate(observation.as_of_date),
       excerpt: nullableText(observation.excerpt),
     });
+  }
+  return parsed;
+}
+
+function parseRiskSnapshots(items: unknown[]): RiskSnapshot[] | null {
+  const parsed: RiskSnapshot[] = [];
+  for (const item of items) {
+    const snapshot = record(item);
+    if (!snapshot) return null;
+    if (
+      ![
+        snapshot.source_id,
+        snapshot.name,
+        snapshot.description,
+        snapshot.status,
+        snapshot.rating_label,
+        snapshot.scale_label,
+        snapshot.owner,
+        snapshot.mitigation,
+        snapshot.wbs,
+        snapshot.period_label,
+        snapshot.excerpt,
+      ].every(validOptionalText) ||
+      !validOptionalIsoDate(snapshot.due_date) ||
+      !validOptionalIsoDate(snapshot.as_of_date) ||
+      !validOptionalNumber(snapshot.rating_value)
+    ) return null;
+
+    const built: RiskSnapshot = {
+      sourceId: nullableText(snapshot.source_id),
+      name: nullableText(snapshot.name),
+      description: nullableText(snapshot.description),
+      status: nullableText(snapshot.status),
+      ratingLabel: nullableText(snapshot.rating_label),
+      ratingValue: snapshot.rating_value === null || snapshot.rating_value === undefined ? null : (snapshot.rating_value as number),
+      scaleLabel: nullableText(snapshot.scale_label),
+      owner: nullableText(snapshot.owner),
+      mitigation: nullableText(snapshot.mitigation),
+      dueDate: isoDate(snapshot.due_date),
+      wbs: nullableText(snapshot.wbs),
+      periodLabel: nullableText(snapshot.period_label),
+      asOfDate: isoDate(snapshot.as_of_date),
+      excerpt: nullableText(snapshot.excerpt),
+    };
+    // A fully empty item is noise; keep only items that state some identity or
+    // content. Nothing here infers a value the source did not state.
+    if (built.sourceId || built.name || built.description || built.excerpt) {
+      parsed.push(built);
+    }
   }
   return parsed;
 }
@@ -366,6 +458,14 @@ function validOptionalPercent(value: unknown) {
 
 function validOptionalText(value: unknown) {
   return value === null || value === undefined || typeof value === "string";
+}
+
+function validOptionalNumber(value: unknown) {
+  return (
+    value === null ||
+    value === undefined ||
+    (typeof value === "number" && Number.isFinite(value))
+  );
 }
 
 function validOptionalIsoDate(value: unknown) {

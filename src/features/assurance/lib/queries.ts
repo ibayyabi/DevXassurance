@@ -5,16 +5,20 @@ import {
   mapCostBaselineRow,
   mapCostObservationRow,
   mapMilestoneMappingRow,
+  mapRiskMappingRow,
   mapWbsMappingRow,
   milestoneMappingColumns,
+  riskMappingColumns,
   wbsMappingColumns,
   type CostBaselineRow,
   type CostObservationRow,
   type MilestoneMappingRow,
+  type RiskMappingRow,
   type WbsMappingRow,
 } from "@/features/assurance/lib/cost-queries";
 import type { WbsMapping } from "@/features/assurance/lib/cost-evidence";
 import type { MilestoneMapping } from "@/features/assurance/lib/schedule-comparison";
+import type { RiskMapping } from "@/features/assurance/lib/risk-comparison";
 import type {
   ReviewCondition,
   ReviewDomain,
@@ -149,7 +153,15 @@ type ActionRow = {
 
 export async function getAssuranceWorkspace(projectId: string) {
   const { supabase, membership } = await requireProjectMembership(projectId);
-  const [costResult, baselineResult, wbsLabelResult, mappingResult, milestoneMappingResult] = await Promise.all([
+  const [
+    costResult,
+    baselineResult,
+    wbsLabelResult,
+    mappingResult,
+    milestoneMappingResult,
+    riskIdentityResult,
+    riskScaleResult,
+  ] = await Promise.all([
     supabase
       .from("cost_observations")
       .select(costObservationColumns)
@@ -179,12 +191,24 @@ export async function getAssuranceWorkspace(projectId: string) {
       .select(milestoneMappingColumns)
       .eq("project_id", projectId)
       .order("created_at", { ascending: false }),
+    supabase
+      .from("risk_identity_mappings")
+      .select(riskMappingColumns)
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false }),
+    supabase
+      .from("risk_scale_mappings")
+      .select(riskMappingColumns)
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false }),
   ]);
   if (costResult.error) throw new Error(costResult.error.message);
   if (baselineResult.error) throw new Error(baselineResult.error.message);
   if (wbsLabelResult.error) throw new Error(wbsLabelResult.error.message);
   if (mappingResult.error) throw new Error(mappingResult.error.message);
   if (milestoneMappingResult.error) throw new Error(milestoneMappingResult.error.message);
+  if (riskIdentityResult.error) throw new Error(riskIdentityResult.error.message);
+  if (riskScaleResult.error) throw new Error(riskScaleResult.error.message);
 
   const costObservations = ((costResult.data ?? []) as CostObservationRow[]).map(
     mapCostObservationRow,
@@ -205,6 +229,12 @@ export async function getAssuranceWorkspace(projectId: string) {
   const milestoneMappings: MilestoneMapping[] = (
     (milestoneMappingResult.data ?? []) as MilestoneMappingRow[]
   ).map(mapMilestoneMappingRow);
+  const riskIdentityMappings: RiskMapping[] = (
+    (riskIdentityResult.data ?? []) as RiskMappingRow[]
+  ).map(mapRiskMappingRow);
+  const riskScaleMappings: RiskMapping[] = (
+    (riskScaleResult.data ?? []) as RiskMappingRow[]
+  ).map(mapRiskMappingRow);
   const [documentsResult, reviewsResult] = await Promise.all([
     supabase
       .from("documents")
@@ -268,6 +298,8 @@ export async function getAssuranceWorkspace(projectId: string) {
       wbsScopeLabels,
       wbsMappings,
       milestoneMappings,
+      riskIdentityMappings,
+      riskScaleMappings,
     };
   }
 
@@ -357,5 +389,7 @@ export async function getAssuranceWorkspace(projectId: string) {
     wbsScopeLabels,
     wbsMappings,
     milestoneMappings,
+    riskIdentityMappings,
+    riskScaleMappings,
   };
 }

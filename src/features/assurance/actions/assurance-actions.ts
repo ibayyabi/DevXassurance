@@ -19,12 +19,15 @@ import {
   mapCostBaselineRow,
   mapCostObservationRow,
   mapMilestoneMappingRow,
+  mapRiskMappingRow,
   mapWbsMappingRow,
   milestoneMappingColumns,
+  riskMappingColumns,
   wbsMappingColumns,
   type CostBaselineRow,
   type CostObservationRow,
   type MilestoneMappingRow,
+  type RiskMappingRow,
   type WbsMappingRow,
 } from "@/features/assurance/lib/cost-queries";
 import {
@@ -37,6 +40,11 @@ import {
   buildScheduleFinding,
   milestoneSourceLabels,
 } from "@/features/assurance/lib/schedule-comparison";
+import {
+  buildRiskComparison,
+  riskSourceIds,
+  riskSourceScales,
+} from "@/features/assurance/lib/risk-comparison";
 import { reviewEvidenceIssue } from "@/features/assurance/lib/evidence-readiness";
 import { requireProjectMembership } from "@/features/projects/lib/queries";
 import { canApproveAssuranceBaseline, canManageProject } from "@/features/projects/lib/roles";
@@ -291,6 +299,12 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
     ...extraction.progress.observations.map((observation) => ({
       role: observation.role, excerpt: observation.excerpt, required: observation.percent !== null,
     })),
+    ...extraction.riskItems.baselineSnapshots.map((snapshot) => ({
+      role: "baseline" as const, excerpt: snapshot.excerpt, required: false,
+    })),
+    ...extraction.riskItems.currentSnapshots.map((snapshot) => ({
+      role: "current" as const, excerpt: snapshot.excerpt, required: false,
+    })),
   ];
   const verifiedSources: VerifiedSource[] = [];
   let unverifiable = false;
@@ -323,6 +337,7 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
     reportingPeriod,
   );
   const schedule = await buildScheduleComparison(supabase, projectId, extraction);
+  const risk = await buildRiskSnapshotComparison(supabase, projectId, extraction);
   const findings = evaluateAssuranceReview(extraction, budgetFinding, schedule.finding).map((finding) => ({
     ...finding,
     sourceExcerpts: finding.sourceExcerpts.map((source) => ({
@@ -418,6 +433,12 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
         schedule_milestone_comparisons: schedule.comparisons,
         schedule_milestone_labels: schedule.milestoneLabels,
         progress_observations: schedule.progress,
+        // Item-level risk findings sit beside the Risk domain condition; no
+        // project Risk score or composite is produced.
+        risk_item_findings: risk.comparison.items,
+        risk_unidentified_items: risk.comparison.unidentified,
+        risk_source_ids: risk.sourceIds,
+        risk_source_scales: risk.sourceScales,
       },
       updated_at: new Date().toISOString(),
     })
@@ -650,6 +671,97 @@ export async function removeMilestoneMapping(formData: FormData): Promise<void> 
   if (error) throw new Error(error.message);
 
   revalidateAssurance(projectId);
+}
+
+async function acceptRiskMapping(
+  table: "risk_identity_mappings" | "risk_scale_mappings",
+  formData: FormData,
+): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const sourceLabel = String(formData.get("sourceLabel") ?? "").trim();
+  const canonicalLabel = String(formData.get("canonicalLabel") ?? "").trim();
+  const note = String(formData.get("note") ?? "").trim();
+
+  if (!projectId || !sourceLabel || !canonicalLabel) {
+    throw new Error("Provide the source label and the canonical label it maps to.");
+  }
+  if (sourceLabel === canonicalLabel) {
+    throw new Error("A label mapped to itself is not a mapping; identical labels already match.");
+  }
+
+  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  // One accepted canonical target per source label: replace any prior one.
+  const { error: clearError } = await supabase
+    .from(table)
+    .delete()
+    .eq("project_id", projectId)
+    .eq("source_label", sourceLabel)
+    .eq("state", "accepted");
+  if (clearError) throw new Error(clearError.message);
+
+  const { error: insertError } = await supabase.from(table).insert({
+    project_id: projectId,
+    source_label: sourceLabel,
+    canonical_label: canonicalLabel,
+    state: "accepted",
+    proposed_by_model: false,
+    note: note || null,
+    created_by: user.id,
+    accepted_by: user.id,
+    accepted_at: new Date().toISOString(),
+  });
+  if (insertError) throw new Error(insertError.message);
+
+  revalidateAssurance(projectId);
+}
+
+async function removeRiskMapping(
+  table: "risk_identity_mappings" | "risk_scale_mappings",
+  formData: FormData,
+): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const mappingId = String(formData.get("mappingId") ?? "");
+  if (!projectId || !mappingId) throw new Error("Choose a mapping to remove.");
+
+  const { supabase, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  const { error } = await supabase
+    .from(table)
+    .delete()
+    .eq("project_id", projectId)
+    .eq("id", mappingId);
+  if (error) throw new Error(error.message);
+
+  revalidateAssurance(projectId);
+}
+
+/**
+ * Accepts a reviewer-stated mapping that two differing risk IDs are the same
+ * risk, reusable within the project. Only after acceptance does the comparison
+ * group them; identical IDs already match directly. A name alone never maps.
+ */
+export async function acceptRiskIdentityMapping(formData: FormData): Promise<void> {
+  await acceptRiskMapping("risk_identity_mappings", formData);
+}
+
+export async function removeRiskIdentityMapping(formData: FormData): Promise<void> {
+  await removeRiskMapping("risk_identity_mappings", formData);
+}
+
+/**
+ * Accepts a reviewer-stated mapping that a source rating scale aligns to a
+ * canonical scale, reusable within the project. Only after acceptance are
+ * ratings on those scales compared; identical scales already match.
+ */
+export async function acceptRiskScaleMapping(formData: FormData): Promise<void> {
+  await acceptRiskMapping("risk_scale_mappings", formData);
+}
+
+export async function removeRiskScaleMapping(formData: FormData): Promise<void> {
+  await removeRiskMapping("risk_scale_mappings", formData);
 }
 
 /**
@@ -961,6 +1073,47 @@ async function buildScheduleComparison(
   return { finding, comparisons, progress, milestoneLabels };
 }
 
+/**
+ * Item-level risk comparison for this review. Risks are matched only by exact
+ * source ID or a reviewer-accepted identity mapping, and ratings compare only
+ * within the same scale or an accepted scale mapping; both mapping sets are
+ * reusable within the project. No project Risk score or composite is produced —
+ * the Risk domain condition stays separate.
+ */
+async function buildRiskSnapshotComparison(
+  supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
+  projectId: string,
+  extraction: ReviewExtraction,
+) {
+  const [identityResult, scaleResult] = await Promise.all([
+    supabase
+      .from("risk_identity_mappings")
+      .select(riskMappingColumns)
+      .eq("project_id", projectId)
+      .eq("state", "accepted"),
+    supabase
+      .from("risk_scale_mappings")
+      .select(riskMappingColumns)
+      .eq("project_id", projectId)
+      .eq("state", "accepted"),
+  ]);
+  if (identityResult.error) throw new Error(identityResult.error.message);
+  if (scaleResult.error) throw new Error(scaleResult.error.message);
+
+  const identityMappings = ((identityResult.data ?? []) as RiskMappingRow[]).map(mapRiskMappingRow);
+  const scaleMappings = ((scaleResult.data ?? []) as RiskMappingRow[]).map(mapRiskMappingRow);
+
+  const comparison = buildRiskComparison({
+    baselineSnapshots: extraction.riskItems.baselineSnapshots,
+    currentSnapshots: extraction.riskItems.currentSnapshots,
+    identityMappings,
+    scaleMappings,
+  });
+  const sourceIds = riskSourceIds(extraction.riskItems);
+  const sourceScales = riskSourceScales(extraction.riskItems);
+  return { comparison, sourceIds, sourceScales };
+}
+
 // The reviewed month's last day: a baseline accepted later does not apply.
 function reportingPeriodEnd(reportingPeriod: string) {
   const start = new Date(`${reportingPeriod.slice(0, 10)}T00:00:00Z`);
@@ -981,6 +1134,7 @@ Rules:
 - Report each progress percentage exactly as stated, at the level it is stated (project or WBS). Never sum or average WBS percentages into a project figure.
 - has_current_evidence is true only when current evidence contains identifiable risk information.
 - Counts must represent explicit open risks. Do not treat an absent statement as zero unless the evidence explicitly indicates none.
+- For risk_items, list each risk item under the ID and scale its own evidence uses. Never match risks across groups, rename them, or align rating scales; the application matches by exact ID or a reviewer-accepted mapping. Set rating_value only when the source states a number for the rating; otherwise null. Do not label an item new or increased.
 - Copy short source excerpts verbatim enough for a reviewer to locate the evidence. Record each source's own period or as-of date when it states one.
 
 Do not extract cost or budget values here; project cost evidence is collected separately.
@@ -1020,6 +1174,28 @@ Return exactly:
         "excerpt": "verbatim source text or null"
       }
     ],
+    "confidence": 0.0
+  },
+  "risk_items": {
+    "baseline_snapshots": [
+      {
+        "source_id": "risk ID as stated, or null",
+        "name": "short risk name or null",
+        "description": "risk description or null",
+        "status": "status as stated or null",
+        "rating_label": "rating as stated (e.g. High) or null",
+        "rating_value": null,
+        "scale_label": "rating scale as stated (e.g. 1-5, Low/Med/High) or null",
+        "owner": "owner as stated or null",
+        "mitigation": "mitigation as stated or null",
+        "due_date": "YYYY-MM-DD or null",
+        "wbs": "WBS label or null",
+        "period_label": "source period or null",
+        "as_of_date": "YYYY-MM-DD or null",
+        "excerpt": "verbatim source text or null"
+      }
+    ],
+    "current_snapshots": [],
     "confidence": 0.0
   },
   "risk": {
