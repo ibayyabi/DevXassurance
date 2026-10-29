@@ -732,68 +732,67 @@ function ExtractedInformationPanel({
   facts: ExtractedFact[];
 }) {
   return (
-    <div className="space-y-4">
+    <div className="overflow-hidden rounded-lg border border-ui-border">
+      <div aria-hidden="true" className="hidden grid-cols-[1rem_minmax(0,1fr)_10rem_12rem] gap-x-2 border-b border-ui-border px-3 py-2 text-xs font-medium text-ink-muted xl:grid">
+        <span />
+        <span>Extracted item</span>
+        <span>Review status</span>
+        <span>Source</span>
+      </div>
       {factTypes.map((type) => {
         const groupedFacts = facts.filter((fact) => fact.factType === type);
         return (
-          <section key={type} aria-label={factTypeLabels[type]} className="min-w-0">
-            <h3 className="text-sm font-semibold text-ink">
+          <section key={type} aria-label={factTypeLabels[type]} className="min-w-0 border-b border-ui-border last:border-b-0">
+            <h3 className="bg-base px-3 py-2 text-xs font-semibold text-ink">
               {factTypeLabels[type]} ({groupedFacts.length})
             </h3>
-            <div className="mt-3 grid gap-2">
+            <div className="divide-y divide-ui-border">
               {groupedFacts.length === 0 ? (
-                <p className="text-sm text-ink-muted">No extracted items available.</p>
+                <p className="px-3 py-2 text-xs text-ink-muted">No extracted items available.</p>
               ) : (
                 groupedFacts.map((fact) => (
-                  <div key={fact.id} className="min-w-0 rounded-lg border border-ui-border bg-surface">
-                    <details data-extracted-fact>
-                      <summary className="cursor-pointer rounded-lg px-3 py-2 text-sm text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
-                        <span className="ml-1 inline-grid w-[calc(100%-2rem)] align-top">
-                          <span className="line-clamp-2 font-medium [overflow-wrap:anywhere]">
-                            {(fact.editedValue ?? fact.extractedText).slice(0, 160)}{(fact.editedValue ?? fact.extractedText).length > 160 ? "..." : ""}
-                          </span>
-                          <span className="mt-1 text-xs text-ink-muted">{fact.confirmationState === "user_confirmed" ? "Reviewer confirmed" : fact.confirmationState === "user_edited" ? "Reviewer edited" : "AI-extracted suggestion"}</span>
-                        </span>
-                      </summary>
-                      <div className="space-y-2 border-t border-ui-border p-3 text-sm [overflow-wrap:anywhere]">
-                        {fact.editedValue !== null && <p className="whitespace-pre-wrap text-ink"><span className="font-medium">Reviewer correction:</span> {fact.editedValue}</p>}
-                        <p className="whitespace-pre-wrap text-ink"><span className="font-medium">AI-extracted text:</span> {fact.extractedText}</p>
-                        <p className="text-xs text-ink-muted">Extraction confidence: {Math.round(fact.confidence * 100)}%</p>
-                        <p className="whitespace-pre-wrap text-sm text-ink-muted">Original extraction: {fact.originalValue}</p>
-                        <ul className="mt-2 space-y-2 text-sm text-ink-muted" aria-label="Fact sources">
-                          {fact.evidenceLinks.map((source) => (
-                            <li key={source.id}>
-                              <SourceReference documentId={source.documentId} title={source.documentTitle} />
-                              {source.excerpt && <p className="break-words leading-6">{source.excerpt}</p>}
-                            </li>
-                          ))}
-                        </ul>
-                        <form action={updateExtractedFact} className="mt-3 flex flex-wrap gap-2">
-                          <input type="hidden" name="projectId" value={projectId} />
-                          <input type="hidden" name="factId" value={fact.id} />
-                          <Input
-                            name="editedValue"
-                            aria-label={`Correct extracted ${factTypeLabels[type]} value`}
-                            placeholder="Correct extracted value"
-                            defaultValue={fact.editedValue ?? ""}
-                            className="h-9 min-w-0 flex-1 basis-48"
-                          />
-                          <Button type="submit" size="sm" variant="outline">
-                            Save
-                          </Button>
-                        </form>
-                      </div>
-                    </details>
-                    <div className="flex min-w-0 gap-1 border-t border-ui-border px-3 py-2 text-xs text-ink-muted">
-                      <span>Source:</span>
-                      {fact.evidenceLinks.length > 0 ? (
-                        <span className="min-w-0 [&>button]:line-clamp-1 [overflow-wrap:anywhere]">
-                          <SourceReference documentId={fact.evidenceLinks[0].documentId} title={fact.evidenceLinks[0].documentTitle} />
-                          {fact.evidenceLinks.length > 1 && <span> +{fact.evidenceLinks.length - 1} more in details</span>}
-                        </span>
-                      ) : <span>No source reference available</span>}
+                  <details key={fact.id} data-extracted-fact className="group min-w-0">
+                    <summary className="grid cursor-pointer list-none grid-cols-[1rem_minmax(0,1fr)] items-center gap-x-2 gap-y-1 px-3 py-3 text-sm text-ink hover:bg-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand xl:grid-cols-[1rem_minmax(0,1fr)_10rem_12rem] [&::-webkit-details-marker]:hidden">
+                      <span aria-hidden="true" className="self-start text-ink-muted group-open:rotate-90">&#8250;</span>
+                      <span className="line-clamp-2 min-w-0 font-medium [overflow-wrap:anywhere] xl:line-clamp-1">
+                        {(fact.editedValue ?? fact.extractedText).slice(0, 160)}{(fact.editedValue ?? fact.extractedText).length > 160 ? "..." : ""}
+                      </span>
+                      <span className="col-start-2 text-xs text-ink-muted xl:col-start-auto">{fact.confirmationState === "user_confirmed" ? "Reviewer confirmed" : fact.confirmationState === "user_edited" ? "Reviewer edited" : "AI-extracted suggestion"}</span>
+                      <span className="col-start-2 min-w-0 truncate text-xs text-ink-muted xl:col-start-auto">
+                        <span className="xl:hidden">Source: </span>
+                        {fact.evidenceLinks[0]?.documentTitle ?? "No source reference available"}
+                        {fact.evidenceLinks.length > 1 && ` (+${fact.evidenceLinks.length - 1})`}
+                      </span>
+                    </summary>
+                    <div className="space-y-3 border-t border-ui-border bg-base p-4 text-sm [overflow-wrap:anywhere]">
+                      {fact.editedValue !== null && <p className="whitespace-pre-wrap text-ink"><span className="font-medium">Reviewer correction:</span> {fact.editedValue}</p>}
+                      <p className="whitespace-pre-wrap text-ink"><span className="font-medium">AI-extracted text:</span> {fact.extractedText}</p>
+                      <p className="text-xs text-ink-muted">Extraction confidence: {Math.round(fact.confidence * 100)}%</p>
+                      <p className="whitespace-pre-wrap text-sm text-ink-muted">Original extraction: {fact.originalValue}</p>
+                      <ul className="mt-2 space-y-2 text-sm text-ink-muted" aria-label="Fact sources">
+                        {fact.evidenceLinks.map((source) => (
+                          <li key={source.id}>
+                            <SourceReference documentId={source.documentId} title={source.documentTitle} />
+                            {source.excerpt && <p className="break-words leading-6">{source.excerpt}</p>}
+                          </li>
+                        ))}
+                      </ul>
+                      <form action={updateExtractedFact} className="mt-3 flex flex-wrap gap-2">
+                        <input type="hidden" name="projectId" value={projectId} />
+                        <input type="hidden" name="factId" value={fact.id} />
+                        <Input
+                          name="editedValue"
+                          aria-label={`Correct extracted ${factTypeLabels[type]} value`}
+                          placeholder="Correct extracted value"
+                          defaultValue={fact.editedValue ?? ""}
+                          className="h-9 min-w-0 flex-1 basis-48"
+                        />
+                        <Button type="submit" size="sm" variant="outline">
+                          Save
+                        </Button>
+                      </form>
                     </div>
-                  </div>
+                  </details>
                 ))
               )}
             </div>

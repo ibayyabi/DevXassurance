@@ -36,6 +36,8 @@ test("compact facts retain full evidence and explicit review states behind close
   assert.ok(summaries[0].includes(`${text.slice(0, 160)}...`));
   assert.ok(!summaries[0].includes(text));
   assert.match(summaries[0], /AI-extracted suggestion/);
+  assert.match(summaries[0], /October report/);
+  assert.doesNotMatch(summaries[0], /Original extraction|Extraction confidence/);
   assert.match(summaries[1], /Reviewer edited/);
   assert.match(summaries[2], /Reviewer confirmed/);
   assert.ok(html.includes(text));
@@ -50,7 +52,7 @@ test("compact facts retain full evidence and explicit review states behind close
   assert.match(html, /No source reference available/);
   assert.match(html, /Page 4: supplier delivery/);
   assert.match(html, /data-source-id="doc-2"/);
-  assert.match(html, /\+1 more in details/);
+  assert.match(html, /\(\+1\)/);
   assert.match(html, /name="factId" value="risk-1"/);
   assert.match(html, /name="projectId" value="project-1"/);
   assert.match(html, /action="\/existing-review-action"/);
