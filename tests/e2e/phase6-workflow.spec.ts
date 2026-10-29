@@ -827,6 +827,7 @@ async function verifyGuidedInlineD2(page: Page) {
   const originalFactEdit = hasFact ? await factInput.inputValue() : "";
   if (hasFact) {
     await page.getByText("Review extracted details", { exact: true }).click();
+    await factInput.locator("xpath=ancestor::details[@data-extracted-fact]").locator("summary").click();
     await factInput.fill("D2 unsaved fact correction");
     factNode = await factInput.elementHandle();
   }

@@ -732,47 +732,67 @@ function ExtractedInformationPanel({
   facts: ExtractedFact[];
 }) {
   return (
-    <div className="grid gap-5 lg:grid-cols-2">
+    <div className="space-y-4">
       {factTypes.map((type) => {
         const groupedFacts = facts.filter((fact) => fact.factType === type);
         return (
-          <section key={type} className="rounded-xl bg-base p-4">
+          <section key={type} aria-label={factTypeLabels[type]} className="min-w-0">
             <h3 className="text-sm font-semibold text-ink">
               {factTypeLabels[type]} ({groupedFacts.length})
             </h3>
             <div className="mt-3 grid gap-2">
               {groupedFacts.length === 0 ? (
-                <p className="text-sm text-ink-muted">Nothing extracted.</p>
+                <p className="text-sm text-ink-muted">No extracted items available.</p>
               ) : (
                 groupedFacts.map((fact) => (
-                  <div key={fact.id} className="rounded-lg border border-ui-border bg-surface p-3">
-                    <p className="break-words text-sm leading-6 text-ink">
-                      {fact.editedValue ?? fact.extractedText}
-                    </p>
-                    <p className="mt-1 text-sm text-ink-muted">{fact.confirmationState === "user_confirmed" ? "Reviewer confirmed" : fact.confirmationState === "user_edited" ? "Reviewer edited" : "AI-extracted suggestion"}</p>
-                    <p className="mt-1 break-words text-sm text-ink-muted">Original extraction: {fact.originalValue}</p>
-                    <ul className="mt-2 space-y-2 text-sm text-ink-muted" aria-label="Fact sources">
-                      {fact.evidenceLinks.map((source) => (
-                        <li key={source.id}>
-                          <SourceReference documentId={source.documentId} title={source.documentTitle} />
-                          {source.excerpt && <p className="break-words leading-6">{source.excerpt}</p>}
-                        </li>
-                      ))}
-                    </ul>
-                    <form action={updateExtractedFact} className="mt-3 flex gap-2">
-                      <input type="hidden" name="projectId" value={projectId} />
-                      <input type="hidden" name="factId" value={fact.id} />
-                      <Input
-                        name="editedValue"
-                        aria-label={`Correct extracted ${factTypeLabels[type]} value`}
-                        placeholder="Correct extracted value"
-                        defaultValue={fact.editedValue ?? ""}
-                        className="h-9"
-                      />
-                      <Button type="submit" size="sm" variant="outline">
-                        Save
-                      </Button>
-                    </form>
+                  <div key={fact.id} className="min-w-0 rounded-lg border border-ui-border bg-surface">
+                    <details data-extracted-fact>
+                      <summary className="cursor-pointer rounded-lg px-3 py-2 text-sm text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+                        <span className="ml-1 inline-grid w-[calc(100%-2rem)] align-top">
+                          <span className="line-clamp-2 font-medium [overflow-wrap:anywhere]">
+                            {(fact.editedValue ?? fact.extractedText).slice(0, 160)}{(fact.editedValue ?? fact.extractedText).length > 160 ? "..." : ""}
+                          </span>
+                          <span className="mt-1 text-xs text-ink-muted">{fact.confirmationState === "user_confirmed" ? "Reviewer confirmed" : fact.confirmationState === "user_edited" ? "Reviewer edited" : "AI-extracted suggestion"}</span>
+                        </span>
+                      </summary>
+                      <div className="space-y-2 border-t border-ui-border p-3 text-sm [overflow-wrap:anywhere]">
+                        {fact.editedValue !== null && <p className="whitespace-pre-wrap text-ink"><span className="font-medium">Reviewer correction:</span> {fact.editedValue}</p>}
+                        <p className="whitespace-pre-wrap text-ink"><span className="font-medium">AI-extracted text:</span> {fact.extractedText}</p>
+                        <p className="text-xs text-ink-muted">Extraction confidence: {Math.round(fact.confidence * 100)}%</p>
+                        <p className="whitespace-pre-wrap text-sm text-ink-muted">Original extraction: {fact.originalValue}</p>
+                        <ul className="mt-2 space-y-2 text-sm text-ink-muted" aria-label="Fact sources">
+                          {fact.evidenceLinks.map((source) => (
+                            <li key={source.id}>
+                              <SourceReference documentId={source.documentId} title={source.documentTitle} />
+                              {source.excerpt && <p className="break-words leading-6">{source.excerpt}</p>}
+                            </li>
+                          ))}
+                        </ul>
+                        <form action={updateExtractedFact} className="mt-3 flex flex-wrap gap-2">
+                          <input type="hidden" name="projectId" value={projectId} />
+                          <input type="hidden" name="factId" value={fact.id} />
+                          <Input
+                            name="editedValue"
+                            aria-label={`Correct extracted ${factTypeLabels[type]} value`}
+                            placeholder="Correct extracted value"
+                            defaultValue={fact.editedValue ?? ""}
+                            className="h-9 min-w-0 flex-1 basis-48"
+                          />
+                          <Button type="submit" size="sm" variant="outline">
+                            Save
+                          </Button>
+                        </form>
+                      </div>
+                    </details>
+                    <div className="flex min-w-0 gap-1 border-t border-ui-border px-3 py-2 text-xs text-ink-muted">
+                      <span>Source:</span>
+                      {fact.evidenceLinks.length > 0 ? (
+                        <span className="min-w-0 [&>button]:line-clamp-1 [overflow-wrap:anywhere]">
+                          <SourceReference documentId={fact.evidenceLinks[0].documentId} title={fact.evidenceLinks[0].documentTitle} />
+                          {fact.evidenceLinks.length > 1 && <span> +{fact.evidenceLinks.length - 1} more in details</span>}
+                        </span>
+                      ) : <span>No source reference available</span>}
+                    </div>
                   </div>
                 ))
               )}
