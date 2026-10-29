@@ -242,10 +242,10 @@ test("Phase 6 browser journey: multi-file, ZIP safety, guided correction, retrie
   expect(failedWorker.payload.errorCode).toBeTruthy();
   await page.reload();
   await page.getByRole("button", { name: "2. Baca & periksa", exact: true }).click();
-  const failedArticle = documentArticle(page, failureFile.name);
-  await failedArticle.locator("details[data-document-details]").locator(":scope > summary").click();
-  await expect(failedArticle.getByText("Failed", { exact: true })).toBeVisible();
+  const failedArticle = await openDocumentDetails(page, failureFile.name);
+  await expect(failedArticle.getByText("Failed", { exact: true }).first()).toBeVisible();
   await failedArticle.getByRole("button", { name: "Retry document processing" }).click();
+  await failedArticle.getByRole("button", { name: "Close document details", exact: true }).click();
   await waitForJob(projectId, failureFile.name, failedWorker.jobId);
   await processSuccessfully(failureFile.name);
   const noHintSuggestion = await getDocument(projectId, failureFile.name);
@@ -700,8 +700,7 @@ async function confirmMetadata(page: Page, fileName: string, values: {
   workstream: string;
 }) {
   await page.getByRole("button", { name: "2. Baca & periksa", exact: true }).click();
-  const article = documentArticle(page, fileName);
-  await article.locator("details[data-document-details]").evaluate((element) => { (element as HTMLDetailsElement).open = true; });
+  const article = await openDocumentDetails(page, fileName);
   await expect(article).toBeVisible({ timeout: 120_000 });
   const details = article.locator("summary").filter({ hasText: /^(Review suggestions|Edit confirmed metadata)$/ }).locator("..");
   if (!(await details.evaluate((element) => element.hasAttribute("open")))) {
@@ -719,14 +718,27 @@ async function confirmMetadata(page: Page, fileName: string, values: {
   await page.reload();
   const updated = documentArticle(page, fileName);
   await page.getByRole("button", { name: "2. Baca & periksa", exact: true }).click();
-  await updated.locator("details[data-document-details]").locator(":scope > summary").click();
+  await openDocumentDetails(page, fileName);
   await expect(updated.getByText(new RegExp(`Type: .*Confirmed`))).toBeVisible();
   await expect(updated.getByText(new RegExp(`Evidence role: .*Confirmed`))).toBeVisible();
-  await expect(updated.getByText("Completed", { exact: true })).toBeVisible();
+  await expect(updated.getByText("Completed", { exact: true }).first()).toBeVisible();
+  await updated.getByRole("button", { name: "Close document details", exact: true }).click();
+}
+
+async function openDocumentDetails(page: Page, fileName: string) {
+  const close = page.getByRole("button", { name: "Close document details", exact: true });
+  if (await close.count()) await close.click();
+  await page.getByRole("button", { name: "2. Baca & periksa", exact: true }).click();
+  const library = page.locator("#evidence-library");
+  await library.getByRole("button", { name: "All documents", exact: true }).click();
+  await library.getByLabel("Search filenames").fill(fileName);
+  const article = documentArticle(page, fileName);
+  await article.locator(":scope > button").click();
+  return article;
 }
 
 function documentArticle(page: Page, fileName: string) {
-  return page.getByRole("article").filter({ hasText: fileName });
+  return page.locator("#evidence-library article").filter({ hasText: fileName });
 }
 
 async function persistedReviewEvidence(projectId: string, reviewId: string) {
@@ -807,19 +819,21 @@ async function verifyGuidedInlineD2(page: Page) {
   const library = page.locator("#evidence-library");
   const controls = page.locator("#evidence-check");
   await page.getByRole("button", { name: "2. Baca & periksa", exact: true }).click();
-  await controls.getByRole("button", { name: "All documents", exact: true }).click();
-  const article = library.locator("article").first();
-  const articleId = await article.getAttribute("id");
-  await article.locator("details[data-document-details]").evaluate((element) => { (element as HTMLDetailsElement).open = true; });
+  await library.getByRole("button", { name: "All documents", exact: true }).click();
+  const articleId = await library.getByRole("article").first().getAttribute("id");
+  const article = library.locator(`article[id="${articleId}"]`);
+  const trigger = article.locator(":scope > button");
+  await trigger.click();
+  const panel = article.locator("dialog[data-document-details]");
   const metadata = article.locator("form").filter({ hasText: "Save review metadata" });
-  const disclosure = metadata.locator("..");
-  await disclosure.evaluate((element) => { (element as HTMLDetailsElement).open = true; });
+  await metadata.locator("..").evaluate((element) => { (element as HTMLDetailsElement).open = true; });
   const field = metadata.getByLabel("Workstream");
   const originalWorkstream = await field.inputValue();
   await field.fill("D2 unsaved workstream");
   const snapshot = await metadata.locator('input[type="hidden"]').evaluateAll((inputs) => inputs.map((input) => [(input as HTMLInputElement).name, (input as HTMLInputElement).value]));
   const rowNode = await article.elementHandle();
   const fieldNode = await field.elementHandle();
+  await panel.getByRole("button", { name: "Close document details", exact: true }).click();
   const upload = page.locator('input[type="file"]');
   await upload.setInputFiles({ name: "d2-selection-only.txt", mimeType: "text/plain", buffer: Buffer.from("Do not upload") });
   const uploadNode = await upload.elementHandle();
@@ -845,49 +859,45 @@ async function verifyGuidedInlineD2(page: Page) {
     await controls.getByLabel("Search filenames").fill("no-matching-D2-filename");
     await expect(article).toBeHidden();
     await expect(library.getByText("No documents match these filters.")).toBeVisible();
-    await expect(fieldNode!.evaluate((element) => element.isConnected)).resolves.toBe(true);
-    await controls.getByRole("button", { name: "Clear filters", exact: true }).click();
+    expect(await fieldNode!.evaluate((element) => element.isConnected)).toBe(true);
+    await library.getByRole("button", { name: "Clear filters", exact: true }).click();
     await expect(article).toBeVisible();
     await controls.getByText("Additional filters", { exact: true }).click();
     const artifactFilter = library.getByLabel("Artifact type").first();
+    const category = library.getByLabel("Document category", { exact: true });
     const artifactValue = await metadata.locator('select[name="documentType"]').inputValue();
     await artifactFilter.selectOption(artifactValue);
+    await expect(category).toHaveValue(artifactValue);
     await controls.getByLabel("Search filenames").fill("no-matching-D2-filename");
     await expect(article).toBeHidden();
-    await controls.getByRole("button", { name: "All documents", exact: true }).click();
+    await library.getByRole("button", { name: "All documents", exact: true }).click();
     await expect(artifactFilter).toHaveValue("all");
     await expect(controls.getByLabel("Search filenames")).toHaveValue("");
-    await expect(article).toBeVisible();
     for (const name of ["Failed", "Needs review"]) {
-      await controls.getByRole("button", { name, exact: true }).click();
+      await library.getByRole("button", { name, exact: true }).click();
       await expect(controls.getByLabel("Processing state")).toHaveValue(name === "Failed" ? "failed" : "needs_review");
     }
-    await controls.getByRole("button", { name: "All documents", exact: true }).click();
-    const rowDetails = article.locator("details[data-document-details]");
-    await rowDetails.locator(":scope > summary").focus();
+    await library.getByRole("button", { name: "All documents", exact: true }).click();
+    await trigger.focus();
     await page.keyboard.press("Enter");
-    await expect(field).toBeHidden();
-    await page.keyboard.press("Tab");
-    expect(await page.evaluate(() => document.activeElement?.closest("details[data-document-details][open]") !== null)).toBe(false);
-    await rowDetails.locator(":scope > summary").focus();
-    await page.keyboard.press("Enter");
+    await expect(panel).toBeVisible();
     await expect(field).toHaveValue("D2 unsaved workstream");
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    await expect(trigger).toBeFocused();
     for (const name of ["1. Siapkan evidence", "2. Baca & periksa", "3. Tinjau hasil"]) {
       await page.getByRole("navigation", { name: "Evidence steps" }).getByRole("button", { name, exact: true }).click();
       await expect(page.getByRole("button", { name, exact: true })).toHaveAttribute("aria-current", "step");
       const activePanel = name.startsWith("1.") ? "prepare" : name.startsWith("2.") ? "check" : "review";
-      for (const panel of ["prepare", "check", "review"]) {
-        if (panel === activePanel) await expect(page.locator(`#evidence-${panel}`)).toBeVisible();
-        else await expect(page.locator(`#evidence-${panel}`)).toBeHidden();
+      for (const step of ["prepare", "check", "review"]) {
+        if (step === activePanel) await expect(page.locator(`#evidence-${step}`)).toBeVisible();
+        else await expect(page.locator(`#evidence-${step}`)).toBeHidden();
       }
       await page.keyboard.press("Tab");
       expect(await page.evaluate(() => document.activeElement?.closest("[hidden]") !== null)).toBe(false);
-      if (activePanel !== "check") await expect(page.getByRole("article")).toHaveCount(0);
     }
-    await expect(rowNode!.evaluate((element, id) => element === document.getElementById(id!), articleId)).resolves.toBe(true);
-    await expect(fieldNode!.evaluate((element) => element.isConnected)).resolves.toBe(true);
-    await expect(library).toBeHidden();
-    await expect(field).toHaveValue("D2 unsaved workstream");
+    expect(await rowNode!.evaluate((element, id) => element === document.getElementById(id!), articleId)).toBe(true);
+    expect(await fieldNode!.evaluate((element) => element.isConnected)).toBe(true);
     expect(await metadata.locator('input[type="hidden"]').evaluateAll((inputs) => inputs.map((input) => [(input as HTMLInputElement).name, (input as HTMLInputElement).value]))).toEqual(snapshot);
     expect(await uploadNode!.evaluate((element) => (element as HTMLInputElement).files?.[0]?.name)).toBe("d2-selection-only.txt");
     if (hasFact) {
@@ -898,17 +908,19 @@ async function verifyGuidedInlineD2(page: Page) {
       if (await source.count()) {
         await controls.getByLabel("Search filenames").fill("no-matching-D2-filename");
         await source.click();
-        // A loaded target is revealed; an unavailable target is explained without retrieval.
         await expect.poll(async () => await controls.getByLabel("Search filenames").inputValue() === "" || await page.getByText("This source document is not available in the loaded collection.").isVisible()).toBe(true);
       }
     }
     expect(submissions).toBe(0);
     expect(mutations).toEqual([]);
   } finally {
+    await library.locator("dialog[open]").evaluateAll((items) => items.forEach((item) => (item as HTMLDialogElement).close()));
     await page.getByRole("button", { name: "2. Baca & periksa", exact: true }).click();
     page.off("request", onRequest);
-    await controls.getByRole("button", { name: "All documents", exact: true }).click();
+    await library.getByRole("button", { name: "All documents", exact: true }).click();
+    await trigger.click();
     await field.fill(originalWorkstream);
+    await panel.getByRole("button", { name: "Close document details", exact: true }).click();
     if (hasFact) await factInput.fill(originalFactEdit);
     await upload.setInputFiles([]);
   }

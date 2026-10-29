@@ -389,27 +389,19 @@ function DocumentLibrary({
 }) {
   const [filters, setFilters] = useState({ type: "all", period: "all", workstream: "all", status: "all" });
   const [search, setSearch] = useState("");
+  const [sort, setSort] = useState("newest");
+  const [page, setPage] = useState(0);
   const focusedRequest = useRef<typeof sourceRequest>(null);
+  function updateFilters(next: typeof filters) {
+    setFilters(next);
+    setPage(0);
+  }
   function clearFilters() {
-    setFilters({ type: "all", period: "all", workstream: "all", status: "all" });
+    updateFilters({ type: "all", period: "all", workstream: "all", status: "all" });
     setSearch("");
   }
-  useEffect(() => {
-    if (sourceRequest) {
-      setFilters({ type: "all", period: "all", workstream: "all", status: "all" });
-      setSearch("");
-    }
-  }, [sourceRequest]);
-  useEffect(() => {
-    if (!sourceRequest || focusedRequest.current === sourceRequest || search || Object.values(filters).some((value) => value !== "all")) return;
-    const target = document.getElementById(`document-${sourceRequest.documentId}`);
-    if (!target) return;
-    target.querySelectorAll<HTMLDetailsElement>("details[data-document-details]").forEach((details) => { details.open = true; });
-    focusedRequest.current = sourceRequest;
-    target.focus({ preventScroll: true });
-    target.scrollIntoView({ block: "center" });
-  }, [sourceRequest, filters, search]);
-  const categoryDocuments = documents.filter((document) =>
+  const sortedDocuments = [...documents].sort((left, right) => compareArchiveDocuments(left, right, sort));
+  const categoryDocuments = sortedDocuments.filter((document) =>
     document.fileName.toLowerCase().includes(search.trim().toLowerCase()) &&
     (filters.period === "all" || document.effectiveReportingPeriod === filters.period) &&
     (filters.workstream === "all" || document.effectiveWorkstream === filters.workstream) &&
@@ -423,7 +415,33 @@ function DocumentLibrary({
     filters.workstream !== "all" && `Workstream: ${filters.workstream}`,
     filters.status !== "all" && `State: ${statusLabels[filters.status as keyof typeof statusLabels]}`,
   ].filter(Boolean);
-  const visibleIds = new Set(filteredDocuments.map((document) => document.id));
+  const pageCount = Math.max(1, Math.ceil(filteredDocuments.length / 10));
+  const currentPage = Math.min(page, pageCount - 1);
+  const visibleIds = new Set(filteredDocuments.slice(currentPage * 10, (currentPage + 1) * 10).map((document) => document.id));
+
+  useEffect(() => {
+    if (!sourceRequest) return;
+    setFilters({ type: "all", period: "all", workstream: "all", status: "all" });
+    setSearch("");
+  }, [sourceRequest]);
+  useEffect(() => {
+    if (!sourceRequest || focusedRequest.current === sourceRequest || search || Object.values(filters).some((value) => value !== "all")) return;
+    const index = filteredDocuments.findIndex((document) => document.id === sourceRequest.documentId);
+    if (index < 0) return;
+    const sourcePage = Math.floor(index / 10);
+    if (currentPage !== sourcePage) {
+      setPage(sourcePage);
+      return;
+    }
+    const target = document.getElementById(`document-${sourceRequest.documentId}`);
+    const panel = target?.querySelector<HTMLDialogElement>("dialog[data-document-details]");
+    if (!target || !panel) return;
+    document.querySelectorAll<HTMLDialogElement>("#evidence-library dialog[open]").forEach((dialog) => dialog.close());
+    target.querySelector<HTMLButtonElement>(":scope > button")?.focus({ preventScroll: true });
+    target.scrollIntoView({ block: "center" });
+    panel.showModal();
+    focusedRequest.current = sourceRequest;
+  }, [sourceRequest, filters, search, currentPage, filteredDocuments]);
 
   return (
     <section id="evidence-library" tabIndex={-1} className="scroll-mt-24 rounded-2xl border border-ui-border bg-surface p-5 shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
@@ -435,15 +453,15 @@ function DocumentLibrary({
         </p>
       </div>
       <p className="shrink-0 whitespace-nowrap text-sm text-ink-muted" role="status" aria-live="polite">
-        {filteredDocuments.length} of {documents.length} file{documents.length === 1 ? "" : "s"}
+        {documents.length} file{documents.length === 1 ? "" : "s"} in archive
       </p>
       </div>
       <div className="mt-4 flex flex-wrap items-end gap-2">
         <label className="grid min-w-0 flex-1 basis-full gap-1 text-sm text-ink sm:basis-64">Search filenames
-          <Input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a loaded document" />
+          <Input type="search" value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder="Find a loaded document" />
         </label>
-        <Button type="button" variant="outline" onClick={() => setFilters({ ...filters, status: "failed" })} aria-pressed={filters.status === "failed"}>Failed</Button>
-        <Button type="button" variant="outline" onClick={() => setFilters({ ...filters, status: "needs_review" })} aria-pressed={filters.status === "needs_review"}>Needs review</Button>
+        <Button type="button" variant="outline" onClick={() => updateFilters({ ...filters, status: "failed" })} aria-pressed={filters.status === "failed"}>Failed</Button>
+        <Button type="button" variant="outline" onClick={() => updateFilters({ ...filters, status: "needs_review" })} aria-pressed={filters.status === "needs_review"}>Needs review</Button>
         <Button type="button" variant="outline" onClick={clearFilters}>Clear filters</Button>
         <Button type="button" variant="outline" onClick={clearFilters}>All documents</Button>
       </div>
@@ -452,28 +470,28 @@ function DocumentLibrary({
       <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <label className="grid gap-1 text-xs font-medium text-ink-muted">
           Artifact type
-          <select value={filters.type} onChange={(event) => setFilters({ ...filters, type: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+          <select value={filters.type} onChange={(event) => updateFilters({ ...filters, type: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
             <option value="all">All types</option>
             {documentTypes.map((type) => <option key={type} value={type}>{documentTypeLabels[type]}</option>)}
           </select>
         </label>
         <label className="grid gap-1 text-xs font-medium text-ink-muted">
           Reporting period
-          <select value={filters.period} onChange={(event) => setFilters({ ...filters, period: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+          <select value={filters.period} onChange={(event) => updateFilters({ ...filters, period: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
             <option value="all">All periods</option>
             {uniqueDocumentValues(documents, (document) => document.effectiveReportingPeriod).map((period) => <option key={period} value={period}>{periodLabel(period)}</option>)}
           </select>
         </label>
         <label className="grid gap-1 text-xs font-medium text-ink-muted">
           Workstream
-          <select value={filters.workstream} onChange={(event) => setFilters({ ...filters, workstream: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+          <select value={filters.workstream} onChange={(event) => updateFilters({ ...filters, workstream: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
             <option value="all">All workstreams</option>
             {uniqueDocumentValues(documents, (document) => document.effectiveWorkstream).map((workstream) => <option key={workstream} value={workstream}>{workstream}</option>)}
           </select>
         </label>
         <label className="grid gap-1 text-xs font-medium text-ink-muted">
           Processing state
-          <select value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+          <select value={filters.status} onChange={(event) => updateFilters({ ...filters, status: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
             <option value="all">All states</option>
             {Object.entries(statusLabels).map(([status, label]) => <option key={status} value={status}>{label}</option>)}
           </select>
@@ -483,9 +501,21 @@ function DocumentLibrary({
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <label className="flex min-w-0 flex-wrap items-center gap-2 text-xs font-medium text-ink-muted">
           Document category
-          <select aria-label="Document category" aria-controls="document-results" value={filters.type} onChange={(event) => setFilters({ ...filters, type: event.target.value })} className="h-9 max-w-full rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+          <select aria-label="Document category" aria-controls="document-results" value={filters.type} onChange={(event) => updateFilters({ ...filters, type: event.target.value })} className="h-9 max-w-full rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
             <option value="all">All categories ({categoryDocuments.length})</option>
             {documentTypes.map((type) => <option key={type} value={type}>{documentTypeLabels[type]} ({categoryDocuments.filter((document) => document.effectiveDocumentType === type).length})</option>)}
+          </select>
+        </label>
+        <label className="flex min-w-0 flex-wrap items-center gap-2 text-xs font-medium text-ink-muted">
+          Sort by
+          <select aria-label="Sort documents" value={sort} onChange={(event) => { setSort(event.target.value); setPage(0); }} className="h-9 max-w-full rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+            <option value="newest">Newest uploads</option>
+            <option value="name-asc">Filename A to Z</option>
+            <option value="name-desc">Filename Z to A</option>
+            <option value="type">Artifact type A to Z</option>
+            <option value="period-desc">Reporting period newest</option>
+            <option value="period-asc">Reporting period oldest</option>
+            <option value="status">Processing state A to Z</option>
           </select>
         </label>
         {activeFilters.length > 0 && <p className="min-w-0 break-words text-xs text-ink-muted">{activeFilters.join(" / ")}</p>}
@@ -504,11 +534,11 @@ function DocumentLibrary({
 
           <>
             {filteredDocuments.length > 0 && (
-              <div aria-hidden="true" className="hidden grid-cols-[minmax(0,1fr)_10rem_8rem_10rem] items-center gap-3 border-b border-ui-border bg-base px-3 py-2 text-xs font-medium text-ink-muted xl:grid">
+              <div aria-hidden="true" className="hidden grid-cols-[minmax(0,1fr)_9rem_8rem_9rem] items-center gap-3 border-b border-ui-border bg-base px-3 py-2 text-xs font-medium text-ink-muted xl:grid">
                 <span>Document</span><span>Artifact type</span><span>Reporting period</span><span>Processing state</span>
               </div>
             )}
-            {documents.map((document) => (
+            {sortedDocuments.map((document) => (
               <DocumentRow
                 key={document.id}
                 projectId={projectId}
@@ -519,6 +549,16 @@ function DocumentLibrary({
             ))}
           </>
         )}
+      </div>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+        <p role="status" aria-live="polite" className="text-sm text-ink-muted">
+          Showing {filteredDocuments.length ? currentPage * 10 + 1 : 0}&#8211;{Math.min((currentPage + 1) * 10, filteredDocuments.length)} of {filteredDocuments.length}
+        </p>
+        <nav aria-label="Document pages" className="flex items-center gap-2">
+          <Button type="button" variant="outline" size="sm" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>Previous</Button>
+          <span className="text-xs text-ink-muted">Page {currentPage + 1} of {pageCount}</span>
+          <Button type="button" variant="outline" size="sm" disabled={currentPage + 1 >= pageCount} onClick={() => setPage(currentPage + 1)}>Next</Button>
+        </nav>
       </div>
     </section>
   );
@@ -535,19 +575,28 @@ function DocumentRow({
   hidden: boolean;
   summary?: DocumentSummary;
 }) {
+  const panelRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    if (hidden && panelRef.current?.open) panelRef.current.close();
+  }, [hidden]);
   return (
     <article hidden={hidden} tabIndex={-1} id={`document-${document.id}`} className="border-b border-ui-border last:border-b-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand">
-      <details data-document-details className="group">
-        <summary className="grid cursor-pointer list-none grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-3 py-3 text-sm text-ink hover:bg-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand xl:grid-cols-[minmax(0,1fr)_10rem_8rem_10rem] [&::-webkit-details-marker]:hidden">
+        <button type="button" aria-haspopup="dialog" aria-controls={`document-panel-${document.id}`} onClick={() => panelRef.current?.showModal()} className="grid w-full cursor-pointer text-left grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-3 py-3.5 text-sm text-ink hover:bg-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand xl:grid-cols-[minmax(0,1fr)_9rem_8rem_9rem]">
           <span className="col-span-2 flex min-w-0 items-center gap-2 xl:col-span-1">
-            <span aria-hidden="true" className="text-ink-muted group-open:rotate-90">&#8250;</span>
+            <span aria-hidden="true" className="text-ink-muted">&#8250;</span>
             <span className="truncate font-medium" title={document.fileName}>{document.fileName}</span>
           </span>
           <span className="min-w-0 truncate text-xs text-ink-muted">{documentTypeLabels[document.effectiveDocumentType]}</span>
-          <span className="hidden truncate text-xs text-ink-muted xl:block">{document.effectiveReportingPeriod ? periodLabel(document.effectiveReportingPeriod) : "Not assigned"}</span>
+          <span className="hidden truncate text-xs text-ink-muted xl:block">{document.effectiveReportingPeriod ? periodLabel(document.effectiveReportingPeriod) : <span aria-label="Reporting period not provided">&#8212;</span>}</span>
           <span className="justify-self-end xl:justify-self-start"><StatusBadge status={document.processingStatus} /></span>
-        </summary>
-        <div className="border-t border-ui-border bg-base p-4">
+        </button>
+      <dialog ref={panelRef} data-document-details id={`document-panel-${document.id}`} aria-labelledby={`document-title-${document.id}`} className="fixed inset-y-0 left-auto right-0 m-0 h-dvh max-h-none w-full max-w-2xl overflow-y-auto overscroll-contain border-l border-ui-border bg-surface p-0 text-ink shadow-xl backdrop:bg-ink/20">
+        <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-ui-border bg-surface p-5">
+          <h3 id={`document-title-${document.id}`} className="min-w-0 text-base font-semibold text-ink [overflow-wrap:anywhere]">{document.fileName}</h3>
+          <Button type="button" variant="outline" size="sm" className="shrink-0" aria-label="Close document details" onClick={() => panelRef.current?.close()}>Close</Button>
+        </header>
+        <div className="p-5 [overflow-wrap:anywhere]">
+          <p className="mb-4 text-sm text-ink-muted">Processing state: <StatusBadge status={document.processingStatus} /></p>
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex min-w-0 gap-3">
           <span className={`rounded-xl p-2.5 ${document.processingStatus === "completed" ? "bg-status-ok-bg text-status-ok-text" : document.processingStatus === "failed" ? "bg-status-critical-bg text-status-critical-text" : "bg-status-warn-bg text-status-warn-text"}`}>
@@ -558,12 +607,9 @@ function DocumentRow({
             )}
           </span>
           <div className="min-w-0">
-            <h3 className="break-words font-semibold text-ink">
-              {document.fileName}
-            </h3>
             {document.title !== document.fileName && <p className="mt-1 text-sm text-ink-muted">{document.title}</p>}
             <p className="mt-1 text-xs leading-5 text-ink-muted">
-              {fileKindLabel(document.mimeType, document.fileName)} · {formatBytes(document.fileSize)} · {document.effectiveDocumentDate ? `Document date ${formatDate(document.effectiveDocumentDate)}` : "No document date"} · Uploaded ${formatDate(document.createdAt)}
+              {fileKindLabel(document.mimeType, document.fileName)} · {formatBytes(document.fileSize)} · {document.effectiveDocumentDate ? `Document date ${formatDate(document.effectiveDocumentDate)}` : "No document date"} · Uploaded {formatDate(document.createdAt)}
             </p>
             {document.submissionId && (
               <p className="mt-1 text-xs text-ink-muted">
@@ -736,7 +782,7 @@ function DocumentRow({
       </details>
       </section>
         </div>
-      </details>
+      </dialog>
     </article>
   );
 }
@@ -830,12 +876,12 @@ function StatusBadge({
       ? "bg-status-critical-bg text-status-critical-text"
       : status === "completed"
         ? "bg-status-ok-bg text-status-ok-text"
-        : status === "needs_review"
-          ? "bg-status-warn-bg text-status-warn-text"
+        : status === "cancelled"
+          ? "bg-base text-ink-muted"
           : "bg-status-warn-bg text-status-warn-text";
 
   return (
-    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${tone}`}>
+    <span className={`inline-block rounded-md px-2 py-0.5 text-xs font-medium ${tone}`}>
       {statusLabels[status]}
     </span>
   );
@@ -868,6 +914,19 @@ function formatDate(value: string) {
     day: "numeric",
     year: "numeric",
   }).format(new Date(value));
+}
+
+function compareArchiveDocuments(left: EvidenceDocument, right: EvidenceDocument, sort: string) {
+  if (sort === "newest") return right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id);
+  const value = (document: EvidenceDocument) => sort === "type" ? documentTypeLabels[document.effectiveDocumentType]
+    : sort === "status" ? statusLabels[document.processingStatus]
+    : sort.startsWith("period") ? document.effectiveReportingPeriod : document.fileName;
+  const leftValue = value(left);
+  const rightValue = value(right);
+  // Absent optional periods stay last in either direction.
+  if (!leftValue || !rightValue) return leftValue ? -1 : rightValue ? 1 : left.id.localeCompare(right.id);
+  const direction = sort === "name-desc" || sort === "period-desc" ? -1 : 1;
+  return direction * leftValue.localeCompare(rightValue, undefined, { numeric: true, sensitivity: "base" }) || left.id.localeCompare(right.id);
 }
 
 function uniqueDocumentValues(
