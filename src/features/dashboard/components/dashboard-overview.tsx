@@ -95,8 +95,8 @@ function EvidenceTrace({
     {
       label: "Summaries",
       value: evidenceStats.summaries,
-      href: "../reports",
-      help: "Grounded report inputs",
+      href: "../documents",
+      help: "Grounded document summaries",
     },
   ];
 

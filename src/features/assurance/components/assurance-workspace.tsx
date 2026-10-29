@@ -15,7 +15,6 @@ import {
   correctBudgetFinding,
   createAssuranceReview,
   runAssuranceAnalysis,
-  updateAssuranceAction,
 } from "@/features/assurance/actions/assurance-actions";
 import { CostBaselinePanel } from "@/features/assurance/components/cost-baseline-panel";
 import { WbsComparisonPanel } from "@/features/assurance/components/wbs-comparison-panel";
@@ -38,7 +37,7 @@ import { Button } from "@/components/ui/button";
 import { ReviewEvidenceFilters } from "@/features/assurance/components/review-evidence-filters";
 import { Input } from "@/components/ui/input";
 
-const steps = ["Evidence", "Analysis", "Findings", "Actions", "Report"];
+const steps = ["Evidence", "Analysis", "Findings"];
 
 export function AssuranceWorkspace({
   projectId,
@@ -201,30 +200,6 @@ export function AssuranceWorkspace({
         evidenceReady={reviewReady}
         canCorrect={canApproveBaseline}
       />
-      <ActionsStep projectId={projectId} review={review} />
-
-      <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-sm font-medium text-ink-muted">Step 5, Report</p>
-            <h2 className="mt-1 text-xl font-semibold text-ink">
-              Prepare the management report
-            </h2>
-            <p className="mt-2 max-w-3xl text-sm leading-6 text-ink-muted">
-              Continue after reviewing the three conditions and assigning owners to required actions. The report uses this reporting period instead of mixing all project history.
-            </p>
-          </div>
-          {reviewReady ? (
-            <Button asChild className="shrink-0 bg-brand text-brand-foreground hover:bg-brand/90">
-              <Link href={`/app/projects/${projectId}/reports?review=${review.id}`}>
-                Continue to report <ArrowRight className="h-4 w-4" />
-              </Link>
-            </Button>
-          ) : (
-            <Button disabled className="shrink-0">Resolve evidence requirements first</Button>
-          )}
-        </div>
-      </section>
     </div>
   );
 }
@@ -415,14 +390,9 @@ function FindingsStep({
             Three conditions, with plain-language reasons
           </h2>
           <p className="mt-2 text-sm text-ink-muted">
-            No health percentage. Missing evidence remains visibly incomplete.
+            No health percentage and no combined score. Budget, Schedule, and Risk stay separate; missing evidence remains visibly incomplete.
           </p>
         </div>
-        {evidenceReady && review.findings.length > 0 && (
-          <span className={`w-fit rounded-full px-3 py-1 text-xs font-semibold ${overallTone(review.findings)}`}>
-            {overallLabel(review.findings)}
-          </span>
-        )}
       </div>
 
       {!evidenceReady ? (
@@ -611,69 +581,6 @@ function BudgetCorrection({
   );
 }
 
-function ActionsStep({
-  projectId,
-  review,
-}: {
-  projectId: string;
-  review: AssuranceReview;
-}) {
-  return (
-    <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
-      <p className="text-sm font-medium text-ink-muted">Step 4, Actions</p>
-      <h2 className="mt-1 text-lg font-semibold text-ink">
-        Turn important findings into owned work
-      </h2>
-      <p className="mt-2 text-sm text-ink-muted">
-        Only Needs Attention or Critical findings create an action.
-      </p>
-      <div className="mt-4 grid gap-3">
-        {review.actions.length === 0 ? (
-          <p className="rounded-xl bg-base p-4 text-sm text-ink-muted">
-            No action is required yet, or analysis has not been completed.
-          </p>
-        ) : (
-          review.actions.map((action) => (
-            <form
-              key={action.id}
-              action={updateAssuranceAction}
-              className="grid gap-3 rounded-xl border border-ui-border p-4 lg:grid-cols-[1fr_220px_170px_170px_auto] lg:items-end"
-            >
-              <input type="hidden" name="projectId" value={projectId} />
-              <input type="hidden" name="reviewId" value={review.id} />
-              <input type="hidden" name="actionId" value={action.id} />
-              <div>
-                <p className="font-medium leading-6 text-ink">{action.title}</p>
-                <p className="mt-1 text-xs font-medium capitalize text-status-warn-text">
-                  {action.priority} priority
-                </p>
-              </div>
-              <label className="text-xs font-medium text-ink-muted">
-                Owner
-                <Input name="ownerName" defaultValue={action.ownerName ?? ""} placeholder="Required" className="mt-1" />
-              </label>
-              <label className="text-xs font-medium text-ink-muted">
-                Due date
-                <Input name="dueDate" type="date" defaultValue={action.dueDate ?? ""} className="mt-1" />
-              </label>
-              <label className="text-xs font-medium text-ink-muted">
-                Status
-                <select name="status" defaultValue={action.status} className="mt-1 h-9 w-full rounded-md border border-ui-border bg-surface px-3 text-sm">
-                  <option value="open">Open</option>
-                  <option value="in_progress">In progress</option>
-                  <option value="completed">Completed</option>
-                  <option value="deferred">Deferred</option>
-                </select>
-              </label>
-              <Button type="submit" variant="outline">Save</Button>
-            </form>
-          ))
-        )}
-      </div>
-    </section>
-  );
-}
-
 function conditionLabel(condition: AssuranceFinding["condition"]) {
   if (condition === "on_track") return "On Track";
   if (condition === "needs_attention") return "Needs Attention";
@@ -688,17 +595,3 @@ function conditionTone(condition: AssuranceFinding["condition"]) {
   return "bg-plan-track text-ink-muted";
 }
 
-function overallLabel(findings: AssuranceFinding[]) {
-  if (findings.some((finding) => finding.condition === "more_evidence_required")) return "Review Incomplete";
-  if (findings.some((finding) => finding.condition === "critical")) return "Critical";
-  if (findings.some((finding) => finding.condition === "needs_attention")) return "Needs Attention";
-  return "On Track";
-}
-
-function overallTone(findings: AssuranceFinding[]) {
-  const label = overallLabel(findings);
-  if (label === "On Track") return "bg-status-ok-bg text-status-ok-text";
-  if (label === "Needs Attention") return "bg-status-warn-bg text-status-warn-text";
-  if (label === "Critical") return "bg-status-critical-bg text-status-critical-text";
-  return "bg-plan-track text-ink-muted";
-}

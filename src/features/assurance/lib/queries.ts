@@ -59,12 +59,11 @@ export type AssuranceReview = {
   reportingPeriod: string;
   title: string;
   status: string;
-  currentStep: "evidence" | "analysis" | "findings" | "actions" | "report";
+  currentStep: "evidence" | "analysis" | "findings";
   analysisError: string | null;
   analysisMetadata: Record<string, unknown>;
   documents: { documentId: string; role: "baseline" | "current" }[];
   findings: AssuranceFinding[];
-  actions: AssuranceAction[];
 };
 
 export type AssuranceFinding = {
@@ -92,16 +91,6 @@ export type AssuranceFinding = {
   correction: Record<string, unknown> | null;
   correctionReason: string | null;
   correctedAt: string | null;
-};
-
-export type AssuranceAction = {
-  id: string;
-  findingId: string | null;
-  title: string;
-  ownerName: string | null;
-  dueDate: string | null;
-  priority: "low" | "medium" | "high";
-  status: "open" | "in_progress" | "completed" | "deferred";
 };
 
 type ReviewRow = {
@@ -138,17 +127,6 @@ type FindingRow = {
   correction: Record<string, unknown> | null;
   correction_reason: string | null;
   corrected_at: string | null;
-};
-
-type ActionRow = {
-  id: string;
-  review_id: string;
-  finding_id: string | null;
-  title: string;
-  owner_name: string | null;
-  due_date: string | null;
-  priority: AssuranceAction["priority"];
-  status: AssuranceAction["status"];
 };
 
 export async function getAssuranceWorkspace(projectId: string) {
@@ -304,7 +282,7 @@ export async function getAssuranceWorkspace(projectId: string) {
   }
 
   const reviewIds = reviewRows.map((row) => row.id);
-  const [linksResult, findingsResult, actionsResult] = await Promise.all([
+  const [linksResult, findingsResult] = await Promise.all([
     supabase
       .from("assurance_review_documents")
       .select("review_id, document_id, evidence_role")
@@ -316,22 +294,13 @@ export async function getAssuranceWorkspace(projectId: string) {
       )
       .in("review_id", reviewIds)
       .order("domain"),
-    supabase
-      .from("assurance_actions")
-      .select(
-        "id, review_id, finding_id, title, owner_name, due_date, priority, status",
-      )
-      .in("review_id", reviewIds)
-      .order("priority", { ascending: false }),
   ]);
 
   if (linksResult.error) throw new Error(linksResult.error.message);
   if (findingsResult.error) throw new Error(findingsResult.error.message);
-  if (actionsResult.error) throw new Error(actionsResult.error.message);
 
   const links = (linksResult.data ?? []) as DocumentLinkRow[];
   const findings = (findingsResult.data ?? []) as FindingRow[];
-  const actions = (actionsResult.data ?? []) as ActionRow[];
   const reviews = reviewRows.map((row): AssuranceReview => ({
     id: row.id,
     reportingPeriod: row.reporting_period,
@@ -365,17 +334,6 @@ export async function getAssuranceWorkspace(projectId: string) {
         correction: finding.correction,
         correctionReason: finding.correction_reason,
         correctedAt: finding.corrected_at,
-      })),
-    actions: actions
-      .filter((action) => action.review_id === row.id)
-      .map((action) => ({
-        id: action.id,
-        findingId: action.finding_id,
-        title: action.title,
-        ownerName: action.owner_name,
-        dueDate: action.due_date,
-        priority: action.priority,
-        status: action.status,
       })),
   }));
 

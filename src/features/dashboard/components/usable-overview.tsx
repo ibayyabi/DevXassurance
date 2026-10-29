@@ -6,23 +6,19 @@ import {
   ClipboardCheck,
   FileSearch,
   ShieldAlert,
-  Sparkles,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import type { ReviewCondition } from "@/features/assurance/lib/analysis";
 import type {
-  AssuranceAction,
   AssuranceFinding,
   AssuranceReview,
 } from "@/features/assurance/lib/queries";
 import {
-  ActionStatusChart,
   BudgetTrendChart,
   DomainStatusChart,
   RiskBreakdownChart,
   ScheduleTrendChart,
-  type ActionStatusDatum,
   type DomainStatusDatum,
   type OverviewTrendPoint,
 } from "@/features/dashboard/components/overview-charts";
@@ -91,10 +87,6 @@ export function UsableOverview({
     textValue(budget?.currentValue?.currency) ||
     textValue(budget?.baselineValue?.currency);
   const riskCounts = readRiskCounts(risk);
-  const openActions = review.actions.filter(
-    (action) => action.status !== "completed",
-  );
-  const actionStatusData = buildActionStatusData(review.actions);
   const domainStatusData: DomainStatusDatum[] = [
     {
       domain: "Budget",
@@ -131,8 +123,8 @@ export function UsableOverview({
             </p>
             <div className="mt-6 flex flex-wrap gap-3">
               <Button asChild>
-                <Link href={`/app/projects/${projectId}/reports`}>
-                  Prepare management report <ArrowRight className="h-4 w-4" />
+                <Link href={`/app/projects/${projectId}/assurance`}>
+                  Open Assurance <ArrowRight className="h-4 w-4" />
                 </Link>
               </Button>
               <Button asChild variant="outline">
@@ -150,10 +142,6 @@ export function UsableOverview({
             <SummaryStat
               label="Evidence included"
               value={`${review.documents.length} files`}
-            />
-            <SummaryStat
-              label="Open actions"
-              value={String(openActions.length)}
             />
             <SummaryStat
               label="Last assessed"
@@ -251,11 +239,6 @@ export function UsableOverview({
             {risk ? <RiskSummary finding={risk} /> : null}
           </FindingPanel>
         </div>
-      </section>
-
-      <section className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.8fr)_minmax(320px,0.8fr)]">
-        <ManagementActionsPanel actions={review.actions} />
-        <ActionStatusChart data={actionStatusData} />
       </section>
     </div>
   );
@@ -481,113 +464,6 @@ function RiskCount({
   );
 }
 
-function ManagementActionsPanel({ actions }: { actions: AssuranceAction[] }) {
-  const ordered = [...actions].sort((a, b) => {
-    const statusOrder = actionStatusOrder(a.status) - actionStatusOrder(b.status);
-    if (statusOrder !== 0) return statusOrder;
-    return actionPriorityOrder(b.priority) - actionPriorityOrder(a.priority);
-  });
-
-  return (
-    <section className="overflow-hidden rounded-2xl border border-ui-border bg-surface shadow-sm">
-      <header className="flex flex-col gap-2 border-b border-ui-border px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h2 className="text-base font-semibold text-ink">Management focus</h2>
-          <p className="mt-1 text-sm leading-5 text-ink-muted">
-            Decisions and follow-up work generated from the latest findings.
-          </p>
-        </div>
-        <span className="w-fit rounded-full bg-plan-track px-3 py-1 text-xs font-semibold text-ink-muted">
-          {actions.length} total
-        </span>
-      </header>
-      {ordered.length === 0 ? (
-        <div className="flex min-h-64 items-center justify-center px-6 text-center">
-          <div>
-            <Sparkles className="mx-auto h-8 w-8 text-ink-muted" />
-            <p className="mt-3 text-sm font-semibold text-ink">
-              No management action
-            </p>
-            <p className="mt-1 text-sm leading-6 text-ink-muted">
-              The current findings did not create a follow-up action.
-            </p>
-          </div>
-        </div>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[720px] text-left text-sm">
-            <thead className="bg-base text-xs font-medium text-ink-muted">
-              <tr>
-                <th className="px-5 py-3 font-medium">Action</th>
-                <th className="px-4 py-3 font-medium">Owner</th>
-                <th className="px-4 py-3 font-medium">Due date</th>
-                <th className="px-4 py-3 font-medium">Priority</th>
-                <th className="px-5 py-3 text-right font-medium">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {ordered.slice(0, 6).map((action) => (
-                <tr
-                  key={action.id}
-                  className="border-t border-ui-border first:border-t-0"
-                >
-                  <td className="max-w-xl px-5 py-4 font-medium text-ink">
-                    {action.title}
-                  </td>
-                  <td className="px-4 py-4 text-ink-muted">
-                    {action.ownerName ?? "Not assigned"}
-                  </td>
-                  <td className="px-4 py-4 text-ink-muted">
-                    {action.dueDate ? formatDate(action.dueDate) : "Not set"}
-                  </td>
-                  <td className="px-4 py-4">
-                    <PriorityBadge priority={action.priority} />
-                  </td>
-                  <td className="px-5 py-4 text-right">
-                    <ActionStatusBadge status={action.status} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
-
-function PriorityBadge({ priority }: { priority: AssuranceAction["priority"] }) {
-  const tone =
-    priority === "high"
-      ? "bg-status-critical-bg text-status-critical-text"
-      : priority === "medium"
-        ? "bg-status-warn-bg text-status-warn-text"
-        : "bg-plan-track text-ink-muted";
-  return (
-    <span
-      className={`whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ${tone}`}
-    >
-      {titleCase(priority)}
-    </span>
-  );
-}
-
-function ActionStatusBadge({ status }: { status: AssuranceAction["status"] }) {
-  const tone =
-    status === "completed"
-      ? "bg-status-ok-bg text-status-ok-text"
-      : status === "open"
-        ? "bg-status-warn-bg text-status-warn-text"
-        : "bg-plan-track text-ink-muted";
-  return (
-    <span
-      className={`whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ${tone}`}
-    >
-      {status === "in_progress" ? "In progress" : titleCase(status)}
-    </span>
-  );
-}
-
 function MissingEvidence({ finding }: { finding: AssuranceFinding }) {
   return finding.requiredEvidence.length > 0 ? (
     <p className="mt-5 rounded-xl bg-status-warn-bg p-3 text-sm text-status-warn-text">
@@ -669,29 +545,6 @@ function buildTrendPoints(reviews: AssuranceReview[]): OverviewTrendPoint[] {
       uncontrolledRisks: riskCounts.uncontrolled,
     };
   });
-}
-
-function buildActionStatusData(
-  actions: AssuranceAction[],
-): ActionStatusDatum[] {
-  return [
-    {
-      status: "Open",
-      value: actions.filter((action) => action.status === "open").length,
-    },
-    {
-      status: "In progress",
-      value: actions.filter((action) => action.status === "in_progress").length,
-    },
-    {
-      status: "Completed",
-      value: actions.filter((action) => action.status === "completed").length,
-    },
-    {
-      status: "Deferred",
-      value: actions.filter((action) => action.status === "deferred").length,
-    },
-  ];
 }
 
 function findDomainFinding(
@@ -778,19 +631,6 @@ function conditionIcon(condition?: ReviewCondition) {
   return "bg-plan-track text-ink-muted";
 }
 
-function actionStatusOrder(status: AssuranceAction["status"]) {
-  if (status === "open") return 0;
-  if (status === "in_progress") return 1;
-  if (status === "deferred") return 2;
-  return 3;
-}
-
-function actionPriorityOrder(priority: AssuranceAction["priority"]) {
-  if (priority === "high") return 3;
-  if (priority === "medium") return 2;
-  return 1;
-}
-
 function numberValue(value: unknown) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
@@ -844,8 +684,3 @@ function formatTimestamp(value: string) {
   }).format(new Date(value));
 }
 
-function titleCase(value: string) {
-  return value
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
-}

@@ -380,21 +380,14 @@ async function loadRelatedAssessment(
   const reviewIds = [...new Set(sources.flatMap((source) => source.reviewIds))];
   if (reviewIds.length === 0) return { findings: [] as FindingRow[], actions: [] as ActionRow[] };
 
-  const [findingResult, actionResult] = await Promise.all([
-    supabase
-      .from("assurance_findings")
-      .select("domain, condition, headline, explanation, baseline_document_ids, current_document_ids")
-      .eq("project_id", projectId)
-      .in("review_id", reviewIds)
-      .limit(MAX_RELATED_FINDINGS),
-    supabase
-      .from("assurance_actions")
-      .select("id, title, owner_name, priority")
-      .eq("project_id", projectId)
-      .in("review_id", reviewIds)
-      .neq("status", "completed")
-      .limit(MAX_RELATED_ACTIONS),
-  ]);
+  // Assurance no longer emits action suggestions (ticket 05 cut-over), so the
+  // Advisor surfaces grounded findings only and never reads assurance_actions.
+  const findingResult = await supabase
+    .from("assurance_findings")
+    .select("domain, condition, headline, explanation, baseline_document_ids, current_document_ids")
+    .eq("project_id", projectId)
+    .in("review_id", reviewIds)
+    .limit(MAX_RELATED_FINDINGS);
   const relevantDocumentIds = new Set(sources.map((source) => source.documentId));
   const findings = ((findingResult.data ?? []) as unknown as FindingRow[])
     .filter((finding) => [
@@ -403,7 +396,7 @@ async function loadRelatedAssessment(
     ].some((documentId) => relevantDocumentIds.has(documentId)));
   return {
     findings,
-    actions: (actionResult.data ?? []) as unknown as ActionRow[],
+    actions: [] as ActionRow[],
   };
 }
 
@@ -424,24 +417,9 @@ async function loadConversationMessages(
   if (error) return { error: true as const, messages: [] as AssistantAnswer[] };
 
   const rows = ((data ?? []) as unknown as InteractionRow[]).reverse();
-  const actionIds = [...new Set(rows.flatMap((row) => row.recommended_action_ids ?? []))];
+  // Prior turns may carry recommended_action_ids, but assurance_actions is no
+  // longer written (ticket 05 cut-over), so no recommendations are resolved.
   const recommendations = new Map<string, AssistantRecommendation>();
-  if (actionIds.length > 0) {
-    const { data: actions } = await supabase
-      .from("assurance_actions")
-      .select("id, title, owner_name, priority")
-      .eq("project_id", projectId)
-      .in("id", actionIds);
-    for (const action of (actions ?? []) as unknown as ActionRow[]) {
-      recommendations.set(action.id, {
-        id: action.id,
-        title: action.title,
-        ownerName: action.owner_name,
-        priority: action.priority,
-        sourcePath: `/app/projects/${projectId}/dashboard`,
-      });
-    }
-  }
 
   return {
     error: false as const,

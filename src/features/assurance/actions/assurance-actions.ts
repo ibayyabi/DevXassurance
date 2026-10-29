@@ -345,19 +345,13 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
       ...verifiedSources.find((verified) => verified.role === source.role && verified.excerpt === source.excerpt),
     })),
   }));
-  const { error: actionDeleteError } = await supabase
-    .from("assurance_actions")
-    .delete()
-    .eq("review_id", reviewId);
-  if (actionDeleteError) throw new Error(actionDeleteError.message);
-
   const { error: findingDeleteError } = await supabase
     .from("assurance_findings")
     .delete()
     .eq("review_id", reviewId);
   if (findingDeleteError) throw new Error(findingDeleteError.message);
 
-  const { data: insertedFindings, error: findingInsertError } = await supabase
+  const { error: findingInsertError } = await supabase
     .from("assurance_findings")
     .insert(
       findings.map((finding) => ({
@@ -396,22 +390,8 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
                 thresholds: "phase_3_usable_mvp_defaults",
               },
       })),
-    )
-    .select("id, domain, condition");
+    );
   if (findingInsertError) throw new Error(findingInsertError.message);
-
-  const actionRows = buildActionRows(
-    projectId,
-    reviewId,
-    findings,
-    insertedFindings ?? [],
-  );
-  if (actionRows.length > 0) {
-    const { error: actionInsertError } = await supabase
-      .from("assurance_actions")
-      .insert(actionRows);
-    if (actionInsertError) throw new Error(actionInsertError.message);
-  }
 
   const { error: reviewUpdateError } = await supabase
     .from("assurance_reviews")
@@ -868,36 +848,6 @@ export async function correctBudgetFinding(formData: FormData): Promise<void> {
   revalidateAssurance(projectId);
 }
 
-export async function updateAssuranceAction(formData: FormData): Promise<void> {
-  const projectId = String(formData.get("projectId") ?? "");
-  const reviewId = String(formData.get("reviewId") ?? "");
-  const actionId = String(formData.get("actionId") ?? "");
-  const ownerName = String(formData.get("ownerName") ?? "").trim();
-  const dueDate = String(formData.get("dueDate") ?? "").trim();
-  const status = String(formData.get("status") ?? "open");
-  if (!projectId || !reviewId || !actionId) return;
-  if (!["open", "in_progress", "completed", "deferred"].includes(status)) {
-    throw new Error("Invalid action status.");
-  }
-
-  const { supabase, membership } = await requireProjectMembership(projectId);
-  assertCanManage(membership.role);
-  const { error } = await supabase
-    .from("assurance_actions")
-    .update({
-      owner_name: ownerName || null,
-      due_date: /^\d{4}-\d{2}-\d{2}$/.test(dueDate) ? dueDate : null,
-      status,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", actionId)
-    .eq("review_id", reviewId)
-    .eq("project_id", projectId);
-  if (error) throw new Error(error.message);
-  revalidateAssurance(projectId);
-}
-
-
 
 /**
  * The project-total Budget finding for this review: the accepted baseline
@@ -1239,36 +1189,6 @@ function formatEvidence(
     .join("\n\n");
 }
 
-function buildActionRows(
-  projectId: string,
-  reviewId: string,
-  findings: EvaluatedFinding[],
-  inserted: { id: string; domain: string; condition: string }[],
-) {
-  const titles = {
-    budget:
-      "Confirm the reported estimate at completion, explain the variance against the accepted baseline, and agree a budget decision.",
-    schedule:
-      "Confirm the delayed milestone owner and approve a dated schedule recovery plan.",
-    risk:
-      "Assign accountable owners and dated mitigation for high or critical risks.",
-  } as const;
-
-  return findings
-    .filter((finding) =>
-      ["needs_attention", "critical"].includes(finding.condition),
-    )
-    .map((finding) => ({
-      project_id: projectId,
-      review_id: reviewId,
-      finding_id:
-        inserted.find((row) => row.domain === finding.domain)?.id ?? null,
-      title: titles[finding.domain],
-      priority: finding.condition === "critical" ? "high" : "medium",
-      status: "open",
-    }));
-}
-
 async function setAnalysisFailure(
   supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
   projectId: string,
@@ -1315,5 +1235,4 @@ function formatReportingPeriod(value: string) {
 function revalidateAssurance(projectId: string) {
   revalidatePath(`/app/projects/${projectId}/assurance`);
   revalidatePath(`/app/projects/${projectId}/dashboard`);
-  revalidatePath(`/app/projects/${projectId}/reports`);
 }
