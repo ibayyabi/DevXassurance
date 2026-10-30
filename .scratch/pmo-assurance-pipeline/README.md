@@ -1,6 +1,6 @@
 # PMO Assurance Pipeline — Handoff
 
-This README orients the next agent to the approved PMO assurance design and its five tickets. It describes the current repo and intended change; the new domain-contract pipeline is not implemented yet. The glossary and ADRs linked below are the source of truth if this summary conflicts with them.
+This README orients the next agent to the approved PMO assurance design, four active domain tickets, and archived cutover ticket 05. It describes the current repo and intended change; the new domain-contract pipeline is not implemented yet. The glossary and ADRs linked below are the source of truth if this summary conflicts with them.
 
 ## Current situation
 
@@ -66,7 +66,7 @@ Each ticket is a vertical slice with its own acceptance criteria. The ticket fil
 - [02 — WBS Cost and Scope Comparison](issues/02-wbs-scope-comparison.md)
 - [03 — Schedule and Progress Assurance](issues/03-schedule-progress-assurance.md)
 - [04 — Risk Snapshot Comparison](issues/04-risk-snapshot-comparison.md)
-- [05 — Cut Over Assurance to Evidence-Backed Results](issues/05-assurance-cutover.md)
+- [05 — Cut Over Assurance to Evidence-Backed Results (archived; wontfix)](issues/05-assurance-cutover.md)
 
 ```mermaid
 flowchart TD
@@ -74,15 +74,11 @@ flowchart TD
   T1 --> T3["03 Schedule and progress"]
   T2 --> T3
   T1 --> T4["04 Risk snapshots"]
-  T1 --> T5["05 Assurance cutover"]
-  T2 --> T5
-  T3 --> T5
-  T4 --> T5
 ```
 
-Start with ticket 01. Once it is resolved, tickets 02 and 04 can proceed; ticket 03 waits for both 01 and 02; ticket 05 waits for all four domain slices. Do not start a ticket while any listed blocker remains unresolved.
+Start with ticket 01. Once it is resolved, tickets 02 and 04 can proceed; ticket 03 waits for both 01 and 02. Ticket 05 is archived as `wontfix` and is not part of active execution. Do not start an active ticket while any listed blocker remains unresolved.
 
-For each ticket:
+For each active ticket:
 
 1. Read root [`AGENTS.md`](../../AGENTS.md), [`docs/agents/issue-tracker.md`](../../docs/agents/issue-tracker.md), [`docs/agents/domain.md`](../../docs/agents/domain.md), [`CONTEXT.md`](../../CONTEXT.md), and the relevant ADRs before editing.
 2. Read the ticket and its blockers. Claim it by changing `Status: ready-for-agent` to `Status: claimed` before implementation.

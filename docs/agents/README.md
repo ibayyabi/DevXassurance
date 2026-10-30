@@ -11,7 +11,7 @@ Follow the ticket frontier, not just its `Status` line:
 - Start with **01 — Project-Level Budget Assurance**.
 - After 01 is resolved, **02 — WBS Cost and Scope Comparison** and **04 — Risk Snapshot Comparison** can start.
 - **03 — Schedule and Progress Assurance** waits for 01 and 02.
-- **05 — Cut Over Assurance** waits for 01–04.
+- **05 — Cut Over Assurance** is archived as `wontfix`; it is not part of the active ticket frontier.
 
 Before implementation, read the ticket and its blockers, then change its `Status` from `ready-for-agent` to `claimed`. Use `/skill:implement <ticket-path>` for one ticket. For coordinated implementation of the full spec and task graph, use `/skill:implement-spec <feature-README-or-spec-path>` and point it to the associated ticket files. Resolve a ticket only after every acceptance criterion passes and verification evidence is recorded in its `## Comments` section.
 
