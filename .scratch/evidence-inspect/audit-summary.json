@@ -1,0 +1,830 @@
+{
+  "project": {
+    "id": "f2f5ba32-3887-43ea-9e75-4a5c3225f465",
+    "name": "Smart Building"
+  },
+  "totals": {
+    "decision": 367,
+    "risk": 65,
+    "milestone": 497,
+    "issue": 211,
+    "owner_action": 229
+  },
+  "old20": {
+    "decision": 8,
+    "risk": 2,
+    "milestone": 8,
+    "issue": 1,
+    "owner_action": 1
+  },
+  "old20Ids": [
+    "07ce257c-cdf2-4ee0-bd58-ac5e513d13a5",
+    "1210b67d-603b-4551-ab3f-93d35e1f4a8e",
+    "18f6d538-dd4b-4cef-819c-c67e31027d75",
+    "2d5491b2-d4fc-4b4e-8174-ce33baf88716",
+    "380b0edb-5c09-48b2-ab8b-e3dc60124c1b",
+    "52ed8eaa-26cd-4359-96be-ba2eb63edd22",
+    "54f0d419-8546-4ca0-9205-dec357cedbce",
+    "6c8bb3de-0670-40ee-83ad-134a5a0fe600",
+    "760728be-d69d-4969-b077-6db00d55c97c",
+    "779788d1-be76-4afd-8158-78fdef8088dd",
+    "8feee404-88eb-49c5-b433-cdb9615538c5",
+    "a017bf65-0a0d-4cf8-9fe4-db953015d3c1",
+    "be6a8c13-bc61-4ff9-931d-35c311f8b1e5",
+    "da98f4bb-5166-4bdd-b330-8745272d803a",
+    "ec6c849c-4ae2-4205-8a1e-9df3cc834b72",
+    "05f991e6-308c-409b-8bf5-df66fa4bbef8",
+    "072cf284-403b-4d43-8e86-9fa95082dc11",
+    "0ca88915-ba26-4797-b482-51701d8ee39b",
+    "128b32ba-c6c7-4f1a-824b-268cd877baa2",
+    "13ef97e5-d501-435b-9338-cf68d082f77e"
+  ],
+  "total": 1369,
+  "unlinked": 332,
+  "multiDocument": 0,
+  "reviewStates": {
+    "ai_extracted": 1369
+  },
+  "perDocument": [
+    {
+      "id": "f823286a-e057-4717-a740-65ce65c6e228",
+      "file_name": "Spesifikasi Teknis Smart Building Pemetaan Kegiatan dan Prioritas Pembelian Barang.xlsx",
+      "processing_status": "failed",
+      "processing_error": "Document analysis failed after three attempts. Review the configuration, then retry.",
+      "created_at": "2026-10-18T15:45:19.293859+00:00",
+      "updated_at": "2026-10-18T18:37:06.854802+00:00",
+      "counts": {},
+      "total": 0
+    },
+    {
+      "id": "79d9325e-bb76-467b-a3ba-d4a142ceb24a",
+      "file_name": "Perhitungan dari Spesifikasi Teknis Smart Building Pemetaan Kegiatan dan Prioritas Pembelian Barang.xlsx",
+      "processing_status": "failed",
+      "processing_error": "Document analysis failed after three attempts. Review the configuration, then retry.",
+      "created_at": "2026-10-18T15:45:17.565476+00:00",
+      "updated_at": "2026-10-18T18:37:06.854802+00:00",
+      "counts": {},
+      "total": 0
+    },
+    {
+      "id": "8adffaec-4de0-4cdc-a147-b0b5ab750b79",
+      "file_name": "Pengajuan Pembelian Hardware 2 Oktober 2026_bahasan meeting 16oct.xlsx",
+      "processing_status": "needs_review",
+      "processing_error": "Review AI artifact type and evidence role; artifact-type confidence must be at least 0.7 with no conflicting intake hints. Document-level artifact classification could not be completed: The configured AI provider request failed or timed out.",
+      "created_at": "2026-10-18T15:45:15.25143+00:00",
+      "updated_at": "2026-10-18T17:07:26.455+00:00",
+      "counts": {
+        "decision": 20,
+        "issue": 1,
+        "risk": 2
+      },
+      "total": 23
+    },
+    {
+      "id": "cf3e1d70-d12e-457a-9a50-e66b758c0c8e",
+      "file_name": "06_Pengkondisian_Udara_Subcontractor_Weekly.xlsx",
+      "processing_status": "needs_review",
+      "processing_error": "Conflicting evidence groups disagreed on suggested_document_date, detected_reporting_period, suggested_workstream; those metadata fields were left blank.",
+      "created_at": "2026-10-18T15:45:13.169973+00:00",
+      "updated_at": "2026-10-18T17:58:10.265+00:00",
+      "counts": {
+        "milestone": 34,
+        "issue": 15,
+        "owner_action": 5,
+        "risk": 2,
+        "decision": 4
+      },
+      "total": 60
+    },
+    {
+      "id": "7e79936f-e837-4fd5-9fbc-33545456f905",
+      "file_name": "06_Pengondisian_Udara_Subcontractor_Weekly.xlsx",
+      "processing_status": "failed",
+      "processing_error": "Document analysis failed after three attempts. Review the configuration, then retry.",
+      "created_at": "2026-10-18T15:45:11.016609+00:00",
+      "updated_at": "2026-10-18T18:54:00.023657+00:00",
+      "counts": {},
+      "total": 0
+    },
+    {
+      "id": "16b86e4b-bf90-499d-8026-3f076fda134f",
+      "file_name": "09_Pengelolaan_Sampah_Subcontractor_Weekly.xlsx",
+      "processing_status": "needs_review",
+      "processing_error": "Conflicting evidence groups disagreed on suggested_document_date, detected_reporting_period, suggested_workstream; those metadata fields were left blank.",
+      "created_at": "2026-10-18T15:45:08.612899+00:00",
+      "updated_at": "2026-10-18T17:21:35.039+00:00",
+      "counts": {
+        "decision": 2,
+        "owner_action": 8,
+        "milestone": 25,
+        "issue": 4,
+        "risk": 2
+      },
+      "total": 41
+    },
+    {
+      "id": "83c04a01-44b4-4638-aaad-b373a88b07d4",
+      "file_name": "03_Kontrol_Akses_Subcontractor_Weekly.xlsx",
+      "processing_status": "needs_review",
+      "processing_error": "Conflicting evidence groups disagreed on suggested_document_date, detected_reporting_period, suggested_workstream; those metadata fields were left blank.",
+      "created_at": "2026-10-18T15:45:06.296659+00:00",
+      "updated_at": "2026-10-18T17:56:20.029+00:00",
+      "counts": {
+        "decision": 41,
+        "owner_action": 11,
+        "issue": 13,
+        "milestone": 18,
+        "risk": 3
+      },
+      "total": 86
+    },
+    {
+      "id": "4ec5a765-9b7e-4b1c-8b18-b548c9ddb631",
+      "file_name": "08_Air_Limbah_Subcontractor_Weekly.xlsx",
+      "processing_status": "needs_review",
+      "processing_error": "Conflicting evidence groups disagreed on suggested_document_date, detected_reporting_period, suggested_workstream; those metadata fields were left blank.",
+      "created_at": "2026-10-18T15:45:04.109789+00:00",
+      "updated_at": "2026-10-18T16:56:22.632+00:00",
+      "counts": {
+        "issue": 16,
+        "milestone": 17,
+        "decision": 10,
+        "owner_action": 9
+      },
+      "total": 52
+    },
+    {
+      "id": "bbc97d81-dfe5-4b3e-93f7-373e0cf3055f",
+      "file_name": "07_Air_Bersih_Subcontractor_Weekly.xlsx",
+      "processing_status": "failed",
+      "processing_error": "Document analysis failed after three attempts. Review the configuration, then retry.",
+      "created_at": "2026-10-18T15:45:01.633932+00:00",
+      "updated_at": "2026-10-18T17:20:00.244347+00:00",
+      "counts": {
+        "milestone": 11,
+        "owner_action": 13,
+        "risk": 6,
+        "decision": 10,
+        "issue": 22
+      },
+      "total": 62
+    },
+    {
+      "id": "56678074-3f60-4d54-a952-d6779ef65271",
+      "file_name": "12_BISMA_Subcontractor_Weekly.xlsx",
+      "processing_status": "failed",
+      "processing_error": "Document analysis failed after three attempts. Review the configuration, then retry.",
+      "created_at": "2026-10-18T15:44:59.459216+00:00",
+      "updated_at": "2026-10-18T17:33:00.524598+00:00",
+      "counts": {},
+      "total": 0
+    },
+    {
+      "id": "44afd8f7-003d-4ec5-bc40-4a4cb45f7742",
+      "file_name": "11_Pengelolaan_Utilitas_Subcontractor_Weekly.xlsx",
+      "processing_status": "failed",
+      "processing_error": "Document analysis failed after three attempts. Review the configuration, then retry.",
+      "created_at": "2026-10-18T15:44:57.02668+00:00",
+      "updated_at": "2026-10-18T17:45:00.510204+00:00",
+      "counts": {},
+      "total": 0
+    },
+    {
+      "id": "26c5ccb9-32e6-4631-a580-6f930f78306b",
+      "file_name": "01_Alarm_Kebencanaan_Subcontractor_Weekly(1).xlsx",
+      "processing_status": "needs_review",
+      "processing_error": "Conflicting evidence groups disagreed on suggested_document_date, detected_reporting_period, suggested_workstream; those metadata fields were left blank.",
+      "created_at": "2026-10-18T15:44:54.682492+00:00",
+      "updated_at": "2026-10-18T17:31:37.181+00:00",
+      "counts": {
+        "milestone": 24,
+        "issue": 17,
+        "risk": 1,
+        "owner_action": 8,
+        "decision": 2
+      },
+      "total": 52
+    },
+    {
+      "id": "04b0a5d2-899c-44c9-8c91-be20e66709f8",
+      "file_name": "01_Alarm_Kebencanaan_Subcontractor_Weekly.xlsx",
+      "processing_status": "failed",
+      "processing_error": "Document analysis failed after three attempts. Review the configuration, then retry.",
+      "created_at": "2026-10-18T15:44:52.581446+00:00",
+      "updated_at": "2026-10-18T17:17:00.630074+00:00",
+      "counts": {},
+      "total": 0
+    },
+    {
+      "id": "5f8c8566-0970-449d-a48e-71d3a56f4f46",
+      "file_name": "04_Kelistrikan_Elisa_Subcontractor_Weekly.xlsx",
+      "processing_status": "failed",
+      "processing_error": "Document analysis failed after three attempts. Review the configuration, then retry.",
+      "created_at": "2026-10-18T15:44:50.388468+00:00",
+      "updated_at": "2026-10-18T17:29:00.531408+00:00",
+      "counts": {},
+      "total": 0
+    },
+    {
+      "id": "52936bdd-4fb6-4828-bf3e-df00e1422bbd",
+      "file_name": "04_Kelistrikan_Subcontractor_Weekly.xlsx",
+      "processing_status": "needs_review",
+      "processing_error": "Conflicting evidence groups disagreed on suggested_document_date, detected_reporting_period, suggested_workstream; those metadata fields were left blank.",
+      "created_at": "2026-10-18T15:44:48.249514+00:00",
+      "updated_at": "2026-10-18T17:10:39.815+00:00",
+      "counts": {
+        "milestone": 25,
+        "issue": 12,
+        "decision": 10,
+        "owner_action": 7,
+        "risk": 3
+      },
+      "total": 57
+    },
+    {
+      "id": "33c7f3e2-f0f6-4b1f-bb8b-5f94cb5fd60b",
+      "file_name": "All Minutes of Meeting Smart Building.docx",
+      "processing_status": "failed",
+      "processing_error": "Document analysis failed after three attempts. Review the configuration, then retry.",
+      "created_at": "2026-10-18T15:44:46.071949+00:00",
+      "updated_at": "2026-10-18T18:37:06.854802+00:00",
+      "counts": {},
+      "total": 0
+    },
+    {
+      "id": "5589fe71-2ebc-48cf-87e3-d7ee8ac60076",
+      "file_name": "02_Kamera_Pengawas_Subcontractor_Weekly.xlsx",
+      "processing_status": "failed",
+      "processing_error": "Document analysis failed after three attempts. Review the configuration, then retry.",
+      "created_at": "2026-10-18T15:41:01.517026+00:00",
+      "updated_at": "2026-10-18T17:08:00.351396+00:00",
+      "counts": {},
+      "total": 0
+    },
+    {
+      "id": "1abaeaa0-873b-463b-aafd-df766054cb96",
+      "file_name": "02_Kamera_Pengawasan_Subcontractor_Weekly.xlsx",
+      "processing_status": "failed",
+      "processing_error": "Document analysis failed after three attempts. Review the configuration, then retry.",
+      "created_at": "2026-10-18T15:40:58.901308+00:00",
+      "updated_at": "2026-10-18T17:08:00.351396+00:00",
+      "counts": {},
+      "total": 0
+    },
+    {
+      "id": "44c97a39-5e80-4e7d-8291-02ac626d786c",
+      "file_name": "10_Ventilasi_Subcontractor_Weekly.xlsx",
+      "processing_status": "needs_review",
+      "processing_error": "Conflicting evidence groups disagreed on suggested_document_date, detected_reporting_period, suggested_workstream; those metadata fields were left blank.",
+      "created_at": "2026-10-18T15:40:56.705031+00:00",
+      "updated_at": "2026-10-18T16:48:42.219+00:00",
+      "counts": {
+        "milestone": 60,
+        "risk": 21,
+        "decision": 7,
+        "owner_action": 11,
+        "issue": 8
+      },
+      "total": 107
+    },
+    {
+      "id": "4160eeb8-0f11-4089-b9fc-9b26bad2bf80",
+      "file_name": "05_Pencahayaan_Subcontractor_Weekly.xlsx",
+      "processing_status": "completed",
+      "processing_error": null,
+      "created_at": "2026-10-18T15:40:54.280929+00:00",
+      "updated_at": "2026-10-18T16:08:34.579+00:00",
+      "counts": {
+        "decision": 24,
+        "milestone": 28,
+        "risk": 2,
+        "issue": 21,
+        "owner_action": 11
+      },
+      "total": 86
+    },
+    {
+      "id": "4c50e77b-14f8-480d-b7e1-54beb9c17ca0",
+      "file_name": "KEGIATAN SMART BUILDING.xlsx",
+      "processing_status": "needs_review",
+      "processing_error": "Review AI artifact type and evidence role; artifact-type confidence must be at least 0.7 with no conflicting intake hints. Contains Gantt chart, milestones, task register, and PIC summary indicating a forward‑looking project plan. Conflicting evidence groups disagreed on suggested_workstream; those metadata fields were left blank.",
+      "created_at": "2026-10-18T15:40:49.779258+00:00",
+      "updated_at": "2026-10-18T17:48:03.448+00:00",
+      "counts": {
+        "issue": 34,
+        "milestone": 166,
+        "owner_action": 62,
+        "risk": 1,
+        "decision": 2
+      },
+      "total": 265
+    },
+    {
+      "id": "1025fc7d-b74e-499b-9f0e-98a4be67ffd8",
+      "file_name": "SMART BUILDING PROPOSAL ITB INNOVATION PARK - SCCIC.docx",
+      "processing_status": "needs_review",
+      "processing_error": "Review AI artifact type and evidence role; artifact-type confidence must be at least 0.7 with no conflicting intake hints. Document-level artifact classification could not be completed: The configured AI provider request failed or timed out.",
+      "created_at": "2026-10-18T15:40:46.764702+00:00",
+      "updated_at": "2026-10-18T16:28:50.97+00:00",
+      "counts": {
+        "decision": 29,
+        "milestone": 2,
+        "risk": 2,
+        "issue": 1
+      },
+      "total": 34
+    },
+    {
+      "id": "79417276-5833-46ae-b08e-6a2c578365a9",
+      "file_name": "Komponen Wajib BGC.pdf",
+      "processing_status": "completed",
+      "processing_error": null,
+      "created_at": "2026-10-18T15:40:43.636755+00:00",
+      "updated_at": "2026-10-18T15:46:52.608+00:00",
+      "counts": {
+        "milestone": 2,
+        "decision": 4
+      },
+      "total": 6
+    },
+    {
+      "id": "b9763b00-d7ff-442b-93e7-f3b819b248bb",
+      "file_name": "Proposal Smart Monitoring Building System - SCCIC.pdf",
+      "processing_status": "needs_review",
+      "processing_error": "Review AI artifact type and evidence role; artifact-type confidence must be at least 0.7 with no conflicting intake hints. Document contains a proposal title, introductory proposal language, and detailed scope and cost information typical of a proposal.",
+      "created_at": "2026-10-18T15:40:41.36172+00:00",
+      "updated_at": "2026-10-26T05:30:09.993+00:00",
+      "counts": {
+        "decision": 8,
+        "risk": 2,
+        "milestone": 5
+      },
+      "total": 15
+    },
+    {
+      "id": "5daf23b5-af57-4d23-8aa4-a9010a041f06",
+      "file_name": "06-1 Paparan Permen BGC - Standar Teknis (1).pdf",
+      "processing_status": "needs_review",
+      "processing_error": "Conflicting evidence groups disagreed on suggested_document_date, detected_reporting_period; those metadata fields were left blank.",
+      "created_at": "2026-10-18T15:40:38.250143+00:00",
+      "updated_at": "2026-10-18T16:42:00.614+00:00",
+      "counts": {
+        "decision": 60,
+        "milestone": 22,
+        "owner_action": 1
+      },
+      "total": 83
+    },
+    {
+      "id": "2f19fb09-dc44-43af-97d0-c76dedff3d4d",
+      "file_name": "Planning Smart Building IIP Summarecon.pptx",
+      "processing_status": "completed",
+      "processing_error": null,
+      "created_at": "2026-10-18T15:40:34.838114+00:00",
+      "updated_at": "2026-10-18T15:41:40.086+00:00",
+      "counts": {
+        "milestone": 8
+      },
+      "total": 8
+    }
+  ],
+  "duplicates": {
+    "groups": 31,
+    "extraRows": 61,
+    "examples": [
+      {
+        "documentId": "4c50e77b-14f8-480d-b7e1-54beb9c17ca0",
+        "text": "Validate main/floor panels, 40 power meters, data transmission, installation manpower, and 4-system procurement.",
+        "ids": [
+          "08fc790c-5062-4f05-8873-61401eaddb3e",
+          "1d9f382e-0b47-4eb4-8c05-948cec78ca33",
+          "39a8fd73-3277-42c4-82ef-b56807cebbde",
+          "5fcb3e52-83ff-4226-941b-e5d9b00ee1ff",
+          "6d05937d-19a9-4c20-9023-e14c7475e86a",
+          "adab7a6a-f11e-40e4-821b-c116682e881a",
+          "f1d48fe8-4fc0-4577-a590-30f98ad0114c",
+          "fd26c152-61cf-444b-8f5d-75b566ecec29"
+        ],
+        "types": [
+          "owner_action",
+          "owner_action",
+          "owner_action",
+          "owner_action",
+          "owner_action",
+          "owner_action",
+          "owner_action",
+          "owner_action"
+        ],
+        "runs": [
+          "3a516fc1-54f5-4c89-be81-71525a6544b4"
+        ]
+      },
+      {
+        "documentId": "4c50e77b-14f8-480d-b7e1-54beb9c17ca0",
+        "text": "IPAL blockage/disruption monitoring; check reference and software purchase needs.",
+        "ids": [
+          "0c2718f3-c945-40b7-8158-9a75a2a66cb9",
+          "548392db-fa94-4c02-b15f-f2aaf1debf07"
+        ],
+        "types": [
+          "risk",
+          "issue"
+        ],
+        "runs": [
+          "3a516fc1-54f5-4c89-be81-71525a6544b4"
+        ]
+      },
+      {
+        "documentId": "4c50e77b-14f8-480d-b7e1-54beb9c17ca0",
+        "text": "Start date 2026-11-16, End date 2026-11-24",
+        "ids": [
+          "0ff5f601-2d26-48d8-913c-08bec7b8f8db",
+          "8e5b3b24-c216-4d34-bd5a-71fcc8ba7848"
+        ],
+        "types": [
+          "milestone",
+          "milestone"
+        ],
+        "runs": [
+          "3a516fc1-54f5-4c89-be81-71525a6544b4"
+        ]
+      },
+      {
+        "documentId": "4c50e77b-14f8-480d-b7e1-54beb9c17ca0",
+        "text": "Administrative closeout",
+        "ids": [
+          "1039541a-d494-4909-967d-4cd124a3b0bc",
+          "c552711b-9bf9-41c5-8c8e-b48172487e3c"
+        ],
+        "types": [
+          "milestone",
+          "milestone"
+        ],
+        "runs": [
+          "3a516fc1-54f5-4c89-be81-71525a6544b4"
+        ]
+      },
+      {
+        "documentId": "4c50e77b-14f8-480d-b7e1-54beb9c17ca0",
+        "text": "UAT / handover readiness",
+        "ids": [
+          "119c88d1-969c-4c9b-90ca-81c09b1ff204",
+          "981a9bfb-8831-4873-a9e5-245caf031cba",
+          "cd946121-e9e4-4d45-8a8e-ce75fc893a34",
+          "cdb4c0ff-644f-4545-8ca5-49db25d2ba64",
+          "dfb23dac-617d-44bb-83cd-8b15d49287bb"
+        ],
+        "types": [
+          "milestone",
+          "milestone",
+          "milestone",
+          "milestone",
+          "milestone"
+        ],
+        "runs": [
+          "3a516fc1-54f5-4c89-be81-71525a6544b4"
+        ]
+      },
+      {
+        "documentId": "4c50e77b-14f8-480d-b7e1-54beb9c17ca0",
+        "text": "Integration & data/interface validation",
+        "ids": [
+          "173d4cfe-659b-496b-982c-fc00f129d9d1",
+          "20bf1208-da8b-4310-84a3-dd045be061a6",
+          "b9100210-8309-4bd0-88e9-ef11d1b1986a",
+          "be943377-7c98-4e16-9835-299f8f14b446",
+          "fccb4f49-32d1-4a6e-b7e5-706a47fc1a92"
+        ],
+        "types": [
+          "milestone",
+          "milestone",
+          "milestone",
+          "milestone",
+          "milestone"
+        ],
+        "runs": [
+          "3a516fc1-54f5-4c89-be81-71525a6544b4"
+        ]
+      },
+      {
+        "documentId": "4c50e77b-14f8-480d-b7e1-54beb9c17ca0",
+        "text": "Finalize design readiness using Bangunan Gedung Cerdas reference for clean water.",
+        "ids": [
+          "31a99ed1-7845-4964-911c-2f040d996765",
+          "f700678c-817c-4230-aa07-14698272e19a"
+        ],
+        "types": [
+          "issue",
+          "owner_action"
+        ],
+        "runs": [
+          "3a516fc1-54f5-4c89-be81-71525a6544b4"
+        ]
+      },
+      {
+        "documentId": "4c50e77b-14f8-480d-b7e1-54beb9c17ca0",
+        "text": "Testing, troubleshooting & punch-list",
+        "ids": [
+          "32767e71-949e-49ac-b930-995a2350982f",
+          "a8e509c8-babe-4981-83f9-bb6efc496e7d",
+          "c072fff7-812d-4c0f-b639-1497ec81363d",
+          "ee459162-ac68-4185-ab38-840397cf3e29",
+          "ee6176a1-31c7-40fd-ad72-f15cc069775a"
+        ],
+        "types": [
+          "milestone",
+          "milestone",
+          "milestone",
+          "milestone",
+          "milestone"
+        ],
+        "runs": [
+          "3a516fc1-54f5-4c89-be81-71525a6544b4"
+        ]
+      }
+    ]
+  },
+  "water": {
+    "document": {
+      "id": "bbc97d81-dfe5-4b3e-93f7-373e0cf3055f",
+      "file_name": "07_Air_Bersih_Subcontractor_Weekly.xlsx",
+      "processing_status": "failed",
+      "processing_error": "Document analysis failed after three attempts. Review the configuration, then retry.",
+      "created_at": "2026-10-18T15:45:01.633932+00:00",
+      "updated_at": "2026-10-18T17:20:00.244347+00:00",
+      "counts": {
+        "milestone": 11,
+        "owner_action": 13,
+        "risk": 6,
+        "decision": 10,
+        "issue": 22
+      },
+      "total": 62
+    },
+    "jobs": [
+      {
+        "id": "ec115e60-3f9c-4d34-8717-121936b8c393",
+        "project_id": "f2f5ba32-3887-43ea-9e75-4a5c3225f465",
+        "document_id": "bbc97d81-dfe5-4b3e-93f7-373e0cf3055f",
+        "job_type": "parse_document",
+        "status": "failed",
+        "error_code": "retry_limit_exceeded",
+        "error_message": "Document analysis failed after the maximum number of attempts.",
+        "metadata": {
+          "source": "zip_import",
+          "claimed_at": "2026-10-18T16:34:00.635Z",
+          "claimed_by": "n8n",
+          "archive_name": "Archive.zip",
+          "attempt_count": 3,
+          "archive_member": "Pemantau Project/7. AIR BERSIH/07_Air_Bersih_Subcontractor_Weekly.xlsx",
+          "last_recovered_at": "2026-10-18T16:31:00.311514+00:00",
+          "last_recovery_reason": "worker_lease_expired"
+        },
+        "created_at": "2026-10-18T15:45:01.800495+00:00",
+        "updated_at": "2026-10-18T17:20:00.244347+00:00",
+        "attempt_count": 3,
+        "max_attempts": 3,
+        "claimed_at": "2026-10-18T16:34:00.635+00:00",
+        "lease_expires_at": null,
+        "completed_at": "2026-10-18T17:20:00.244347+00:00",
+        "available_at": "2026-10-18T22:43:30.561335+00:00"
+      }
+    ],
+    "runs": [
+      {
+        "id": "6956fb38-db16-4748-bc94-5b928bbb86ba",
+        "project_id": "f2f5ba32-3887-43ea-9e75-4a5c3225f465",
+        "document_id": "bbc97d81-dfe5-4b3e-93f7-373e0cf3055f",
+        "ai_job_id": "ec115e60-3f9c-4d34-8717-121936b8c393",
+        "status": "processing",
+        "metadata": {
+          "source": "n8n_document_processing",
+          "worker": "next_document_worker",
+          "fact_count": 62,
+          "chunk_count": 22
+        },
+        "created_at": "2026-10-18T16:52:55.960051+00:00",
+        "updated_at": "2026-10-18T16:52:55.960051+00:00"
+      }
+    ],
+    "factTimes": [
+      "2026-10-18T16:52:56.555709+00:00"
+    ],
+    "groups": [
+      {
+        "id": "e60b7c62-f90e-417a-b994-301031602394",
+        "status": "completed",
+        "chunk_start_index": 21,
+        "chunk_end_index": 21,
+        "updated_at": "2026-10-18T17:23:16.132+00:00"
+      },
+      {
+        "id": "43d53c94-2dec-45e2-b62e-a9c29ee9832d",
+        "status": "completed",
+        "chunk_start_index": 18,
+        "chunk_end_index": 20,
+        "updated_at": "2026-10-18T17:25:57.284+00:00"
+      },
+      {
+        "id": "2efe9d17-f44f-48f9-8109-04012b55a300",
+        "status": "completed",
+        "chunk_start_index": 15,
+        "chunk_end_index": 17,
+        "updated_at": "2026-10-18T16:59:34.854+00:00"
+      },
+      {
+        "id": "34d24c77-0e95-4859-838e-72a33e83d599",
+        "status": "completed",
+        "chunk_start_index": 12,
+        "chunk_end_index": 14,
+        "updated_at": "2026-10-18T16:59:18.29+00:00"
+      },
+      {
+        "id": "9658df1c-8dc2-48f3-9af6-2c7976a6578f",
+        "status": "completed",
+        "chunk_start_index": 9,
+        "chunk_end_index": 11,
+        "updated_at": "2026-10-18T16:44:48.546+00:00"
+      },
+      {
+        "id": "02fad26c-dfd8-481b-a130-9fc6903ff468",
+        "status": "completed",
+        "chunk_start_index": 6,
+        "chunk_end_index": 8,
+        "updated_at": "2026-10-18T16:44:34.726+00:00"
+      },
+      {
+        "id": "531d33fe-d1f7-45a8-a5f4-d92ba6c89e91",
+        "status": "completed",
+        "chunk_start_index": 3,
+        "chunk_end_index": 5,
+        "updated_at": "2026-10-18T16:15:55.221+00:00"
+      },
+      {
+        "id": "3eb434cc-abb3-4007-814c-1799fc26b115",
+        "status": "completed",
+        "chunk_start_index": 0,
+        "chunk_end_index": 2,
+        "updated_at": "2026-10-18T16:15:32.744+00:00"
+      }
+    ]
+  },
+  "weeklyMilestoneExamples": [
+    {
+      "id": "05f991e6-308c-409b-8bf5-df66fa4bbef8",
+      "text": "Overall progress 0.0",
+      "original": "0.0",
+      "sources": [
+        {
+          "id": "310ab4f6-f355-4117-8b66-79d4ffb43c19",
+          "excerpt": "Subcontractor: Overall Progress | Kazee: 0.0",
+          "document_id": "cf3e1d70-d12e-457a-9a50-e66b758c0c8e",
+          "document_chunk_id": "e16520e9-a6c5-4e10-98e4-52c06272080e"
+        }
+      ]
+    },
+    {
+      "id": "0ca88915-ba26-4797-b482-51701d8ee39b",
+      "text": "Check date",
+      "original": "2026-10-01",
+      "sources": [
+        {
+          "id": "29258bc6-e6bd-41e6-aa66-d0b822316509",
+          "excerpt": "DATA QUALITY AUDIT — Smart Building Subcontractor Weekly Report: Check date | B: 1-Oct-2026",
+          "document_id": "cf3e1d70-d12e-457a-9a50-e66b758c0c8e",
+          "document_chunk_id": "53d4340c-1e23-4cc0-88b7-8c2617348f1f"
+        }
+      ]
+    },
+    {
+      "id": "128b32ba-c6c7-4f1a-824b-268cd877baa2",
+      "text": "Week W14 planned %: 0.95",
+      "original": "Week W14 planned %: 0.95",
+      "sources": [
+        {
+          "id": "94deb984-af45-4d84-bbf0-9ab1ed097b2c",
+          "excerpt": "Week: W14 | Cut-off Date: 46374.0 [raw value: 46374.0; number format: dd\\-mmm\\-yyyy; ISO date: 2026-12-18] | Planned %: 0.95 | Work Completed This Week: Update installation/integration/testing progress and evidence. | Plan Next Week: Close open integration/testing items and prepare handover. | Due Date: Kazee [raw value: Kazee; number format: dd\\-mmm\\-yyyy; Needs Review: invalid Excel serial Kazee] | PM Feedback: EV-007",
+          "document_id": "cf3e1d70-d12e-457a-9a50-e66b758c0c8e",
+          "document_chunk_id": "cc91bfce-fe59-4ca0-bd9a-5f99fdd5a1ae"
+        }
+      ]
+    },
+    {
+      "id": "17c3c4f0-abbc-4015-9b79-ef879c3b1c09",
+      "text": "Integrated data verified",
+      "original": "Integrated data verified",
+      "sources": [
+        {
+          "id": "f7b5151d-7895-4934-b86f-04cdaa6a61db",
+          "excerpt": "WBS: 6.1 | Phase: Integration | Activity / Work Package: Aggregasi data utilitas dan interface ke BISMA | Deliverable / Acceptance Criteria: Integrated data verified | PIC: Integration PIC | Baseline Start: 46325.0 [raw value: 46325.0; number format: dd\\-mmm\\-yyyy; ISO date: 2026-10-30] | Baseline Finish: 46339.0 [raw value: 46339.0; number format: dd\\-mmm\\-yyyy; ISO date: 2026-11-13] | Duration: 15 | Weight: 0.13 | % Complete: 0.0 | Weighted Progress: 0 | Forecast Finish: 46339.0 [raw value: 46339.0; number format: yyyy-mm-dd h:mm:ss; ISO date: 2026-11-13] | RAG: Green | Dependency: 5.1 | Milestone: Integrated data verified | Evidence / Link Ref.: EV-006",
+          "document_id": "cf3e1d70-d12e-457a-9a50-e66b758c0c8e",
+          "document_chunk_id": "88bb27c1-d149-43bd-a802-78f7424763c7"
+        }
+      ]
+    },
+    {
+      "id": "29679ba8-4e54-4dc5-add7-ef4a30d0a13a",
+      "text": "Week W12 planned %: 0.84",
+      "original": "Week W12 planned %: 0.84",
+      "sources": [
+        {
+          "id": "cc49753f-0e51-4717-8e6b-6f6d146959bb",
+          "excerpt": "Week: W12 | Cut-off Date: 46360.0 [raw value: 46360.0; number format: dd\\-mmm\\-yyyy; ISO date: 2026-12-04] | Planned %: 0.84 | Work Completed This Week: Update installation/integration/testing progress and evidence. | Plan Next Week: Close open integration/testing items and prepare handover. | Due Date: Kazee [raw value: Kazee; number format: dd\\-mmm\\-yyyy; Needs Review: invalid Excel serial Kazee] | PM Feedback: EV-007",
+          "document_id": "cf3e1d70-d12e-457a-9a50-e66b758c0c8e",
+          "document_chunk_id": "cc91bfce-fe59-4ca0-bd9a-5f99fdd5a1ae"
+        }
+      ]
+    },
+    {
+      "id": "2e8367c6-4b7a-43bd-99b1-5351fe3375e6",
+      "text": "Report completion/evidence: Cross-system functional & end-to-end test",
+      "original": "Report completion/evidence: Cross-system functional & end-to-end test",
+      "sources": [
+        {
+          "id": "1a9b9ec2-4da9-4cba-9fbf-4e09b463b150",
+          "excerpt": "Week: W7 | Cut-off Date: 46325.0 [raw value: 46325.0; number format: dd\\-mmm\\-yyyy; ISO date: 2026-10-30] | Planned %: 0.42 | Work Completed This Week: Report completion/evidence: Cross-system functional & end-to-end test | Plan Next Week: Next: Architecture docs, SOP, training & operational handover | Due Date: Kazee [raw value: Kazee; number format: dd\\-mmm\\-yyyy; Needs Review: invalid Excel serial Kazee] | PM Feedback: EV-007",
+          "document_id": "cf3e1d70-d12e-457a-9a50-e66b758c0c8e",
+          "document_chunk_id": "d04650a0-cebc-45f2-9b45-df014bfbe0ee"
+        }
+      ]
+    },
+    {
+      "id": "37aff7c1-62f4-41e9-bd9b-cf0d81e9b321",
+      "text": "Aggregasi data utilitas dan interface ke BISMA",
+      "original": "Forecast Finish: 2026-11-13",
+      "sources": [
+        {
+          "id": "f4dcd001-3311-4e9d-844f-a5db41e9752d",
+          "excerpt": "WBS: 'Workplan & Gantt'!A10 (cached value: 6.1) | Activity / Work Package: 'Workplan & Gantt'!C10 (cached value: Aggregasi data utilitas dan interface ke BISMA) | Weight: 'Workplan & Gantt'!I10 (cached value: 0.13) | % Complete: 'Workplan & Gantt'!J10 (cached value: 0) | Weighted Progress: 'Workplan & Gantt'!K10 (cached value: 0) | Forecast Finish: 'Workplan & Gantt'!L10 (cached value: 46339; ISO date: 2026-11-13) [raw value: 46339; number format: yyyy-mm-dd h:mm:ss; ISO date: 2026-11-13] | RAG: 'Workplan & Gantt'!M10 (cached value: Green) [raw value: Green; number format: dd\\-mmm\\-yyyy; Needs Review: invalid Excel serial Green]",
+          "document_id": "cf3e1d70-d12e-457a-9a50-e66b758c0c8e",
+          "document_chunk_id": "57d6132d-4e01-4efd-9cc6-7fd94cfe8f02"
+        }
+      ]
+    },
+    {
+      "id": "3c0e06b6-8b37-452c-accc-450c1b0b1a42",
+      "text": "Utility inventory approved",
+      "original": "Utility inventory approved",
+      "sources": [
+        {
+          "id": "049654ed-3c2e-4c52-8952-ba76c91c2d4e",
+          "excerpt": "WBS: 1.1 | Phase: Engineering | Activity / Work Package: Inventarisasi utilitas, point list & kebutuhan monitoring | Deliverable / Acceptance Criteria: Utility inventory approved | PIC: Technical PIC | Baseline Start: 2026-09-18 0:00:00 [raw value: 2026-09-18 0:00:00; number format: yyyy-mm-dd h:mm:ss; Needs Review: invalid Excel serial 2026-09-18 0:00:00] | Baseline Finish: 2026-09-25 0:00:00 [raw value: 2026-09-25 0:00:00; number format: yyyy-mm-dd h:mm:ss; Needs Review: invalid Excel serial 2026-09-25 0:00:00] | Duration: G5-F5+1 (cached value: 8) | Weight: 0.08 | % Complete: 0.0 | Weighted Progress: I5*J5 (cached value: 0) | Forecast Finish: 2026-09-25 0:00:00 [raw value: 2026-09-25 0:00:00; number format: yyyy-mm-dd h:mm:ss; Needs Review: invalid Excel serial 2026-09-25 0:00:00] | RAG: Green | Dependency: Kickoff | Milestone: Utility inventory approved | Evidence / Link Ref.: EV-001",
+          "document_id": "cf3e1d70-d12e-457a-9a50-e66b758c0c8e",
+          "document_chunk_id": "a9a19d8c-7306-4e35-901f-8e571776db95"
+        }
+      ]
+    },
+    {
+      "id": "4aa82d22-8c21-4e3f-9713-022b00e19c90",
+      "text": "Report completion/evidence: Architecture docs, SOP, training & operational handover",
+      "original": "Report completion/evidence: Architecture docs, SOP, training & operational handover",
+      "sources": [
+        {
+          "id": "09da15ea-efda-4652-9c1a-48c1b786661d",
+          "excerpt": "Week: W8 | Cut-off Date: 46332.0 [raw value: 46332.0; number format: dd\\-mmm\\-yyyy; ISO date: 2026-11-06] | Planned %: 0.51 | Work Completed This Week: Report completion/evidence: Architecture docs, SOP, training & operational handover | Plan Next Week: Next: Architecture docs, SOP, training & operational handover | Due Date: Kazee [raw value: Kazee; number format: dd\\-mmm\\-yyyy; Needs Review: invalid Excel serial Kazee] | PM Feedback: EV-007",
+          "document_id": "cf3e1d70-d12e-457a-9a50-e66b758c0c8e",
+          "document_chunk_id": "d04650a0-cebc-45f2-9b45-df014bfbe0ee"
+        }
+      ]
+    },
+    {
+      "id": "4ebda1a5-8025-4b7e-9c0f-fdfb9b238f59",
+      "text": "Report completion/evidence: Aggregasi data utilitas dan interface ke BISMA",
+      "original": "Report completion/evidence: Aggregasi data utilitas dan interface ke BISMA",
+      "sources": [
+        {
+          "id": "806151ab-0868-455f-bd92-759fe3381e77",
+          "excerpt": "Week: W6 | Cut-off Date: 46318.0 [raw value: 46318.0; number format: dd\\-mmm\\-yyyy; ISO date: 2026-10-23] | Planned %: 0.33 | Work Completed This Week: Report completion/evidence: Aggregasi data utilitas dan interface ke BISMA | Plan Next Week: Next: Cross-system functional & end-to-end test | Due Date: Kazee [raw value: Kazee; number format: dd\\-mmm\\-yyyy; Needs Review: invalid Excel serial Kazee] | PM Feedback: EV-006",
+          "document_id": "cf3e1d70-d12e-457a-9a50-e66b758c0c8e",
+          "document_chunk_id": "d04650a0-cebc-45f2-9b45-df014bfbe0ee"
+        }
+      ]
+    },
+    {
+      "id": "53cf74b0-497a-4729-8a64-60bfc8978618",
+      "text": "Utility data architecture & interface design",
+      "original": "Forecast Finish: 2026-10-02",
+      "sources": [
+        {
+          "id": "a17f5ccb-5493-4fec-9b93-dd2d8bc11ba2",
+          "excerpt": "WBS: 'Workplan & Gantt'!A6 (cached value: 2.1) | Activity / Work Package: 'Workplan & Gantt'!C6 (cached value: Utility data architecture & interface design) | Weight: 'Workplan & Gantt'!I6 (cached value: 0.1) | % Complete: 'Workplan & Gantt'!J6 (cached value: 0) | Weighted Progress: 'Workplan & Gantt'!K6 (cached value: 0) | Forecast Finish: 'Workplan & Gantt'!L6 (cached value: 46297; ISO date: 2026-10-02) [raw value: 46297; number format: yyyy-mm-dd h:mm:ss; ISO date: 2026-10-02] | RAG: 'Workplan & Gantt'!M6 (cached value: Green) [raw value: Green; number format: dd\\-mmm\\-yyyy; Needs Review: invalid Excel serial Green]",
+          "document_id": "cf3e1d70-d12e-457a-9a50-e66b758c0c8e",
+          "document_chunk_id": "57d6132d-4e01-4efd-9cc6-7fd94cfe8f02"
+        }
+      ]
+    },
+    {
+      "id": "577cb339-fec7-472f-9e5a-d805391148e1",
+      "text": "Utility point configuration & local validation",
+      "original": "Forecast Finish: 2026-11-06",
+      "sources": [
+        {
+          "id": "15cfd5a8-aca3-49c4-88fb-dc362865e8ec",
+          "excerpt": "WBS: 'Workplan & Gantt'!A9 (cached value: 5.1) | Activity / Work Package: 'Workplan & Gantt'!C9 (cached value: Utility point configuration & local validation) | Weight: 'Workplan & Gantt'!I9 (cached value: 0.12) | % Complete: 'Workplan & Gantt'!J9 (cached value: 0) | Weighted Progress: 'Workplan & Gantt'!K9 (cached value: 0) | Forecast Finish: 'Workplan & Gantt'!L9 (cached value: 46332; ISO date: 2026-11-06) [raw value: 46332; number format: yyyy-mm-dd h:mm:ss; ISO date: 2026-11-06] | RAG: 'Workplan & Gantt'!M9 (cached value: Green) [raw value: Green; number format: dd\\-mmm\\-yyyy; Needs Review: invalid Excel serial Green]",
+          "document_id": "cf3e1d70-d12e-457a-9a50-e66b758c0c8e",
+          "document_chunk_id": "57d6132d-4e01-4efd-9cc6-7fd94cfe8f02"
+        }
+      ]
+    }
+  ]
+}

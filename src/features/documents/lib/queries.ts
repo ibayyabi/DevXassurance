@@ -55,12 +55,15 @@ export type DocumentReviewDetail = {
 };
 export type ExtractedFact = {
   id: string;
+  documentId: string | null;
+  documentTitle: string | null;
+  documentProcessingStatus: ProcessingStatus | null;
   factType: FactType;
   extractedText: string;
   originalValue: string;
   editedValue: string | null;
   confidence: number;
-  confirmationState: "ai_extracted" | "user_confirmed" | "user_edited";
+  confirmationState: "ai_extracted" | "user_confirmed" | "user_edited" | "user_rejected";
   evidenceLinks: EvidenceLink[];
 };
 
@@ -71,6 +74,7 @@ export type EvidenceLink = {
   chunkId: string | null;
   excerpt: string | null;
   confidence: number | null;
+  location?: string | null;
 };
 
 export type DocumentSummary = {
@@ -137,12 +141,13 @@ type DocumentRow = {
 
 type FactRow = {
   id: string;
+  extraction_runs: { document_id: string | null } | null;
   fact_type: FactType;
   extracted_text: string;
   original_value: string;
   edited_value: string | null;
   confidence: number;
-  confirmation_state: "ai_extracted" | "user_confirmed" | "user_edited";
+  confirmation_state: ExtractedFact["confirmationState"];
   evidence_links: {
     id: string;
     document_id: string;
@@ -150,6 +155,7 @@ type FactRow = {
     excerpt: string | null;
     confidence: number | null;
     documents: { title: string } | null;
+    document_chunks: { page_number: number | null; section_label: string | null; parser_metadata: Record<string, unknown> | null } | null;
   }[];
 };
 
@@ -185,14 +191,18 @@ export async function getDocumentIntelligence(projectId: string) {
         )
         .eq("project_id", projectId)
         .order("created_at", { ascending: false }),
-      supabase
-        .from("extracted_facts")
-        .select(
-          "id, fact_type, extracted_text, original_value, edited_value, confidence, confirmation_state, evidence_links(id, document_id, document_chunk_id, excerpt, confidence, documents(title))",
-        )
-        .eq("project_id", projectId)
-        .order("created_at", { ascending: false })
-        .limit(20),
+      (async () => {
+        const rows: FactRow[] = [];
+        for (let offset = 0; ; offset += 500) {
+          const { data, error } = await supabase.from("extracted_facts")
+            .select("id, fact_type, extracted_text, original_value, edited_value, confidence, confirmation_state, extraction_runs(document_id), evidence_links(id, document_id, document_chunk_id, excerpt, confidence, documents(title), document_chunks(page_number, section_label, parser_metadata))")
+            .eq("project_id", projectId).order("created_at", { ascending: false }).order("id")
+            .range(offset, offset + 499);
+          if (error) return { data: null, error };
+          rows.push(...(data ?? []) as unknown as FactRow[]);
+          if ((data ?? []).length < 500) return { data: rows, error: null };
+        }
+      })(),
       supabase
         .from("document_summaries")
         .select(
@@ -207,6 +217,8 @@ export async function getDocumentIntelligence(projectId: string) {
         .eq("project_id", projectId)
         .order("created_at", { ascending: false })
     ]);
+
+  if (documentsError || factsError || summaryError || submissionError) throw new Error("Project evidence could not be loaded. Try again.");
 
   const documentIds = (documentsData ?? []).map((row) => row.id);
   let reviewChunkData: Array<{ document_id: string; parser_metadata: Record<string, unknown> | null }> = [];
@@ -226,12 +238,21 @@ export async function getDocumentIntelligence(projectId: string) {
     metadataByDocument.set(row.document_id, metadata);
   }
 
+  const documents = ((documentsData ?? []) as unknown as DocumentRow[]).map((row) =>
+      mapDocument(row, readDocumentReviewDetails(metadataByDocument.get(row.id) ?? [])),
+    );
+  const documentsById = new Map(documents.map((document) => [document.id, document]));
+  const facts = ((factsData ?? []) as unknown as FactRow[]).map((row) => {
+    const fact = mapFact(row);
+    const owner = fact.documentId ? documentsById.get(fact.documentId) : null;
+    // Never silently omit orphaned facts or count a cross-document citation twice.
+    if (!owner) throw new Error("Some extracted facts cannot be attributed to a project document. Resolve their extraction-run ownership before reviewing counts.");
+    return { ...fact, documentTitle: owner.fileName, documentProcessingStatus: owner.processingStatus };
+  });
   return {
     membership,
-    documents: ((documentsData ?? []) as unknown as DocumentRow[]).map((row) =>
-      mapDocument(row, readDocumentReviewDetails(metadataByDocument.get(row.id) ?? [])),
-    ),
-    facts: ((factsData ?? []) as unknown as FactRow[]).map(mapFact),
+    documents,
+    facts,
     summaries: ((summaryData ?? []) as unknown as SummaryRow[]).map(mapSummary),
     uploadSubmissions: (submissionData ?? []).map((row) => ({
       id: row.id,
@@ -405,8 +426,13 @@ function readDocumentReviewDetails(metadataRows: unknown[]): DocumentReviewDetai
 
 
 function mapFact(row: FactRow): ExtractedFact {
+  const sourceDocumentIds = [...new Set((row.evidence_links ?? []).map((link) => link.document_id))];
   return {
     id: row.id,
+    // The extraction run owns a fact; supporting citations do not create extra facts.
+    documentId: row.extraction_runs?.document_id ?? (sourceDocumentIds.length === 1 ? sourceDocumentIds[0] : null),
+    documentTitle: null,
+    documentProcessingStatus: null,
     factType: row.fact_type,
     extractedText: row.extracted_text,
     originalValue: row.original_value,
@@ -420,6 +446,7 @@ function mapFact(row: FactRow): ExtractedFact {
       chunkId: link.document_chunk_id,
       excerpt: link.excerpt,
       confidence: link.confidence,
+      location: formatSourceLocation(link.document_chunks),
     })),
   };
 }

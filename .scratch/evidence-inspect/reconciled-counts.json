@@ -1,0 +1,314 @@
+{
+  "total": 1369,
+  "sum": 1369,
+  "types": {
+    "decision": 367,
+    "risk": 65,
+    "milestone": 497,
+    "issue": 211,
+    "owner_action": 229
+  },
+  "perDocument": [
+    {
+      "id": "f823286a-e057-4717-a740-65ce65c6e228",
+      "fileName": "Spesifikasi Teknis Smart Building Pemetaan Kegiatan dan Prioritas Pembelian Barang.xlsx",
+      "status": "failed",
+      "total": 0,
+      "types": {},
+      "missingCitations": 0
+    },
+    {
+      "id": "79d9325e-bb76-467b-a3ba-d4a142ceb24a",
+      "fileName": "Perhitungan dari Spesifikasi Teknis Smart Building Pemetaan Kegiatan dan Prioritas Pembelian Barang.xlsx",
+      "status": "failed",
+      "total": 123,
+      "types": {
+        "decision": 75,
+        "owner_action": 8,
+        "issue": 12,
+        "milestone": 15,
+        "risk": 13
+      },
+      "missingCitations": 123
+    },
+    {
+      "id": "8adffaec-4de0-4cdc-a147-b0b5ab750b79",
+      "fileName": "Pengajuan Pembelian Hardware 2 Oktober 2026_bahasan meeting 16oct.xlsx",
+      "status": "needs_review",
+      "total": 23,
+      "types": {
+        "decision": 20,
+        "issue": 1,
+        "risk": 2
+      },
+      "missingCitations": 0
+    },
+    {
+      "id": "cf3e1d70-d12e-457a-9a50-e66b758c0c8e",
+      "fileName": "06_Pengkondisian_Udara_Subcontractor_Weekly.xlsx",
+      "status": "needs_review",
+      "total": 60,
+      "types": {
+        "milestone": 34,
+        "issue": 15,
+        "owner_action": 5,
+        "risk": 2,
+        "decision": 4
+      },
+      "missingCitations": 0
+    },
+    {
+      "id": "7e79936f-e837-4fd5-9fbc-33545456f905",
+      "fileName": "06_Pengondisian_Udara_Subcontractor_Weekly.xlsx",
+      "status": "failed",
+      "total": 0,
+      "types": {},
+      "missingCitations": 0
+    },
+    {
+      "id": "16b86e4b-bf90-499d-8026-3f076fda134f",
+      "fileName": "09_Pengelolaan_Sampah_Subcontractor_Weekly.xlsx",
+      "status": "needs_review",
+      "total": 41,
+      "types": {
+        "decision": 2,
+        "owner_action": 8,
+        "milestone": 25,
+        "issue": 4,
+        "risk": 2
+      },
+      "missingCitations": 0
+    },
+    {
+      "id": "83c04a01-44b4-4638-aaad-b373a88b07d4",
+      "fileName": "03_Kontrol_Akses_Subcontractor_Weekly.xlsx",
+      "status": "needs_review",
+      "total": 86,
+      "types": {
+        "decision": 41,
+        "owner_action": 11,
+        "issue": 13,
+        "milestone": 18,
+        "risk": 3
+      },
+      "missingCitations": 0
+    },
+    {
+      "id": "4ec5a765-9b7e-4b1c-8b18-b548c9ddb631",
+      "fileName": "08_Air_Limbah_Subcontractor_Weekly.xlsx",
+      "status": "needs_review",
+      "total": 52,
+      "types": {
+        "issue": 16,
+        "milestone": 17,
+        "decision": 10,
+        "owner_action": 9
+      },
+      "missingCitations": 0
+    },
+    {
+      "id": "bbc97d81-dfe5-4b3e-93f7-373e0cf3055f",
+      "fileName": "07_Air_Bersih_Subcontractor_Weekly.xlsx",
+      "status": "failed",
+      "total": 62,
+      "types": {
+        "milestone": 11,
+        "owner_action": 13,
+        "risk": 6,
+        "decision": 10,
+        "issue": 22
+      },
+      "missingCitations": 0
+    },
+    {
+      "id": "56678074-3f60-4d54-a952-d6779ef65271",
+      "fileName": "12_BISMA_Subcontractor_Weekly.xlsx",
+      "status": "failed",
+      "total": 0,
+      "types": {},
+      "missingCitations": 0
+    },
+    {
+      "id": "44afd8f7-003d-4ec5-bc40-4a4cb45f7742",
+      "fileName": "11_Pengelolaan_Utilitas_Subcontractor_Weekly.xlsx",
+      "status": "failed",
+      "total": 0,
+      "types": {},
+      "missingCitations": 0
+    },
+    {
+      "id": "26c5ccb9-32e6-4631-a580-6f930f78306b",
+      "fileName": "01_Alarm_Kebencanaan_Subcontractor_Weekly(1).xlsx",
+      "status": "needs_review",
+      "total": 52,
+      "types": {
+        "milestone": 24,
+        "issue": 17,
+        "risk": 1,
+        "owner_action": 8,
+        "decision": 2
+      },
+      "missingCitations": 0
+    },
+    {
+      "id": "04b0a5d2-899c-44c9-8c91-be20e66709f8",
+      "fileName": "01_Alarm_Kebencanaan_Subcontractor_Weekly.xlsx",
+      "status": "failed",
+      "total": 0,
+      "types": {},
+      "missingCitations": 0
+    },
+    {
+      "id": "5f8c8566-0970-449d-a48e-71d3a56f4f46",
+      "fileName": "04_Kelistrikan_Elisa_Subcontractor_Weekly.xlsx",
+      "status": "failed",
+      "total": 0,
+      "types": {},
+      "missingCitations": 0
+    },
+    {
+      "id": "52936bdd-4fb6-4828-bf3e-df00e1422bbd",
+      "fileName": "04_Kelistrikan_Subcontractor_Weekly.xlsx",
+      "status": "needs_review",
+      "total": 57,
+      "types": {
+        "milestone": 25,
+        "issue": 12,
+        "decision": 10,
+        "owner_action": 7,
+        "risk": 3
+      },
+      "missingCitations": 0
+    },
+    {
+      "id": "33c7f3e2-f0f6-4b1f-bb8b-5f94cb5fd60b",
+      "fileName": "All Minutes of Meeting Smart Building.docx",
+      "status": "failed",
+      "total": 209,
+      "types": {
+        "owner_action": 75,
+        "milestone": 35,
+        "decision": 59,
+        "issue": 35,
+        "risk": 5
+      },
+      "missingCitations": 209
+    },
+    {
+      "id": "5589fe71-2ebc-48cf-87e3-d7ee8ac60076",
+      "fileName": "02_Kamera_Pengawas_Subcontractor_Weekly.xlsx",
+      "status": "failed",
+      "total": 0,
+      "types": {},
+      "missingCitations": 0
+    },
+    {
+      "id": "1abaeaa0-873b-463b-aafd-df766054cb96",
+      "fileName": "02_Kamera_Pengawasan_Subcontractor_Weekly.xlsx",
+      "status": "failed",
+      "total": 0,
+      "types": {},
+      "missingCitations": 0
+    },
+    {
+      "id": "44c97a39-5e80-4e7d-8291-02ac626d786c",
+      "fileName": "10_Ventilasi_Subcontractor_Weekly.xlsx",
+      "status": "needs_review",
+      "total": 107,
+      "types": {
+        "milestone": 60,
+        "risk": 21,
+        "decision": 7,
+        "owner_action": 11,
+        "issue": 8
+      },
+      "missingCitations": 0
+    },
+    {
+      "id": "4160eeb8-0f11-4089-b9fc-9b26bad2bf80",
+      "fileName": "05_Pencahayaan_Subcontractor_Weekly.xlsx",
+      "status": "completed",
+      "total": 86,
+      "types": {
+        "decision": 24,
+        "milestone": 28,
+        "risk": 2,
+        "issue": 21,
+        "owner_action": 11
+      },
+      "missingCitations": 0
+    },
+    {
+      "id": "4c50e77b-14f8-480d-b7e1-54beb9c17ca0",
+      "fileName": "KEGIATAN SMART BUILDING.xlsx",
+      "status": "needs_review",
+      "total": 265,
+      "types": {
+        "issue": 34,
+        "milestone": 166,
+        "owner_action": 62,
+        "risk": 1,
+        "decision": 2
+      },
+      "missingCitations": 0
+    },
+    {
+      "id": "1025fc7d-b74e-499b-9f0e-98a4be67ffd8",
+      "fileName": "SMART BUILDING PROPOSAL ITB INNOVATION PARK - SCCIC.docx",
+      "status": "needs_review",
+      "total": 34,
+      "types": {
+        "decision": 29,
+        "milestone": 2,
+        "risk": 2,
+        "issue": 1
+      },
+      "missingCitations": 0
+    },
+    {
+      "id": "79417276-5833-46ae-b08e-6a2c578365a9",
+      "fileName": "Komponen Wajib BGC.pdf",
+      "status": "completed",
+      "total": 6,
+      "types": {
+        "milestone": 2,
+        "decision": 4
+      },
+      "missingCitations": 0
+    },
+    {
+      "id": "b9763b00-d7ff-442b-93e7-f3b819b248bb",
+      "fileName": "Proposal Smart Monitoring Building System - SCCIC.pdf",
+      "status": "needs_review",
+      "total": 15,
+      "types": {
+        "decision": 8,
+        "risk": 2,
+        "milestone": 5
+      },
+      "missingCitations": 0
+    },
+    {
+      "id": "5daf23b5-af57-4d23-8aa4-a9010a041f06",
+      "fileName": "06-1 Paparan Permen BGC - Standar Teknis (1).pdf",
+      "status": "needs_review",
+      "total": 83,
+      "types": {
+        "decision": 60,
+        "milestone": 22,
+        "owner_action": 1
+      },
+      "missingCitations": 0
+    },
+    {
+      "id": "2f19fb09-dc44-43af-97d0-c76dedff3d4d",
+      "fileName": "Planning Smart Building IIP Summarecon.pptx",
+      "status": "completed",
+      "total": 8,
+      "types": {
+        "milestone": 8
+      },
+      "missingCitations": 0
+    }
+  ]
+}

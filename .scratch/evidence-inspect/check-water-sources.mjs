@@ -1,0 +1,13 @@
+import {readFileSync,writeFileSync} from 'node:fs';
+const data=JSON.parse(readFileSync('.scratch/evidence-inspect/audit-data.json','utf8'));
+const document=data.documents.find(d=>d.file_name.includes('07_Air_Bersih'));
+const u=new URL('/rest/v1/document_chunks',process.env.NEXT_PUBLIC_SUPABASE_URL);
+Object.entries({select:'id,document_id,chunk_text',project_id:`eq.${data.project.id}`,document_id:`eq.${document.id}`,order:'chunk_index'}).forEach(([k,v])=>u.searchParams.set(k,v));
+const r=await fetch(u,{headers:{apikey:process.env.SUPABASE_SERVICE_ROLE_KEY,Authorization:`Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`}});
+if(!r.ok)throw new Error(`Read failed ${r.status}`);
+const chunks=new Map((await r.json()).map(c=>[c.id,c]));
+const facts=data.facts.filter(f=>f.evidence_links.some(l=>l.document_id===document.id));
+const checks=facts.map(f=>({id:f.id,valid:f.evidence_links.every(l=>chunks.get(l.document_chunk_id)?.chunk_text.includes(l.excerpt)),text:f.extracted_text}));
+const result={documentId:document.id,chunks:chunks.size,facts:checks.length,matchingCitations:checks.filter(c=>c.valid).length,unmatched:checks.filter(c=>!c.valid)};
+writeFileSync('.scratch/evidence-inspect/water-source-check.json',JSON.stringify(result,null,2));
+console.log(JSON.stringify(result,null,2));
