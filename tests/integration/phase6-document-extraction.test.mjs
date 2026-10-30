@@ -118,11 +118,29 @@ function documentContextFromPrompt(prompt) {
   assert.ok(match, "the model request includes source references");
   return JSON.parse(match[1]);
 }
+function executiveSummaryContextFromPrompt(prompt) {
+  const match = prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m);
+  assert.ok(match, "the model request includes executive summary candidates");
+  return JSON.parse(match[1]);
+}
+function isExecutiveSummaryPrompt(prompt) {
+  return prompt.startsWith("Create a concise whole-document assurance summary");
+}
+
 
 function validModelOutput(
   prompt,
   { invalidCitation = false, classificationConfidence = 0.84, suggestedDocumentType = "progress_report" } = {},
 ) {
+  if (isExecutiveSummaryPrompt(prompt)) {
+    const input = executiveSummaryContextFromPrompt(prompt);
+    return {
+      summary_text: "- The project status remains under review.",
+      confidence: 0.8,
+      source_indexes: input.sources.slice(0, 1).map((source) => source.source_index),
+    };
+  }
+
   const sources = documentContextFromPrompt(prompt);
   const source = sources[0];
   const citation = (reference) => ({ source_id: reference.source_id });
@@ -278,6 +296,11 @@ test("bounded groups retry only failed work, reuse exact cached outputs, and kee
     const request = JSON.parse(init.body);
     assert.equal(request.options.temperature, 0);
     const prompt = request.messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      await new Promise((resolve) => setTimeout(resolve, 4));
+      active -= 1;
+      return modelResponse(validModelOutput(prompt));
+    }
     const groupChunks = documentContextFromPrompt(prompt);
     await new Promise((resolve) => setTimeout(resolve, 4));
     active -= 1;
@@ -289,7 +312,7 @@ test("bounded groups retry only failed work, reuse exact cached outputs, and kee
     assert.equal(partial.status, "completed", `${partial.errorCode}: ${partial.errorMessage}`);
     assert.equal(partial.processing_status, "needs_review");
     assert.match(partial.processing_error, /facts\[0\].*excluded/i);
-    assert.equal(calls, 5);
+    assert.equal(calls, 6);
     assert.ok(maximumActive <= 2);
     assert.equal([...store.rows.values()].filter((row) => row.status === "completed").length, 2);
     assert.equal([...store.rows.values()].filter((row) => row.status === "failed").length, 1);
@@ -302,7 +325,7 @@ test("bounded groups retry only failed work, reuse exact cached outputs, and kee
     );
     assert.equal(retried.status, "completed");
     assert.equal(retried.processing_status, "needs_review");
-    assert.equal(calls, beforeRetry + 2);
+    assert.equal(calls, beforeRetry + 3);
     assert.deepEqual(retried.facts.map((fact) => fact.evidence_chunk_index), [0, 2, 4]);
     assert.equal(new Set(retried.facts.map((fact) => fact.evidence_chunk_index)).size, 3);
     assert.equal(retried.document_suggestions.suggested_document_type, "progress_report");
@@ -337,7 +360,7 @@ test("bounded groups retry only failed work, reuse exact cached outputs, and kee
       store,
     );
     assert.equal(replaced.status, "completed");
-    assert.equal(calls, beforeReplacement + 4);
+    assert.equal(calls, beforeReplacement + 5);
     assert.ok(replaced.facts.some((fact) => fact.extracted_text.includes("REPLACED")));
     assert.ok(replaced.facts.every((fact) => !fact.extracted_text.includes("ORIGINAL")));
     assert.ok([...store.rows.values()].every((row) => /^[0-9a-f]{64}$/.test(row.groupKey)));
@@ -350,6 +373,7 @@ test("one invalid optional fact preserves validated outputs and marks the docume
     calls += 1;
     const prompt = JSON.parse(init.body).messages[1].content;
     const output = validModelOutput(prompt);
+    if (isExecutiveSummaryPrompt(prompt)) return modelResponse(output);
     output.facts.push({ ...output.facts[0], extracted_text: "x".repeat(5001) });
     return modelResponse(output);
   }, async () => {
@@ -359,14 +383,142 @@ test("one invalid optional fact preserves validated outputs and marks the docume
     );
     assert.equal(result.status, "completed");
     assert.equal(result.processing_status, "needs_review");
-    assert.equal(calls, 3);
+    assert.equal(calls, 4);
     assert.equal(result.facts.length, 1);
-    assert.equal(result.summary.summary_text.startsWith("Source group summary:"), true);
+    assert.equal(result.summary.summary_text, "- The project status remains under review.");
     assert.equal(result.document_suggestions.suggested_document_type, "progress_report");
     assert.match(result.processing_error, /facts\[1\].*excluded/i);
     assert.match(result.summary.quality_warning, /facts\[1\].*excluded/i);
     assert.equal([...store.rows.values()][0].result, null);
     assert.equal([...store.rows.values()][0].status, "failed");
+  });
+});
+
+test("whole-document summary prioritizes key assurance facts across extraction groups", async () => {
+  const chunks = Array.from({ length: 6 }, (_, chunkIndex) => ({
+    chunkIndex,
+    chunkText: `Evidence ${chunkIndex}: validated project assurance information.`,
+  }));
+  let summaryPrompt = "";
+  await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (prompt.startsWith("Classify the entire document")) {
+      return modelResponse(validModelOutput(prompt));
+    }
+    if (prompt.startsWith("Create a concise whole-document assurance summary")) {
+      summaryPrompt = prompt;
+      const sources = executiveSummaryContextFromPrompt(prompt).sources;
+      return modelResponse({
+        summary_text: [
+          "- Scope: Alarm Kebencanaan, reporting September–December 2026.",
+          "- Baseline approval is pending; reported progress needs review.",
+          "- The next critical milestone is the design review on 30 October.",
+          "- Top risk: FACP overlap; Amar owns the resolution.",
+          "- Evidence and readiness remain incomplete; cached formula results are unavailable.",
+        ].join("\n"),
+        confidence: 0.88,
+        source_indexes: sources.slice(0, 2).map((source) => source.source_index),
+      });
+    }
+    return modelResponse(validModelOutput(prompt));
+  }, async () => {
+    const result = await extractDocumentGroups(
+      job("generic-document"),
+      chunks,
+      { parserVersion: "synthetic-parser" },
+      memoryGroupStore(),
+    );
+    assert.equal(result.ok, true);
+    const summary = result.extraction.summary.summary_text;
+    assert.match(summaryPrompt, /baseline approval/i);
+    assert.match(summaryPrompt, /next critical milestone/i);
+    assert.match(summaryPrompt, /top unresolved risk/i);
+    assert.match(summaryPrompt, /readiness\/evidence/i);
+    assert.match(summaryPrompt, /data-quality caveats/i);
+    assert.equal(summary.split("\n").filter((line) => /^[-*]\s/u.test(line)).length, 5);
+    assert.ok(summary.trim().split(/\s+/u).length <= 150);
+    assert.doesNotMatch(summary, /Source group summary:/);
+    assert.deepEqual(
+      result.extraction.summary_sources.map((source) => source.evidence_chunk_index),
+      [0, 3],
+    );
+  });
+});
+
+test("executive summary retries out-of-contract length and citation indexes", async () => {
+  let summaryAttempts = 0;
+  await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (prompt.startsWith("Classify the entire document")) {
+      return modelResponse(validModelOutput(prompt));
+    }
+    if (isExecutiveSummaryPrompt(prompt)) {
+      summaryAttempts += 1;
+      if (summaryAttempts === 1) {
+        return modelResponse({
+          summary_text: Array.from(
+            { length: 7 },
+            (_, index) => `- Item ${index} ${"detail ".repeat(21)}`,
+          ).join("\n"),
+          confidence: 0.8,
+          source_indexes: [999],
+        });
+      }
+      assert.match(prompt, /summary_text must be at most 150 words/i);
+      assert.match(prompt, /source_indexes must contain unique indexes/i);
+      return modelResponse(validModelOutput(prompt));
+    }
+    return modelResponse(validModelOutput(prompt));
+  }, async () => {
+    const result = await processDocumentJob(
+      job(sourceDocument("SUMMARY-RETRY", 1), {
+        documentTypeHint: "progress_report",
+        documentDateHint: "2026-06-09",
+      }),
+      memoryGroupStore(),
+    );
+    assert.equal(result.status, "completed");
+    assert.equal(result.processing_status, "completed");
+    assert.equal(summaryAttempts, 2);
+    assert.equal(result.summary_sources.length, 1);
+    assert.doesNotMatch(result.summary.summary_text, /Executive summary unavailable/i);
+  });
+});
+
+test("failed executive summary synthesis is explicit and does not concatenate group summaries", async () => {
+  let summaryAttempts = 0;
+  await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (prompt.startsWith("Classify the entire document")) {
+      return modelResponse(validModelOutput(prompt));
+    }
+    if (isExecutiveSummaryPrompt(prompt)) {
+      summaryAttempts += 1;
+      return modelResponse({
+        summary_text: "This paragraph is not a valid executive-summary bullet.",
+        confidence: 0.8,
+        source_indexes: [0],
+      });
+    }
+    return modelResponse(validModelOutput(prompt));
+  }, async () => {
+    const result = await processDocumentJob(
+      job(sourceDocument("SUMMARY-FAIL", 1), {
+        documentTypeHint: "progress_report",
+        documentDateHint: "2026-06-09",
+      }),
+      memoryGroupStore(),
+    );
+    assert.equal(result.processing_status, "needs_review");
+    assert.equal(summaryAttempts, 2);
+    assert.equal(
+      result.summary.summary_text,
+      "Executive summary unavailable. Review the extracted findings and source evidence.",
+    );
+    assert.equal(result.summary.confidence, 0);
+    assert.deepEqual(result.summary_sources, []);
+    assert.match(result.processing_error, /prioritized whole-document summary could not be validated/i);
+    assert.doesNotMatch(result.summary.summary_text, /Source group summary:/);
   });
 });
 
@@ -380,6 +532,7 @@ test("metadata conflicts preserve supported document type and summaries cite rel
     const prompt = JSON.parse(init.body).messages[1].content;
     const output = validModelOutput(prompt);
     if (prompt.startsWith("Classify the entire document")) return modelResponse(output);
+    if (isExecutiveSummaryPrompt(prompt)) return modelResponse(output);
     const firstIndex = documentContextFromPrompt(prompt)[0].chunk_index;
     output.group_metadata_suggestions.detected_reporting_period = firstIndex < 3 ? "2026-06-01" : "2026-07-01";
     output.group_metadata_suggestions.suggested_workstream = firstIndex < 3 ? "Electrical" : "Mechanical";
@@ -396,7 +549,7 @@ test("metadata conflicts preserve supported document type and summaries cite rel
     assert.equal(result.extraction.document_suggestions.classification_confidence, 0.84);
     assert.equal(result.extraction.document_suggestions.detected_reporting_period, null);
     assert.equal(result.extraction.document_suggestions.suggested_workstream, null);
-    assert.equal(result.extraction.summary_sources.length, 2);
+    assert.equal(result.extraction.summary_sources.length, 1);
     assert.doesNotMatch(result.extraction.quality_warnings.join(" "), /summary source coverage is incomplete/i);
     assert.match(result.extraction.quality_warnings.join(" "), /conflicting evidence groups.*reporting_period|detected_reporting_period/i);
   });
@@ -456,6 +609,10 @@ test("document-level artifact classification survives conflicting chunk groups",
         quality_warning: null,
       });
     }
+    if (isExecutiveSummaryPrompt(prompt)) {
+      requestKinds.push("summary");
+      return modelResponse(validModelOutput(prompt));
+    }
     requestKinds.push("group");
     const output = validModelOutput(prompt);
     const source = documentContextFromPrompt(prompt)[0];
@@ -476,8 +633,8 @@ test("document-level artifact classification survives conflicting chunk groups",
     );
     assert.equal(result.ok, true);
     assert.equal(classificationCalls, 1);
-    assert.equal(requestKinds[0], "classification");
-    assert.ok(requestKinds.slice(1).every((kind) => kind === "group"));
+    assert.ok(requestKinds.slice(1, -1).every((kind) => kind === "group"));
+    assert.equal(requestKinds.at(-1), "summary");
     assert.equal(result.extraction.document_suggestions.suggested_document_type, "progress_report");
     assert.equal(result.extraction.document_suggestions.suggested_evidence_role, "current");
     assert.equal(result.extraction.document_suggestions.classification_confidence, 0.91);
@@ -496,6 +653,7 @@ test("invalid fact citations are excluded with an explicit review warning", asyn
     calls += 1;
     const prompt = JSON.parse(init.body).messages[1].content;
     if (prompt.startsWith("Classify the entire document")) return modelResponse(validModelOutput(prompt));
+    if (isExecutiveSummaryPrompt(prompt)) return modelResponse(validModelOutput(prompt));
     groupCalls += 1;
     assert.ok(groupCalls === 1 || prompt.includes("Previous response validation errors"));
     return modelResponse(validModelOutput(prompt, { invalidCitation: true }));
@@ -508,7 +666,7 @@ test("invalid fact citations are excluded with an explicit review warning", asyn
     assert.equal(result.processing_status, "needs_review");
     assert.equal(result.facts.length, 0);
     assert.match(result.processing_error, /facts\[0\].*excluded/i);
-    assert.equal(calls, 3);
+    assert.equal(calls, 4);
     assert.equal([...store.rows.values()][0].status, "failed");
   });
 });
@@ -520,6 +678,7 @@ test("a valid correction on the final bounded attempt is accepted", async () => 
     calls += 1;
     const prompt = JSON.parse(init.body).messages[1].content;
     if (prompt.startsWith("Classify the entire document")) return modelResponse(validModelOutput(prompt));
+    if (isExecutiveSummaryPrompt(prompt)) return modelResponse(validModelOutput(prompt));
     groupCalls += 1;
     if (groupCalls === 2) assert.ok(prompt.includes("Previous response validation errors"));
     return modelResponse(validModelOutput(prompt, { invalidCitation: groupCalls === 1 }));
@@ -533,7 +692,7 @@ test("a valid correction on the final bounded attempt is accepted", async () => 
     );
     assert.equal(result.status, "completed");
     assert.equal(result.processing_status, "completed");
-    assert.equal(calls, 3);
+    assert.equal(calls, 4);
     assert.ok(result.facts[0].evidence_chunk_index >= 0);
   });
 });
@@ -624,7 +783,7 @@ test("provider concurrency stays bounded across simultaneous document jobs", asy
     ]);
     assert.equal(first.status, "completed");
     assert.equal(second.status, "completed");
-    assert.equal(calls, 8);
+    assert.equal(calls, 10);
     assert.equal(maximumActive, 2);
   });
 });
@@ -704,7 +863,7 @@ test("per-document extraction ceiling allows 32 groups and rejects 33 before mod
       store,
     );
     assert.equal(atLimit.ok, true);
-    assert.equal(calls, 33);
+    assert.equal(calls, 34);
     const priorCalls = calls;
     const overLimit = await extractDocumentGroups(
       job("oversized document"),
@@ -746,6 +905,7 @@ test("source IDs resolve to exact canonical citations while the model sees compa
   }];
   await withLocalOllama(async (_url, init) => {
     const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) return modelResponse(validModelOutput(prompt));
     const sources = documentContextFromPrompt(prompt);
     assert.deepEqual(sources, [{
       source_id: "c0s0",
@@ -784,7 +944,7 @@ test("accepts a complete JSON object with plain trailing commentary and escaped 
     const source = `RISK SOURCE has {braces}, [brackets], "quoted text", and \\ escaped text. ${"evidence detail ".repeat(40)}`;
     const result = await processDocumentJob(job(source), memoryGroupStore());
     assert.equal(result.status, "completed");
-    assert.equal(calls, 2);
+    assert.equal(calls, 3);
     assert.ok(result.facts[0].excerpt.includes("{braces}"));
   });
 });
@@ -826,6 +986,7 @@ test("trailing commentary does not bypass extraction schema validation", async (
     calls += 1;
     const prompt = JSON.parse(init.body).messages[1].content;
     const output = validModelOutput(prompt);
+    if (isExecutiveSummaryPrompt(prompt)) return modelResponse(validModelOutput(prompt));
     output.facts[0].confidence = 1.5;
     return modelResponseContent(`${JSON.stringify(output)}\nExtraction completed.`);
   }, async () => {
@@ -837,7 +998,7 @@ test("trailing commentary does not bypass extraction schema validation", async (
     assert.equal(result.processing_status, "needs_review");
     assert.equal(result.facts.length, 0);
     assert.match(result.processing_error, /facts\[0\]\.confidence/);
-    assert.equal(calls, 3);
+    assert.equal(calls, 4);
   });
 });
 
@@ -871,7 +1032,7 @@ test("normalizes known document type labels but rejects unsupported categories",
       assert.equal(result.processing_status, "needs_review");
       assert.equal(result.document_suggestions.suggested_document_type, null);
       assert.match(result.processing_error, /not a supported document type/i);
-      assert.equal(calls, 3);
+      assert.equal(calls, 4);
     });
   }
 });
@@ -883,7 +1044,7 @@ const costSource =
 
 function costModelOutput(prompt, observations) {
   const group = validModelOutput(prompt);
-  if (prompt.startsWith("Classify the entire document")) return group;
+  if (isExecutiveSummaryPrompt(prompt)) return group;
   const sourceId = documentContextFromPrompt(prompt)[0].source_id;
   return {
     ...group,
@@ -901,8 +1062,10 @@ function costModelOutput(prompt, observations) {
 
 async function extractCostObservations(observations) {
   return await withLocalOllama(
-    async (_url, init) =>
-      modelResponse(costModelOutput(JSON.parse(init.body).messages[1].content, observations)),
+    async (_url, init) => {
+      const prompt = JSON.parse(init.body).messages[1].content;
+      return modelResponse(costModelOutput(prompt, observations));
+    },
     async () =>
       await extractDocumentGroups(
         job(costSource, { fileName: "cost-report.txt", title: "Cost Report" }),
@@ -1053,6 +1216,7 @@ test("a provider quota defers the remaining groups for retry instead of reportin
     if (prompt.startsWith("Classify the entire document")) {
       return modelResponse(validModelOutput(prompt));
     }
+    if (isExecutiveSummaryPrompt(prompt)) return modelResponse(validModelOutput(prompt));
     const chunkIndex = documentContextFromPrompt(prompt)[0].chunk_index;
     groupCalls.push(chunkIndex);
     if (quotaExhausted && chunkIndex === 2) {
@@ -1088,3 +1252,4 @@ test("a provider quota defers the remaining groups for retry instead of reportin
     );
   });
 });
+
