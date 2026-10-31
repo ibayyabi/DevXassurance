@@ -226,25 +226,28 @@ export async function updateExtractedFact(formData: FormData): Promise<void> {
   const projectId = String(formData.get("projectId") ?? "");
   const factId = String(formData.get("factId") ?? "");
   const editedValue = String(formData.get("editedValue") ?? "").trim();
+  const intent = String(formData.get("intent") ?? "edit");
+  const factIds = [...new Set([factId, ...formData.getAll("factIds").map(String)].filter(Boolean))];
 
-  if (!projectId || !factId || !editedValue) {
-    return;
-  }
+  if (!projectId || !factIds.length || !["accept", "edit", "reject"].includes(intent) || (intent === "edit" && (!editedValue || factIds.length !== 1))) throw new Error("Choose a valid fact review action and value.");
 
   const { supabase, membership } = await requireProjectMembership(projectId);
 
   if (!canManageProject(membership.role)) {
-    return;
+    throw new Error("You do not have permission to review extracted facts.");
   }
 
-  await supabase
+  const { data, error } = await supabase
     .from("extracted_facts")
     .update({
-      edited_value: editedValue,
-      confirmation_state: "user_edited",
+      ...(intent === "edit" ? { edited_value: editedValue } : {}),
+      confirmation_state: intent === "accept" ? "user_confirmed" : intent === "reject" ? "user_rejected" : "user_edited",
     })
-    .eq("id", factId)
-    .eq("project_id", projectId);
+    .in("id", factIds)
+    .eq("project_id", projectId)
+    .select("id");
+  if (error) throw new Error("Fact review could not be saved. Try again.");
+  if (data?.length !== factIds.length) throw new Error("Some facts are no longer available. Refresh and try again.");
 
   revalidatePath(`/app/projects/${projectId}/documents`);
 }

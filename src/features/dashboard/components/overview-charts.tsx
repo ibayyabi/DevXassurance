@@ -139,7 +139,7 @@ export function BudgetTrendChart({
                 dataKey="budgetPlan"
                 fill="transparent"
                 name="budgetPlan"
-                stroke="var(--status-neutral)"
+                stroke="var(--accent)"
                 strokeDasharray="6 5"
                 strokeWidth={2}
                 type="monotone"
@@ -231,7 +231,7 @@ export function ScheduleTrendChart({
                 dataKey="scheduleBaseline"
                 dot={false}
                 name="Approved baseline"
-                stroke="var(--status-neutral)"
+                stroke="var(--accent)"
                 strokeDasharray="6 5"
                 strokeWidth={2}
                 type="monotone"
@@ -381,7 +381,7 @@ export function RiskBreakdownChart({
     {
       name: "Uncontrolled",
       value: uncontrolled ?? 0,
-      fill: "var(--status-critical-text)",
+      fill: "var(--status-crit-text)",
     },
   ];
   const hasValues =
@@ -598,8 +598,8 @@ function conditionColor(condition: ReviewCondition) {
 function actionStatusColor(status: ActionStatusDatum["status"]) {
   if (status === "Completed") return "var(--status-ok)";
   if (status === "Open") return "var(--status-warn)";
-  if (status === "Deferred") return "var(--status-neutral)";
-  return "var(--text)";
+  if (status === "Deferred") return "var(--analysis)";
+  return "var(--accent)";
 }
 
 function formatCompactNumber(value: number) {

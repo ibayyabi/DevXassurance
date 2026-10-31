@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import type { ReportType } from "@/features/reports/lib/constants";
 
 import { requireProjectMembership } from "@/features/projects/lib/queries";
 import { canManageProject } from "@/features/projects/lib/roles";
@@ -8,7 +9,6 @@ import {
   renderReportDocx,
   renderReportPdf,
 } from "@/features/reports/lib/render-report";
-import { reviewEvidenceIssue } from "@/features/assurance/lib/evidence-readiness";
 
 export async function generateReportPreview(formData: FormData) {
   const projectId = String(formData.get("projectId") ?? "");
@@ -18,8 +18,8 @@ export async function generateReportPreview(formData: FormData) {
 
   if (!projectId || !audience || !detailLevel) return;
 
-  const { supabase, user, membership } = await requireProjectMembership(projectId);
-  if (!canManageProject(membership.role)) return;
+  const { supabase, membership } = await requireProjectMembership(projectId);
+  if (!canManageProject(membership.role)) throw new Error("Your project role cannot manage reports.");
 
   let reviewQuery = supabase
     .from("assurance_reviews")
@@ -33,49 +33,15 @@ export async function generateReportPreview(formData: FormData) {
   const review = reviewRows?.[0];
   if (!review) throw new Error("Create an Assurance Review before generating a report.");
 
-  const { data: links, error: linksError } = await supabase
-    .from("assurance_review_documents")
-    .select("document_id, evidence_role")
-    .eq("review_id", review.id)
-    .eq("project_id", projectId);
-  if (linksError) throw new Error(linksError.message);
-  const linkedIds = [...new Set((links ?? []).map((link) => link.document_id))];
-  const { data: linkedDocs, error: linkedError } = linkedIds.length
-    ? await supabase.from("documents").select("id, processing_status").eq("project_id", projectId).in("id", linkedIds)
-    : { data: [], error: null };
-  if (linkedError) throw new Error(linkedError.message);
-  const evidenceIssue = reviewEvidenceIssue(links ?? [], linkedDocs ?? []);
-  if (evidenceIssue === "missing_role") {
-    throw new Error("Select completed Approved Baseline and Current Period evidence before generating a report.");
-  }
-  if (evidenceIssue) {
-    throw new Error("A selected baseline or current-period document is unavailable. Retry or replace it in the Evidence Library before generating a report.");
-  }
-  const [{ data: findings, error: findingsError }, { data: actions, error: actionsError }, { count: evidenceCount }] =
-    await Promise.all([
-      supabase
-        .from("assurance_findings")
-        .select("domain, condition, headline, explanation, confirmation_state")
-        .eq("review_id", review.id)
-        .eq("project_id", projectId)
-        .order("domain"),
-      supabase
-        .from("assurance_actions")
-        .select("title, owner_name, due_date, priority, status")
-        .eq("review_id", review.id)
-        .eq("project_id", projectId)
-        .order("priority", { ascending: false }),
-      supabase
-        .from("assurance_review_documents")
-        .select("id", { count: "exact", head: true })
-        .eq("review_id", review.id)
-        .eq("project_id", projectId),
-    ]);
-  if (findingsError) throw new Error(findingsError.message);
-  if (actionsError) throw new Error(actionsError.message);
-  if ((findings ?? []).length !== 3) {
-    throw new Error("Complete the Budget, Schedule, and Risk analysis first.");
-  }
+  const { data: context, error: contextError } = await supabase.rpc("assurance_report_operation", {
+    p_project_id: projectId, p_review_id: review.id, p_operation: "context",
+  });
+  if (contextError) throw new Error(contextError.message);
+  const { attempt_id: attemptId, findings, actions, evidence_count: evidenceCount } = context as {
+    attempt_id: string; evidence_count: number;
+    findings: { domain: string; condition: string; headline: string; explanation: string; confirmation_state: string }[];
+    actions: { title: string; owner_name: string | null; due_date: string | null; status: string }[];
+  };
 
   const conditionSummary = (findings ?? [])
     .map((finding) => `${titleCase(finding.domain)} - ${conditionLabel(finding.condition)}: ${finding.headline}`)
@@ -96,36 +62,28 @@ export async function generateReportPreview(formData: FormData) {
         .join("\n") || "No management action is required by the current findings.",
   };
 
-  const { error: previewError } = await supabase.from("report_previews").insert({
-    project_id: projectId,
-    created_by: user.id,
-    assurance_review_id: review.id,
-    report_type: "assurance_report",
-    reporting_period: formatReportingPeriod(review.reporting_period),
-    audience,
-    detail_level: detailLevel,
-    original_sections: sections,
-    included_evidence_counts: {
-      review_documents: evidenceCount ?? 0,
-      findings: findings?.length ?? 0,
-      confirmed_findings: findings?.filter((finding) => finding.confirmation_state === "user_confirmed").length ?? 0,
-      actions: actions?.length ?? 0,
+  const { error: previewError } = await supabase.rpc("assurance_report_operation", {
+    p_project_id: projectId, p_review_id: review.id, p_operation: "create", p_attempt_id: attemptId,
+    p_payload: {
+      reporting_period: formatReportingPeriod(review.reporting_period),
+      audience,
+      detail_level: detailLevel,
+      sections,
+      counts: {
+        review_documents: evidenceCount ?? 0,
+        findings: findings?.length ?? 0,
+        confirmed_findings: findings?.filter((finding) => finding.confirmation_state === "user_confirmed").length ?? 0,
+        actions: actions?.length ?? 0,
+      },
+      provenance: [
+        { label: "Reporting-period review", source: `assurance_reviews:${review.id}` },
+        { label: "Bound evidence", source: "assurance_review_documents" },
+        { label: "Budget, Schedule, and Risk findings", source: "assurance_findings" },
+        { label: "Management actions", source: "assurance_actions" },
+      ],
     },
-    provenance: [
-      { label: "Reporting-period review", source: `assurance_reviews:${review.id}` },
-      { label: "Bound evidence", source: "assurance_review_documents" },
-      { label: "Budget, Schedule, and Risk findings", source: "assurance_findings" },
-      { label: "Management actions", source: "assurance_actions" },
-    ],
-    review_state: "draft_ai_generated",
   });
   if (previewError) throw new Error(previewError.message);
-
-  await supabase
-    .from("assurance_reviews")
-    .update({ status: "report_draft", current_step: "report", updated_at: new Date().toISOString() })
-    .eq("id", review.id)
-    .eq("project_id", projectId);
 
   revalidatePath(`/app/projects/${projectId}/reports`);
   revalidatePath(`/app/projects/${projectId}/assurance`);
@@ -177,45 +135,18 @@ export async function markReportReviewed(formData: FormData) {
 
   if (!projectId || !previewId) return;
 
-  const { supabase, user, membership } = await requireProjectMembership(projectId);
-  if (!canManageProject(membership.role)) return;
+  const { supabase, membership } = await requireProjectMembership(projectId);
+  if (!canManageProject(membership.role)) throw new Error("Your project role cannot manage reports.");
 
-  const { data: before } = await supabase
-    .from("report_previews")
-    .select("review_state, assurance_review_id")
-    .eq("id", previewId)
-    .eq("project_id", projectId)
-    .maybeSingle();
-
-  await supabase
-    .from("report_previews")
-    .update({ review_state: "reviewed" })
-    .eq("id", previewId)
-    .eq("project_id", projectId);
-
-  await supabase.from("audit_events").insert({
-    project_id: projectId,
-    actor_id: user.id,
-    event_type: "report_reviewed",
-    entity_type: "report_preview",
-    entity_id: previewId,
-    before_state: before,
-    after_state: { review_state: "reviewed" },
+  const { data: preview, error: previewError } = await supabase.from("report_previews")
+    .select("assurance_review_id").eq("id", previewId).eq("project_id", projectId).maybeSingle();
+  if (previewError) throw new Error(previewError.message);
+  if (!preview?.assurance_review_id) throw new Error("Generate a report associated with a current analysis first.");
+  const { error } = await supabase.rpc("assurance_report_operation", {
+    p_project_id: projectId, p_review_id: preview.assurance_review_id,
+    p_preview_id: previewId, p_operation: "approve",
   });
-
-  if (before?.assurance_review_id) {
-    await supabase
-      .from("assurance_reviews")
-      .update({
-        status: "approved",
-        current_step: "report",
-        reviewed_by: user.id,
-        approved_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", before.assurance_review_id)
-      .eq("project_id", projectId);
-  }
+  if (error) throw new Error(error.message);
 
   revalidatePath(`/app/projects/${projectId}/reports`);
   revalidatePath(`/app/projects/${projectId}/assurance`);
@@ -227,19 +158,23 @@ export async function exportReport(formData: FormData) {
   const format = String(formData.get("format") ?? "");
 
   if (!projectId || !previewId || !["pdf", "docx"].includes(format)) return;
-  const { supabase, user, membership } = await requireProjectMembership(projectId);
-  if (!canManageProject(membership.role)) return;
+  const { supabase, membership } = await requireProjectMembership(projectId);
+  if (!canManageProject(membership.role)) throw new Error("Your project role cannot manage reports.");
 
-  const { data: preview } = await supabase
-    .from("report_previews")
-    .select("report_type, reporting_period, original_sections, edited_sections, included_evidence_counts, review_state")
-    .eq("id", previewId)
-    .eq("project_id", projectId)
-    .maybeSingle();
-
-  if (!preview || !["reviewed", "exported"].includes(preview.review_state)) {
-    throw new Error("Approve the report before exporting PDF or DOCX.");
-  }
+  const { data: association, error: associationError } = await supabase.from("report_previews")
+    .select("assurance_review_id").eq("id", previewId).eq("project_id", projectId).maybeSingle();
+  if (associationError) throw new Error(associationError.message);
+  if (!association?.assurance_review_id) throw new Error("Generate a report associated with a current analysis first.");
+  const { data: checked, error: checkError } = await supabase.rpc("assurance_report_operation", {
+    p_project_id: projectId, p_review_id: association.assurance_review_id,
+    p_preview_id: previewId, p_operation: "export_check",
+  });
+  if (checkError) throw new Error(checkError.message);
+  const { preview, attempt_id: attemptId, report_fingerprint: reportFingerprint } = checked as {
+    attempt_id: string; report_fingerprint: string;
+    preview: { report_type: ReportType; reporting_period: string; original_sections: Record<string,string>;
+      edited_sections: Record<string,string> | null; included_evidence_counts: Record<string,number> };
+  };
 
   const extension = format as "pdf" | "docx";
   const generatedAt = new Date();
@@ -279,47 +214,23 @@ export async function exportReport(formData: FormData) {
     .from("project-reports")
     .upload(storagePath, file, { upsert: false });
 
-  if (error) {
-    await supabase
-      .from("report_previews")
-      .update({ review_state: "export_failed" })
-      .eq("id", previewId)
-      .eq("project_id", projectId);
-    return;
+  if (error) throw new Error(error.message);
+  // Storage is outside PostgreSQL's transaction. Revalidate after upload; never
+  // advertise a file from an obsolete analysis or changed report revision.
+  const { error: finishError } = await supabase.rpc("assurance_report_operation", {
+    p_project_id: projectId, p_review_id: association.assurance_review_id,
+    p_preview_id: previewId, p_attempt_id: attemptId, p_operation: "export_finish",
+    p_payload: { report_fingerprint: reportFingerprint, format: extension, storage_path: storagePath,
+      file_name: `project-assurance-${preview.report_type}-${generatedStamp}.${extension}`,
+      file_size: reportBytes.byteLength },
+  });
+  if (finishError) {
+    const { data: removed, error: cleanupError } = await supabase.storage.from("project-reports").remove([storagePath]);
+    if (cleanupError || !removed?.some((item) => item.name === storagePath)) {
+      throw new Error(`${finishError.message} Unregistered private export may require cleanup: ${cleanupError?.message ?? "storage deletion was not permitted"}`);
+    }
+    throw new Error(finishError.message);
   }
-
-  await supabase.from("report_exports").insert({
-    project_id: projectId,
-    report_preview_id: previewId,
-    exported_by: user.id,
-    export_format: extension,
-    storage_path: storagePath,
-    file_name: `project-assurance-${preview.report_type}-${generatedStamp}.${extension}`,
-    file_size: reportBytes.byteLength,
-    status: "exported",
-  });
-
-  await supabase
-    .from("report_previews")
-    .update({ review_state: "exported" })
-    .eq("id", previewId)
-    .eq("project_id", projectId);
-
-  await supabase.from("audit_events").insert({
-    project_id: projectId,
-    actor_id: user.id,
-    event_type: "report_exported",
-    entity_type: "report_preview",
-    entity_id: previewId,
-    before_state: { review_state: "user_edited_or_draft" },
-    after_state: {
-      review_state: "exported",
-      format: extension,
-      storage_path: storagePath,
-      appendix_label: "Evidence appendix",
-      evidence_appendix: evidenceAppendix,
-    },
-  });
 
   revalidatePath(`/app/projects/${projectId}/reports`);
 }

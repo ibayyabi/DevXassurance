@@ -24,6 +24,10 @@ export default {
           soft: "rgb(var(--accent-soft-rgb) / <alpha-value>)",
           foreground: "rgb(var(--on-accent-rgb) / <alpha-value>)",
         },
+        analysis: {
+          DEFAULT: "rgb(var(--analysis-rgb) / <alpha-value>)",
+          soft: "rgb(var(--analysis-soft-rgb) / <alpha-value>)",
+        },
         status: {
           ok: {
             DEFAULT: "rgb(var(--status-ok-rgb) / <alpha-value>)",
@@ -85,7 +89,7 @@ export default {
         chart: {
           "1": "rgb(var(--accent-rgb) / <alpha-value>)",
           "2": "rgb(var(--status-ok-rgb) / <alpha-value>)",
-          "3": "rgb(var(--status-neutral-rgb) / <alpha-value>)",
+          "3": "rgb(var(--analysis-rgb) / <alpha-value>)",
           "4": "rgb(var(--status-warn-rgb) / <alpha-value>)",
           "5": "rgb(var(--status-critical-rgb) / <alpha-value>)",
         },

@@ -241,9 +241,11 @@ test("Phase 6 browser journey: multi-file, ZIP safety, guided correction, retrie
   expect(failedWorker.ok).toBe(false);
   expect(failedWorker.payload.errorCode).toBeTruthy();
   await page.reload();
-  const failedArticle = documentArticle(page, failureFile.name);
-  await expect(failedArticle.getByText("Failed", { exact: true })).toBeVisible();
-  await failedArticle.getByRole("button", { name: "Retry analysis" }).click();
+  await page.getByRole("button", { name: "2. Baca & periksa", exact: true }).click();
+  const failedArticle = await openDocumentDetails(page, failureFile.name);
+  await expect(failedArticle.getByText("Failed", { exact: true }).first()).toBeVisible();
+  await failedArticle.getByRole("button", { name: "Retry document processing" }).click();
+  await failedArticle.getByRole("button", { name: "Close document details", exact: true }).click();
   await waitForJob(projectId, failureFile.name, failedWorker.jobId);
   await processSuccessfully(failureFile.name);
   const noHintSuggestion = await getDocument(projectId, failureFile.name);
@@ -294,6 +296,8 @@ test("Phase 6 browser journey: multi-file, ZIP safety, guided correction, retrie
     reportingPeriod: "2026-03",
     workstream: "General",
   });
+
+  await verifyGuidedInlineD2(page);
 
   await page.goto(`/app/projects/${projectId}/assurance`);
   await page.getByLabel("Reporting month").fill("2026-03");
@@ -695,16 +699,17 @@ async function confirmMetadata(page: Page, fileName: string, values: {
   reportingPeriod: string;
   workstream: string;
 }) {
-  const article = documentArticle(page, fileName);
+  await page.getByRole("button", { name: "2. Baca & periksa", exact: true }).click();
+  const article = await openDocumentDetails(page, fileName);
   await expect(article).toBeVisible({ timeout: 120_000 });
-  const details = article.locator("details").filter({ hasText: /Review suggestions|Edit confirmed metadata/ }).first();
+  const details = article.locator("summary").filter({ hasText: /^(Review suggestions|Edit confirmed metadata)$/ }).locator("..");
   if (!(await details.evaluate((element) => element.hasAttribute("open")))) {
     await details.locator("summary").click();
   }
   const form = article.locator("form").filter({ hasText: "Save review metadata" });
   const projectId = await form.locator('input[name="projectId"]').inputValue();
   await form.getByLabel("Artifact type").selectOption(values.documentType);
-  await form.getByLabel("Review role").selectOption(values.evidenceRole);
+  await form.getByLabel("Evidence role (not user access)").selectOption(values.evidenceRole);
   await form.getByLabel("Document date").fill(values.documentDate);
   await form.getByLabel("Reporting period").fill(values.reportingPeriod);
   await form.getByLabel("Workstream").fill(values.workstream);
@@ -712,13 +717,28 @@ async function confirmMetadata(page: Page, fileName: string, values: {
   await expect.poll(async () => (await getDocument(projectId, fileName)).processing_status).toBe("completed");
   await page.reload();
   const updated = documentArticle(page, fileName);
+  await page.getByRole("button", { name: "2. Baca & periksa", exact: true }).click();
+  await openDocumentDetails(page, fileName);
   await expect(updated.getByText(new RegExp(`Type: .*Confirmed`))).toBeVisible();
-  await expect(updated.getByText(new RegExp(`Role: .*Confirmed`))).toBeVisible();
-  await expect(updated.getByText("Completed", { exact: true })).toBeVisible();
+  await expect(updated.getByText(new RegExp(`Evidence role: .*Confirmed`))).toBeVisible();
+  await expect(updated.getByText("Completed", { exact: true }).first()).toBeVisible();
+  await updated.getByRole("button", { name: "Close document details", exact: true }).click();
+}
+
+async function openDocumentDetails(page: Page, fileName: string) {
+  const close = page.getByRole("button", { name: "Close document details", exact: true });
+  if (await close.count()) await close.click();
+  await page.getByRole("button", { name: "2. Baca & periksa", exact: true }).click();
+  const library = page.locator("#evidence-library");
+  await library.getByRole("button", { name: "All documents", exact: true }).click();
+  await library.getByLabel("Search filenames").fill(fileName);
+  const article = documentArticle(page, fileName);
+  await article.locator(":scope > button").click();
+  return article;
 }
 
 function documentArticle(page: Page, fileName: string) {
-  return page.getByRole("article").filter({ hasText: fileName });
+  return page.locator("#evidence-library article").filter({ hasText: fileName });
 }
 
 async function persistedReviewEvidence(projectId: string, reviewId: string) {
@@ -792,4 +812,116 @@ async function sleep(milliseconds: number) {
 function db() {
   if (!supabase) throw new Error("The isolated development Supabase client is not initialized.");
   return supabase;
+}
+
+// Local presentation checks never submit the selected file or reviewer edits.
+async function verifyGuidedInlineD2(page: Page) {
+  const library = page.locator("#evidence-library");
+  const controls = page.locator("#evidence-check");
+  await page.getByRole("button", { name: "2. Baca & periksa", exact: true }).click();
+  await library.getByRole("button", { name: "All documents", exact: true }).click();
+  const articleId = await library.getByRole("article").first().getAttribute("id");
+  const article = library.locator(`article[id="${articleId}"]`);
+  const trigger = article.locator(":scope > button");
+  await trigger.click();
+  const panel = article.locator("dialog[data-document-details]");
+  const metadata = article.locator("form").filter({ hasText: "Save review metadata" });
+  await metadata.locator("..").evaluate((element) => { (element as HTMLDetailsElement).open = true; });
+  const field = metadata.getByLabel("Workstream");
+  const originalWorkstream = await field.inputValue();
+  await field.fill("D2 unsaved workstream");
+  const snapshot = await metadata.locator('input[type="hidden"]').evaluateAll((inputs) => inputs.map((input) => [(input as HTMLInputElement).name, (input as HTMLInputElement).value]));
+  const rowNode = await article.elementHandle();
+  const fieldNode = await field.elementHandle();
+  await panel.getByRole("button", { name: "Close document details", exact: true }).click();
+  const upload = page.locator('input[type="file"]');
+  await upload.setInputFiles({ name: "d2-selection-only.txt", mimeType: "text/plain", buffer: Buffer.from("Do not upload") });
+  const uploadNode = await upload.elementHandle();
+  const factInput = page.locator('input[name="editedValue"]').first();
+  const hasFact = await factInput.count() > 0;
+  let factNode;
+  const originalFactEdit = hasFact ? await factInput.inputValue() : "";
+  if (hasFact) {
+    await page.getByText("Review extracted details", { exact: true }).click();
+    await factInput.locator("xpath=ancestor::details[@data-extracted-fact]").locator("summary").click();
+    await factInput.fill("D2 unsaved fact correction");
+    factNode = await factInput.elementHandle();
+  }
+  let submissions = 0;
+  const mutations: string[] = [];
+  await page.exposeFunction("d2ObservedSubmit", () => { submissions++; });
+  await page.evaluate(() => document.addEventListener("submit", () => { void (window as unknown as { d2ObservedSubmit: () => Promise<void> }).d2ObservedSubmit(); }, { capture: true }));
+  const onRequest = (request: import("@playwright/test").Request) => {
+    if (!["GET", "HEAD"].includes(request.method())) mutations.push(`${request.method()} ${new URL(request.url()).pathname}`);
+  };
+  page.on("request", onRequest);
+  try {
+    await controls.getByLabel("Search filenames").fill("no-matching-D2-filename");
+    await expect(article).toBeHidden();
+    await expect(library.getByText("No documents match these filters.")).toBeVisible();
+    expect(await fieldNode!.evaluate((element) => element.isConnected)).toBe(true);
+    await library.getByRole("button", { name: "Clear filters", exact: true }).click();
+    await expect(article).toBeVisible();
+    await controls.getByText("Additional filters", { exact: true }).click();
+    const artifactFilter = library.getByLabel("Artifact type").first();
+    const category = library.getByLabel("Document category", { exact: true });
+    const artifactValue = await metadata.locator('select[name="documentType"]').inputValue();
+    await artifactFilter.selectOption(artifactValue);
+    await expect(category).toHaveValue(artifactValue);
+    await controls.getByLabel("Search filenames").fill("no-matching-D2-filename");
+    await expect(article).toBeHidden();
+    await library.getByRole("button", { name: "All documents", exact: true }).click();
+    await expect(artifactFilter).toHaveValue("all");
+    await expect(controls.getByLabel("Search filenames")).toHaveValue("");
+    for (const name of ["Failed", "Needs review"]) {
+      await library.getByRole("button", { name, exact: true }).click();
+      await expect(controls.getByLabel("Processing state")).toHaveValue(name === "Failed" ? "failed" : "needs_review");
+    }
+    await library.getByRole("button", { name: "All documents", exact: true }).click();
+    await trigger.focus();
+    await page.keyboard.press("Enter");
+    await expect(panel).toBeVisible();
+    await expect(field).toHaveValue("D2 unsaved workstream");
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    await expect(trigger).toBeFocused();
+    for (const name of ["1. Siapkan evidence", "2. Baca & periksa", "3. Tinjau hasil"]) {
+      await page.getByRole("navigation", { name: "Evidence steps" }).getByRole("button", { name, exact: true }).click();
+      await expect(page.getByRole("button", { name, exact: true })).toHaveAttribute("aria-current", "step");
+      const activePanel = name.startsWith("1.") ? "prepare" : name.startsWith("2.") ? "check" : "review";
+      for (const step of ["prepare", "check", "review"]) {
+        if (step === activePanel) await expect(page.locator(`#evidence-${step}`)).toBeVisible();
+        else await expect(page.locator(`#evidence-${step}`)).toBeHidden();
+      }
+      await page.keyboard.press("Tab");
+      expect(await page.evaluate(() => document.activeElement?.closest("[hidden]") !== null)).toBe(false);
+    }
+    expect(await rowNode!.evaluate((element, id) => element === document.getElementById(id!), articleId)).toBe(true);
+    expect(await fieldNode!.evaluate((element) => element.isConnected)).toBe(true);
+    expect(await metadata.locator('input[type="hidden"]').evaluateAll((inputs) => inputs.map((input) => [(input as HTMLInputElement).name, (input as HTMLInputElement).value]))).toEqual(snapshot);
+    expect(await uploadNode!.evaluate((element) => (element as HTMLInputElement).files?.[0]?.name)).toBe("d2-selection-only.txt");
+    if (hasFact) {
+      await page.getByRole("button", { name: "2. Baca & periksa", exact: true }).click();
+      await expect(factInput).toHaveValue("D2 unsaved fact correction");
+      expect(await factNode!.evaluate((element) => element.isConnected)).toBe(true);
+      const source = page.getByRole("list", { name: "Fact sources" }).getByRole("button").first();
+      if (await source.count()) {
+        await controls.getByLabel("Search filenames").fill("no-matching-D2-filename");
+        await source.click();
+        await expect.poll(async () => await controls.getByLabel("Search filenames").inputValue() === "" || await page.getByText("This source document is not available in the loaded collection.").isVisible()).toBe(true);
+      }
+    }
+    expect(submissions).toBe(0);
+    expect(mutations).toEqual([]);
+  } finally {
+    await library.locator("dialog[open]").evaluateAll((items) => items.forEach((item) => (item as HTMLDialogElement).close()));
+    await page.getByRole("button", { name: "2. Baca & periksa", exact: true }).click();
+    page.off("request", onRequest);
+    await library.getByRole("button", { name: "All documents", exact: true }).click();
+    await trigger.click();
+    await field.fill(originalWorkstream);
+    await panel.getByRole("button", { name: "Close document details", exact: true }).click();
+    if (hasFact) await factInput.fill(originalFactEdit);
+    await upload.setInputFiles([]);
+  }
 }

@@ -22,7 +22,7 @@ test("Assurance Review migration defines period-scoped findings and actions with
   }
 });
 
-test("overview uses the latest automatic project assessment", () => {
+test("overview uses the latest project assessment", () => {
   const query = read("src/features/assurance/lib/queries.ts");
   const page = read("src/app/app/projects/[projectId]/dashboard/page.tsx");
   const component = read("src/features/dashboard/components/usable-overview.tsx");
@@ -32,7 +32,7 @@ test("overview uses the latest automatic project assessment", () => {
   assert.match(query, /assurance_findings/);
   assert.match(query, /assurance_actions/);
   assert.match(page, /UsableOverview/);
-  assert.match(component, /Latest automatic assessment/);
+  assert.match(component, /Latest assessment/);
   assert.match(component, /Evidence incomplete/);
   assert.match(component, /document_fingerprint|analysisMetadata/);
   assert.doesNotMatch(component, /Math\.round.*%/);

@@ -87,10 +87,10 @@ export function AssistantChat({
         className="flex min-h-[640px] flex-col overflow-hidden rounded-2xl border border-ui-border bg-surface shadow-sm"
         aria-busy={isThinking}
       >
-        <div className="border-b border-ui-border p-5">
+        <div className="border-b border-analysis/40 bg-analysis-soft p-5">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-3">
-              <span className="rounded-xl bg-plan-track p-2.5 text-ink-muted">
+              <span className="rounded-xl bg-analysis p-2.5 text-brand-foreground">
                 <Bot className="h-5 w-5" />
               </span>
               <div>
@@ -176,10 +176,10 @@ function ThinkingBubble({ activeReview }: { activeReview: boolean }) {
     <div
       role="status"
       aria-live="polite"
-      className="max-w-[94%] rounded-2xl rounded-tl-md border border-ui-border bg-surface p-5 shadow-sm"
+      className="max-w-[94%] rounded-2xl rounded-tl-md border border-analysis/40 bg-analysis-soft p-5 shadow-sm"
     >
       <div className="flex items-center gap-2 text-sm font-semibold text-ink">
-        <Bot className="h-4 w-4 text-ink-muted" />
+        <Bot className="h-4 w-4 text-analysis" />
         AI Advisor
       </div>
       <div className="mt-4 flex items-center gap-3 text-sm text-ink-muted">
@@ -197,8 +197,8 @@ function ThinkingBubble({ activeReview }: { activeReview: boolean }) {
 
 function WelcomeMessage({ activeReview }: { activeReview: boolean }) {
   return (
-    <div className="rounded-2xl border border-ui-border bg-surface p-6 shadow-sm">
-      <p className="text-xs font-semibold uppercase tracking-[0.15em] text-brand">
+    <div className="rounded-2xl border border-analysis/40 bg-analysis-soft p-6 shadow-sm">
+      <p className="text-xs font-semibold uppercase tracking-[0.15em] text-analysis">
         Evidence-aware advisor
       </p>
       <h3 className="mt-2 text-2xl font-semibold text-ink">
@@ -231,9 +231,9 @@ function UserBubble({ question }: { question: string }) {
 
 function AssistantBubble({ message }: { message: AssistantAnswer }) {
   return (
-    <div className="max-w-[94%] rounded-2xl rounded-tl-md border border-ui-border bg-surface p-5 shadow-sm">
+    <div className="max-w-[94%] rounded-2xl rounded-tl-md border border-analysis/40 bg-analysis-soft p-5 shadow-sm">
       <div className="flex items-center gap-2 text-sm font-semibold text-ink">
-        <Bot className="h-4 w-4 text-ink-muted" />
+        <Bot className="h-4 w-4 text-analysis" />
         Direct answer
       </div>
       {message.insufficientEvidence && (
@@ -317,7 +317,7 @@ function SuggestedPrompts({ onSelect }: { onSelect: (value: string) => void }) {
   return (
     <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
       <div className="flex items-center gap-2">
-        <Lightbulb className="h-4 w-4 text-ink-muted" />
+        <Lightbulb className="h-4 w-4 text-analysis" />
         <h2 className="font-semibold text-ink">Useful questions</h2>
       </div>
       <div className="mt-4 grid gap-2">
