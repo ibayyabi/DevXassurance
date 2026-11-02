@@ -5,240 +5,52 @@ import { revalidatePath } from "next/cache";
 import {
   evaluateAssuranceReview,
   parseReviewExtraction,
-  type EvaluatedFinding,
+  type ReviewExtraction,
 } from "@/features/assurance/lib/analysis";
 import {
-  documentTypes,
-  type DocumentType,
-} from "@/features/documents/lib/constants";
+  evaluateProjectBudget,
+  selectAcceptedCostBaseline,
+  selectReportedEac,
+} from "@/features/assurance/lib/cost-evidence";
+import {
+  costBaselineColumns,
+  costObservationColumns,
+  mapCostBaselineRow,
+  mapCostObservationRow,
+  mapMilestoneMappingRow,
+  mapRiskMappingRow,
+  mapWbsMappingRow,
+  milestoneMappingColumns,
+  riskMappingColumns,
+  wbsMappingColumns,
+  type CostBaselineRow,
+  type CostObservationRow,
+  type MilestoneMappingRow,
+  type RiskMappingRow,
+  type WbsMappingRow,
+} from "@/features/assurance/lib/cost-queries";
+import {
+  buildWbsBudgetFindings,
+  buildWbsScopeCandidates,
+} from "@/features/assurance/lib/wbs-comparison";
+import {
+  buildMilestoneComparisons,
+  buildProgressComparison,
+  buildScheduleFinding,
+  milestoneSourceLabels,
+} from "@/features/assurance/lib/schedule-comparison";
+import {
+  buildRiskComparison,
+  riskSourceIds,
+  riskSourceScales,
+} from "@/features/assurance/lib/risk-comparison";
+import type { SourceChunk } from "@/features/assurance/lib/source-evidence";
 import { requireProjectMembership } from "@/features/projects/lib/queries";
-import { canManageProject } from "@/features/projects/lib/roles";
+import { canApproveAssuranceBaseline, canManageProject } from "@/features/projects/lib/roles";
 import { parseJsonObject, runOllamaChat } from "@/lib/ai/ollama";
+import { reviewEvidenceFits } from "@/features/assurance/lib/review-prompt";
+import { verifySourceExcerpt, type VerifiedSource } from "@/features/assurance/lib/source-evidence";
 
-export type AutomaticAssessmentResult = {
-  ok: boolean;
-  changed: boolean;
-  message: string;
-};
-
-type AutomaticDocumentRow = {
-  id: string;
-  title: string;
-  file_name: string;
-  document_type: DocumentType;
-  document_date: string | null;
-  created_at: string;
-};
-
-type AutomaticClassification = {
-  documentId: string;
-  documentType: DocumentType;
-  evidenceRole: "baseline" | "current" | "supporting";
-  reportingPeriod: string | null;
-  reason: string;
-  confidence: number;
-};
-
-type AutomaticPeriodAssessment = {
-  reportingPeriod: string;
-  extraction: NonNullable<ReturnType<typeof parseReviewExtraction>>;
-};
-
-export async function refreshAutomaticAssurance(
-  projectId: string,
-): Promise<AutomaticAssessmentResult> {
-  if (!projectId) {
-    return { ok: false, changed: false, message: "Project is required." };
-  }
-
-  const { supabase, user, membership } =
-    await requireProjectMembership(projectId);
-  assertCanManage(membership.role);
-
-  const { data: documentData, error: documentError } = await supabase
-    .from("documents")
-    .select("id, title, file_name, document_type, document_date, created_at")
-    .eq("project_id", projectId)
-    .eq("processing_status", "completed")
-    .order("document_date", { ascending: false, nullsFirst: false })
-    .order("created_at", { ascending: false });
-
-  if (documentError) {
-    return { ok: false, changed: false, message: documentError.message };
-  }
-
-  const documents = (documentData ?? []) as AutomaticDocumentRow[];
-  if (documents.length === 0) {
-    return {
-      ok: true,
-      changed: false,
-      message: "Upload documents and wait for processing to finish.",
-    };
-  }
-
-  const fingerprint = documents
-    .map((document) => document.id)
-    .sort()
-    .join(":");
-  const { data: latestReview } = await supabase
-    .from("assurance_reviews")
-    .select("id, status, analysis_metadata")
-    .eq("project_id", projectId)
-    .order("reporting_period", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  const previousMetadata = (latestReview?.analysis_metadata ?? {}) as Record<
-    string,
-    unknown
-  >;
-
-  const previousFingerprint =
-    previousMetadata.project_document_fingerprint ??
-    previousMetadata.document_fingerprint;
-
-  if (
-    previousFingerprint === fingerprint &&
-    ["findings_ready", "report_draft", "approved"].includes(
-      latestReview?.status ?? "",
-    )
-  ) {
-    return {
-      ok: true,
-      changed: false,
-      message: "The latest evidence is already assessed.",
-    };
-  }
-
-  const documentIds = documents.map((document) => document.id);
-  const { data: chunks, error: chunksError } = await supabase
-    .from("document_chunks")
-    .select("document_id, chunk_text, page_number, documents(title)")
-    .eq("project_id", projectId)
-    .in("document_id", documentIds)
-    .order("chunk_index");
-
-  if (chunksError || !chunks?.length) {
-    return {
-      ok: false,
-      changed: false,
-      message: chunksError?.message ?? "Processed documents contain no readable text.",
-    };
-  }
-
-  const response = await runOllamaChat({
-    format: "json",
-    temperature: 0,
-    system:
-      "You organize project evidence and extract project assurance values. Use only supplied evidence. Never invent a document date, classification, number, risk, or source excerpt. Return valid JSON only.",
-    user: buildAutomaticAssessmentPrompt(documents, chunks),
-  });
-
-  if (!response.ok) {
-    return {
-      ok: false,
-      changed: false,
-      message: `Automatic assessment failed: ${response.warning}`,
-    };
-  }
-
-  const parsed = parseJsonObject(response.content);
-  if (!parsed) {
-    return {
-      ok: false,
-      changed: false,
-      message: "The AI response was incomplete, so no project condition was changed.",
-    };
-  }
-
-  const classifications = normalizeAutomaticClassifications(
-    parsed.organization,
-    documents,
-  );
-  const latestPeriod = latestReportingPeriod(classifications, documents);
-  const periodAssessments = normalizePeriodAssessments(
-    parsed.period_assessments,
-    parsed.assessment,
-    latestPeriod,
-  );
-  if (periodAssessments.length === 0) {
-    return {
-      ok: false,
-      changed: false,
-      message: "The AI response did not contain a usable reporting-period assessment.",
-    };
-  }
-
-  const classificationUpdates = await Promise.all(
-    classifications.map((classification) =>
-      supabase
-        .from("documents")
-        .update({
-          document_type: classification.documentType,
-          evidence_role: classification.evidenceRole,
-          classification_confidence: classification.confidence,
-          classification_reason: classification.reason,
-          detected_reporting_period: classification.reportingPeriod,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", classification.documentId)
-        .eq("project_id", projectId),
-    ),
-  );
-  const classificationFailure = classificationUpdates.find((result) => result.error);
-  if (classificationFailure?.error) {
-    return { ok: false, changed: false, message: classificationFailure.error.message };
-  }
-
-  const baselineIds = classifications
-    .filter((item) => item.evidenceRole === "baseline")
-    .map((item) => item.documentId);
-  let savedPeriods = 0;
-  for (const periodAssessment of periodAssessments) {
-    const currentIds = classifications
-      .filter(
-        (item) =>
-          item.evidenceRole !== "baseline" &&
-          (item.reportingPeriod === periodAssessment.reportingPeriod ||
-            (item.reportingPeriod === null &&
-              periodAssessment.reportingPeriod === latestPeriod)),
-      )
-      .map((item) => item.documentId);
-
-    if (currentIds.length === 0) continue;
-
-    const result = await persistAutomaticReviewPeriod({
-      supabase,
-      userId: user.id,
-      projectId,
-      reportingPeriod: periodAssessment.reportingPeriod,
-      extraction: periodAssessment.extraction,
-      baselineIds,
-      currentIds,
-      provider: response.provider,
-      model: response.model,
-      projectFingerprint: fingerprint,
-      projectDocumentCount: documents.length,
-    });
-    if (!result.ok) return result;
-    savedPeriods += 1;
-  }
-
-  if (savedPeriods === 0) {
-    return {
-      ok: false,
-      changed: false,
-      message: "Documents were organized, but no current evidence matched a reporting period.",
-    };
-  }
-
-  revalidateAssurance(projectId);
-  revalidatePath(`/app/projects/${projectId}/documents`);
-  return {
-    ok: true,
-    changed: true,
-    message: `${documents.length} document${documents.length === 1 ? " was" : "s were"} organized into ${savedPeriods} reporting period${savedPeriods === 1 ? "" : "s"}.`,
-  };
-}
 
 export async function createAssuranceReview(formData: FormData): Promise<void> {
   const projectId = String(formData.get("projectId") ?? "");
@@ -293,64 +105,15 @@ export async function saveReviewEvidence(formData: FormData): Promise<void> {
     throw new Error("One document cannot be both baseline and current evidence.");
   }
 
-  const { supabase, user, membership } =
+  const { supabase, membership } =
     await requireProjectMembership(projectId);
   assertCanManage(membership.role);
 
-  const selectedIds = [...baselineIds, ...currentIds];
-  const { data: documents, error: documentError } = await supabase
-    .from("documents")
-    .select("id, processing_status")
-    .eq("project_id", projectId)
-    .in("id", selectedIds);
-
-  if (documentError) throw new Error(documentError.message);
-  if ((documents ?? []).length !== selectedIds.length) {
-    throw new Error("One or more selected documents are not in this project.");
-  }
-  if ((documents ?? []).some((document) => document.processing_status !== "completed")) {
-    throw new Error("Wait for selected documents to finish processing first.");
-  }
-
-  const { error: deleteError } = await supabase
-    .from("assurance_review_documents")
-    .delete()
-    .eq("review_id", reviewId)
-    .eq("project_id", projectId);
-  if (deleteError) throw new Error(deleteError.message);
-
-  const rows = [
-    ...baselineIds.map((documentId) => ({
-      project_id: projectId,
-      review_id: reviewId,
-      document_id: documentId,
-      evidence_role: "baseline",
-      added_by: user.id,
-    })),
-    ...currentIds.map((documentId) => ({
-      project_id: projectId,
-      review_id: reviewId,
-      document_id: documentId,
-      evidence_role: "current",
-      added_by: user.id,
-    })),
-  ];
-  const { error: insertError } = await supabase
-    .from("assurance_review_documents")
-    .insert(rows);
-  if (insertError) throw new Error(insertError.message);
-
-  const { error: reviewError } = await supabase
-    .from("assurance_reviews")
-    .update({
-      status: "evidence_ready",
-      current_step: "analysis",
-      analysis_error: null,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", reviewId)
-    .eq("project_id", projectId);
-  if (reviewError) throw new Error(reviewError.message);
+  const { error } = await supabase.rpc("save_assurance_evidence", {
+    p_project_id: projectId, p_review_id: reviewId,
+    p_baseline_ids: baselineIds, p_current_ids: currentIds,
+  });
+  if (error) throw new Error(error.message);
 
   revalidateAssurance(projectId);
 }
@@ -363,166 +126,208 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
   const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanManage(membership.role);
 
-  const { data: links, error: linksError } = await supabase
-    .from("assurance_review_documents")
-    .select("document_id, evidence_role, documents(title, document_date)")
-    .eq("project_id", projectId)
-    .eq("review_id", reviewId);
-  if (linksError) throw new Error(linksError.message);
-
-  const baselineIds = (links ?? [])
-    .filter((link) => link.evidence_role === "baseline")
-    .map((link) => link.document_id);
-  const currentIds = (links ?? [])
-    .filter((link) => link.evidence_role === "current")
-    .map((link) => link.document_id);
-
-  if (baselineIds.length === 0 || currentIds.length === 0) {
-    await setAnalysisFailure(
-      supabase,
-      projectId,
-      reviewId,
-      "Baseline and current evidence must be selected before analysis.",
-    );
-    return;
-  }
-
-  await supabase
-    .from("assurance_reviews")
-    .update({
-      status: "analyzing",
-      current_step: "analysis",
-      analysis_error: null,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", reviewId)
-    .eq("project_id", projectId);
-
-  const allDocumentIds = [...baselineIds, ...currentIds];
-  const { data: chunks, error: chunksError } = await supabase
-    .from("document_chunks")
-    .select("document_id, chunk_text, page_number, documents(title)")
-    .eq("project_id", projectId)
-    .in("document_id", allDocumentIds)
-    .order("chunk_index");
-
-  if (chunksError || !chunks?.length) {
-    await setAnalysisFailure(
-      supabase,
-      projectId,
-      reviewId,
-      chunksError?.message ?? "Selected evidence has no processed text.",
-    );
-    return;
-  }
-
-  const baselineText = formatEvidence(chunks, new Set(baselineIds));
-  const currentText = formatEvidence(chunks, new Set(currentIds));
-  const response = await runOllamaChat({
-    format: "json",
-    temperature: 0,
-    system:
-      "You extract structured project assurance values. Use only supplied evidence. Never invent a number, date, risk, comparison, or source excerpt. Use null or zero only as instructed. Return valid JSON only.",
-    user: buildReviewPrompt(baselineText, currentText),
+  const { data: claimed, error: claimError } = await supabase.rpc("claim_assurance_analysis", {
+    p_project_id: projectId, p_review_id: reviewId,
   });
+  if (claimError) throw new Error(claimError.message);
+  const claim = claimed as {
+    attempt_id: string; baseline_ids: string[]; current_ids: string[];
+    chunks: (SourceChunk & { documents: { title: string } })[];
+  };
+  const { attempt_id: attemptId, baseline_ids: baselineIds, current_ids: currentIds, chunks } = claim;
 
-  if (!response.ok) {
-    await setAnalysisFailure(
-      supabase,
-      projectId,
-      reviewId,
-      `AI analysis failed: ${response.warning}`,
-    );
-    return;
-  }
-
-  const parsed = parseJsonObject(response.content);
-  const extraction = parsed ? parseReviewExtraction(parsed) : null;
-
-  if (!extraction) {
-    await setAnalysisFailure(
-      supabase,
-      projectId,
-      reviewId,
-      "AI analysis returned an invalid structure. No finding was saved.",
-    );
-    return;
-  }
-
-  const findings = evaluateAssuranceReview(extraction);
-  const { error: actionDeleteError } = await supabase
-    .from("assurance_actions")
-    .delete()
-    .eq("review_id", reviewId);
-  if (actionDeleteError) throw new Error(actionDeleteError.message);
-
-  const { error: findingDeleteError } = await supabase
-    .from("assurance_findings")
-    .delete()
-    .eq("review_id", reviewId);
-  if (findingDeleteError) throw new Error(findingDeleteError.message);
-
-  const { data: insertedFindings, error: findingInsertError } = await supabase
-    .from("assurance_findings")
-    .insert(
-      findings.map((finding) => ({
-        project_id: projectId,
-        review_id: reviewId,
-        domain: finding.domain,
-        condition: finding.condition,
-        severity: finding.severity,
-        headline: finding.headline,
-        explanation: finding.explanation,
-        baseline_value: finding.baselineValue,
-        current_value: finding.currentValue,
-        variance: finding.variance,
-        required_evidence: finding.requiredEvidence,
-        baseline_document_ids: baselineIds,
-        current_document_ids: currentIds,
-        source_excerpts: finding.sourceExcerpts,
-        confidence: finding.confidence,
-        provenance: {
-          extraction_provider: response.provider,
-          extraction_model: response.model,
-          comparison_engine: "deterministic_phase_4_v1",
-          thresholds: "phase_3_usable_mvp_defaults",
-        },
-      })),
-    )
-    .select("id, domain, condition");
-  if (findingInsertError) throw new Error(findingInsertError.message);
-
-  const actionRows = buildActionRows(
-    projectId,
-    reviewId,
-    findings,
-    insertedFindings ?? [],
-  );
-  if (actionRows.length > 0) {
-    const { error: actionInsertError } = await supabase
-      .from("assurance_actions")
-      .insert(actionRows);
-    if (actionInsertError) throw new Error(actionInsertError.message);
-  }
-
-  const { error: reviewUpdateError } = await supabase
+  // The claim RPC already validated evidence roles, completion, and ownership;
+  // the reviewed month's last day still bounds which baselines may apply.
+  const { data: review, error: reviewLookupError } = await supabase
     .from("assurance_reviews")
-    .update({
-      status: "findings_ready",
-      current_step: "findings",
-      analysis_error: null,
-      analysis_metadata: {
-        provider: response.provider,
-        model: response.model,
-        completed_at: new Date().toISOString(),
-        baseline_document_count: baselineIds.length,
-        current_document_count: currentIds.length,
-      },
-      updated_at: new Date().toISOString(),
-    })
+    .select("reporting_period")
     .eq("id", reviewId)
-    .eq("project_id", projectId);
-  if (reviewUpdateError) throw new Error(reviewUpdateError.message);
+    .eq("project_id", projectId)
+    .maybeSingle();
+  if (reviewLookupError) throw new Error(reviewLookupError.message);
+  if (!review) throw new Error("Assurance review is required.");
+  const reportingPeriod = reportingPeriodEnd(review.reporting_period);
+
+  try {
+    if (!chunks.length) {
+      await setAnalysisFailure(
+        supabase,
+        projectId,
+        reviewId,
+        attemptId,
+        "Selected evidence has no processed text.",
+      );
+      return;
+    }
+
+    const baselineText = formatEvidence(chunks, new Set(baselineIds));
+    const currentText = formatEvidence(chunks, new Set(currentIds));
+    if (!reviewEvidenceFits(baselineText, currentText)) {
+      await setAnalysisFailure(
+        supabase,
+        projectId,
+        reviewId,
+        attemptId,
+        "Selected evidence exceeds the complete review request limit. Filter or select fewer documents and retry; no partial evidence was analyzed.",
+      );
+      return;
+    }
+    const response = await runOllamaChat({
+      format: "json",
+      temperature: 0,
+      system:
+        "You extract structured project assurance values. Use only supplied evidence. Never invent a number, date, risk, comparison, or source excerpt. Use null or zero only as instructed. Return valid JSON only.",
+      user: buildReviewPrompt(baselineText, currentText),
+    });
+
+    if (!response.ok) {
+      await setAnalysisFailure(
+        supabase,
+        projectId,
+        reviewId,
+        attemptId,
+        `AI analysis failed: ${response.warning}`,
+      );
+      return;
+    }
+
+    const parsed = parseJsonObject(response.content);
+    const extraction = parsed ? parseReviewExtraction(parsed) : null;
+
+    if (!extraction) {
+      await setAnalysisFailure(
+        supabase,
+        projectId,
+        reviewId,
+        attemptId,
+        "AI analysis returned an invalid structure. No finding was saved.",
+      );
+      return;
+    }
+    const baselineSet = new Set(baselineIds);
+    const currentSet = new Set(currentIds);
+    const excerptRequests: { role: "baseline" | "current"; excerpt: string | null; required: boolean }[] = [
+      { role: "baseline", excerpt: extraction.risk.baselineExcerpt, required: false },
+      { role: "current", excerpt: extraction.risk.currentExcerpt, required: extraction.risk.hasCurrentEvidence },
+      ...extraction.schedule.baselineMilestones.map((milestone) => ({
+        role: "baseline" as const, excerpt: milestone.excerpt, required: milestone.date !== null,
+      })),
+      ...extraction.schedule.currentMilestones.map((milestone) => ({
+        role: "current" as const, excerpt: milestone.excerpt, required: milestone.date !== null,
+      })),
+      ...extraction.progress.observations.map((observation) => ({
+        role: observation.role, excerpt: observation.excerpt, required: observation.percent !== null,
+      })),
+      ...extraction.riskItems.baselineSnapshots.map((snapshot) => ({
+        role: "baseline" as const, excerpt: snapshot.excerpt, required: false,
+      })),
+      ...extraction.riskItems.currentSnapshots.map((snapshot) => ({
+        role: "current" as const, excerpt: snapshot.excerpt, required: false,
+      })),
+    ];
+    const verifiedSources: VerifiedSource[] = [];
+    let unverifiable = false;
+    for (const request of excerptRequests) {
+      if (!request.excerpt) {
+        if (request.required) unverifiable = true;
+        continue;
+      }
+      const source = verifySourceExcerpt(request.role, request.excerpt, chunks, request.role === "baseline" ? baselineSet : currentSet);
+      if (!source) unverifiable = true;
+      else verifiedSources.push(source);
+    }
+    if (unverifiable) {
+      await setAnalysisFailure(supabase, projectId, reviewId, attemptId,
+        "More Evidence Required: one or more extracted values lack an exact excerpt in the selected baseline/current source documents.");
+      return;
+    }
+
+    const budgetFinding = await buildProjectBudgetFinding(
+      supabase,
+      projectId,
+      currentIds,
+      reportingPeriod,
+    );
+    const wbs = await buildWbsComparison(
+      supabase,
+      projectId,
+      baselineIds,
+      currentIds,
+      reportingPeriod,
+    );
+    const schedule = await buildScheduleComparison(supabase, projectId, extraction);
+    const risk = await buildRiskSnapshotComparison(supabase, projectId, extraction);
+    const findings = evaluateAssuranceReview(extraction, budgetFinding, schedule.finding).map((finding) => ({
+      ...finding,
+      sourceExcerpts: finding.sourceExcerpts.map((source) => ({
+        ...source,
+        ...verifiedSources.find((verified) => verified.role === source.role && verified.excerpt === source.excerpt),
+      })),
+    }));
+    const { data: published, error: publicationError } = await supabase.rpc("finish_assurance_analysis", {
+      p_project_id: projectId, p_review_id: reviewId, p_attempt_id: attemptId,
+      p_findings: findings, p_actions: buildActionRows(findings),
+      p_metadata: { provider: response.provider, model: response.model,
+        extraction_provider: response.provider, extraction_model: response.model,
+        // Provenance is stored per finding from this shared object; engines and
+        // thresholds differ by domain, so each carries its own entry.
+        comparison_engine: {
+          budget: "pmo_cost_contract_v1",
+          schedule: "pmo_schedule_contract_v1",
+          risk: "deterministic_phase_4_v1",
+        },
+        thresholds: {
+          budget: "pmo_budget_variance_v1",
+          schedule: "pmo_schedule_variance_v1",
+          risk: "phase_3_usable_mvp_defaults",
+        },
+        budget_evidence_source: "cost_observations_and_accepted_baseline" },
+    });
+    if (publicationError) throw new Error(publicationError.message);
+    if (!published) {
+      throw new Error("Analysis was not published: evidence or attempt ownership changed. Run analysis again.");
+    }
+
+    // Persist the deterministic comparison artifacts beside the published
+    // findings. The RPC already recorded attempt bookkeeping in
+    // analysis_metadata; read it back and merge rather than overwrite it.
+    const { data: savedReview, error: metadataLookupError } = await supabase
+      .from("assurance_reviews")
+      .select("analysis_metadata")
+      .eq("id", reviewId)
+      .eq("project_id", projectId)
+      .maybeSingle();
+    if (metadataLookupError) throw new Error(metadataLookupError.message);
+    const { error: reviewUpdateError } = await supabase
+      .from("assurance_reviews")
+      .update({
+        analysis_metadata: {
+          ...((savedReview?.analysis_metadata as Record<string, unknown> | null) ?? {}),
+          // WBS comparisons sit beside the single project-total Budget finding.
+          wbs_budget_findings: wbs.findings,
+          wbs_scope_candidates: wbs.scopeCandidates,
+          // Per-milestone schedule comparisons and reported progress sit beside
+          // the single Schedule finding; progress is preserved, never scored.
+          schedule_milestone_comparisons: schedule.comparisons,
+          schedule_milestone_labels: schedule.milestoneLabels,
+          progress_observations: schedule.progress,
+          // Item-level risk findings sit beside the Risk domain condition; no
+          // project Risk score or composite is produced.
+          risk_item_findings: risk.comparison.items,
+          risk_unidentified_items: risk.comparison.unidentified,
+          risk_source_ids: risk.sourceIds,
+          risk_source_scales: risk.sourceScales,
+        },
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", reviewId)
+      .eq("project_id", projectId);
+    if (reviewUpdateError) throw new Error(reviewUpdateError.message);
+  } catch (error) {
+    await setAnalysisFailure(supabase, projectId, reviewId, attemptId,
+      error instanceof Error ? error.message : "Assurance analysis failed.");
+    throw error;
+  }
 
   revalidateAssurance(projectId);
 }
@@ -545,6 +350,404 @@ export async function confirmAssuranceFinding(formData: FormData): Promise<void>
     .eq("review_id", reviewId)
     .eq("project_id", projectId);
   if (error) throw new Error(error.message);
+  revalidateAssurance(projectId);
+}
+
+/**
+ * Activates a source-backed cost observation as the comparison baseline for a
+ * scope and effective date. The document's own "approved" wording never
+ * reaches this point by itself; a reviewer does.
+ */
+export async function approveCostBaseline(formData: FormData): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const observationId = String(formData.get("observationId") ?? "");
+  const effectiveDate = String(formData.get("effectiveDate") ?? "").trim();
+  const note = String(formData.get("approvalNote") ?? "").trim();
+
+  if (!projectId || !observationId) throw new Error("Choose a baseline candidate to accept.");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate)) {
+    throw new Error("Enter the baseline effective date as YYYY-MM-DD.");
+  }
+
+  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  const { data: observation, error: observationError } = await supabase
+    .from("cost_observations")
+    .select(
+      "id, document_id, measure, source_value, normalized_amount, currency, scope_level, scope_label",
+    )
+    .eq("id", observationId)
+    .eq("project_id", projectId)
+    .maybeSingle();
+  if (observationError) throw new Error(observationError.message);
+  if (!observation) throw new Error("That baseline candidate is not in this project.");
+  if (observation.measure !== "approved_baseline") {
+    throw new Error("Only an approved-baseline cost observation can be accepted as a baseline.");
+  }
+  if (observation.normalized_amount === null || !observation.currency) {
+    throw new Error(
+      "That candidate's amount or currency could not be read safely from the source. It stays a source value and cannot be accepted.",
+    );
+  }
+
+  const activeScope = supabase
+    .from("cost_baselines")
+    .update({ state: "superseded", superseded_at: new Date().toISOString() })
+    .eq("project_id", projectId)
+    .eq("scope_level", observation.scope_level)
+    .eq("state", "accepted");
+  const { error: supersedeError } = await (observation.scope_label === null
+    ? activeScope.is("scope_label", null)
+    : activeScope.eq("scope_label", observation.scope_label));
+  if (supersedeError) throw new Error(supersedeError.message);
+
+  const { error: insertError } = await supabase.from("cost_baselines").insert({
+    project_id: projectId,
+    scope_level: observation.scope_level,
+    scope_label: observation.scope_label,
+    amount: observation.normalized_amount,
+    currency: observation.currency,
+    effective_date: effectiveDate,
+    observation_id: observation.id,
+    source_document_id: observation.document_id,
+    approved_by: user.id,
+    approval_note: note || null,
+  });
+  if (insertError) throw new Error(insertError.message);
+
+  revalidateAssurance(projectId);
+}
+
+/**
+ * Accepts a reviewer-approved WBS mapping: a statement that a source work-
+ * package label is the same work package as a canonical label, scoped to the
+ * project. Only after acceptance does the comparison group the two labels
+ * together (ADR 0004). The model never writes this; a reviewer does.
+ */
+export async function acceptWbsMapping(formData: FormData): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const sourceLabel = String(formData.get("sourceLabel") ?? "").trim();
+  const canonicalLabel = String(formData.get("canonicalLabel") ?? "").trim();
+  const note = String(formData.get("note") ?? "").trim();
+
+  if (!projectId || !sourceLabel || !canonicalLabel) {
+    throw new Error("Provide the source label and the canonical label it maps to.");
+  }
+  if (sourceLabel === canonicalLabel) {
+    throw new Error("A label mapped to itself is not a mapping; identical labels already match.");
+  }
+
+  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  // One accepted canonical target per source label: replace any prior one.
+  const { error: clearError } = await supabase
+    .from("wbs_mappings")
+    .delete()
+    .eq("project_id", projectId)
+    .eq("source_label", sourceLabel)
+    .eq("state", "accepted");
+  if (clearError) throw new Error(clearError.message);
+
+  const { error: insertError } = await supabase.from("wbs_mappings").insert({
+    project_id: projectId,
+    source_label: sourceLabel,
+    canonical_label: canonicalLabel,
+    state: "accepted",
+    proposed_by_model: false,
+    note: note || null,
+    created_by: user.id,
+    accepted_by: user.id,
+    accepted_at: new Date().toISOString(),
+  });
+  if (insertError) throw new Error(insertError.message);
+
+  revalidateAssurance(projectId);
+}
+
+/**
+ * Removes a WBS mapping. The comparison stops grouping its labels together
+ * immediately; nothing about the underlying evidence changes.
+ */
+export async function removeWbsMapping(formData: FormData): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const mappingId = String(formData.get("mappingId") ?? "");
+  if (!projectId || !mappingId) throw new Error("Choose a mapping to remove.");
+
+  const { supabase, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  const { error } = await supabase
+    .from("wbs_mappings")
+    .delete()
+    .eq("project_id", projectId)
+    .eq("id", mappingId);
+  if (error) throw new Error(error.message);
+
+  revalidateAssurance(projectId);
+}
+
+/**
+ * Accepts a reviewer-stated mapping that two differing milestone labels are the
+ * same milestone, reusable within the project. Only after acceptance does the
+ * schedule comparison group them; identical labels already match directly.
+ */
+export async function acceptMilestoneMapping(formData: FormData): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const sourceLabel = String(formData.get("sourceLabel") ?? "").trim();
+  const canonicalLabel = String(formData.get("canonicalLabel") ?? "").trim();
+  const note = String(formData.get("note") ?? "").trim();
+
+  if (!projectId || !sourceLabel || !canonicalLabel) {
+    throw new Error("Provide the source milestone label and the canonical label it maps to.");
+  }
+  if (sourceLabel === canonicalLabel) {
+    throw new Error("A label mapped to itself is not a mapping; identical labels already match.");
+  }
+
+  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  // One accepted canonical target per source label: replace any prior one.
+  const { error: clearError } = await supabase
+    .from("milestone_mappings")
+    .delete()
+    .eq("project_id", projectId)
+    .eq("source_label", sourceLabel)
+    .eq("state", "accepted");
+  if (clearError) throw new Error(clearError.message);
+
+  const { error: insertError } = await supabase.from("milestone_mappings").insert({
+    project_id: projectId,
+    source_label: sourceLabel,
+    canonical_label: canonicalLabel,
+    state: "accepted",
+    proposed_by_model: false,
+    note: note || null,
+    created_by: user.id,
+    accepted_by: user.id,
+    accepted_at: new Date().toISOString(),
+  });
+  if (insertError) throw new Error(insertError.message);
+
+  revalidateAssurance(projectId);
+}
+
+/**
+ * Removes a milestone mapping. The comparison stops grouping its labels together
+ * immediately; nothing about the underlying evidence changes.
+ */
+export async function removeMilestoneMapping(formData: FormData): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const mappingId = String(formData.get("mappingId") ?? "");
+  if (!projectId || !mappingId) throw new Error("Choose a mapping to remove.");
+
+  const { supabase, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  const { error } = await supabase
+    .from("milestone_mappings")
+    .delete()
+    .eq("project_id", projectId)
+    .eq("id", mappingId);
+  if (error) throw new Error(error.message);
+
+  revalidateAssurance(projectId);
+}
+
+async function acceptRiskMapping(
+  table: "risk_identity_mappings" | "risk_scale_mappings",
+  formData: FormData,
+): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const sourceLabel = String(formData.get("sourceLabel") ?? "").trim();
+  const canonicalLabel = String(formData.get("canonicalLabel") ?? "").trim();
+  const note = String(formData.get("note") ?? "").trim();
+
+  if (!projectId || !sourceLabel || !canonicalLabel) {
+    throw new Error("Provide the source label and the canonical label it maps to.");
+  }
+  if (sourceLabel === canonicalLabel) {
+    throw new Error("A label mapped to itself is not a mapping; identical labels already match.");
+  }
+
+  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  // One accepted canonical target per source label: replace any prior one.
+  const { error: clearError } = await supabase
+    .from(table)
+    .delete()
+    .eq("project_id", projectId)
+    .eq("source_label", sourceLabel)
+    .eq("state", "accepted");
+  if (clearError) throw new Error(clearError.message);
+
+  const { error: insertError } = await supabase.from(table).insert({
+    project_id: projectId,
+    source_label: sourceLabel,
+    canonical_label: canonicalLabel,
+    state: "accepted",
+    proposed_by_model: false,
+    note: note || null,
+    created_by: user.id,
+    accepted_by: user.id,
+    accepted_at: new Date().toISOString(),
+  });
+  if (insertError) throw new Error(insertError.message);
+
+  revalidateAssurance(projectId);
+}
+
+async function removeRiskMapping(
+  table: "risk_identity_mappings" | "risk_scale_mappings",
+  formData: FormData,
+): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const mappingId = String(formData.get("mappingId") ?? "");
+  if (!projectId || !mappingId) throw new Error("Choose a mapping to remove.");
+
+  const { supabase, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  const { error } = await supabase
+    .from(table)
+    .delete()
+    .eq("project_id", projectId)
+    .eq("id", mappingId);
+  if (error) throw new Error(error.message);
+
+  revalidateAssurance(projectId);
+}
+
+/**
+ * Accepts a reviewer-stated mapping that two differing risk IDs are the same
+ * risk, reusable within the project. Only after acceptance does the comparison
+ * group them; identical IDs already match directly. A name alone never maps.
+ */
+export async function acceptRiskIdentityMapping(formData: FormData): Promise<void> {
+  await acceptRiskMapping("risk_identity_mappings", formData);
+}
+
+export async function removeRiskIdentityMapping(formData: FormData): Promise<void> {
+  await removeRiskMapping("risk_identity_mappings", formData);
+}
+
+/**
+ * Accepts a reviewer-stated mapping that a source rating scale aligns to a
+ * canonical scale, reusable within the project. Only after acceptance are
+ * ratings on those scales compared; identical scales already match.
+ */
+export async function acceptRiskScaleMapping(formData: FormData): Promise<void> {
+  await acceptRiskMapping("risk_scale_mappings", formData);
+}
+
+export async function removeRiskScaleMapping(formData: FormData): Promise<void> {
+  await removeRiskMapping("risk_scale_mappings", formData);
+}
+
+/**
+ * Records a reviewer correction to the value used in assessment. The original
+ * extraction, its source wording, and its location stay untouched; the
+ * correction carries its own attribution and reason.
+ */
+export async function correctBudgetFinding(formData: FormData): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const reviewId = String(formData.get("reviewId") ?? "");
+  const findingId = String(formData.get("findingId") ?? "");
+  const reason = String(formData.get("correctionReason") ?? "").trim();
+  const correctedEac = String(formData.get("correctedEacAmount") ?? "").trim();
+  const correctedCurrency = String(formData.get("correctedCurrency") ?? "").trim().toUpperCase();
+
+  if (!projectId || !reviewId || !findingId) throw new Error("Assurance finding is required.");
+  if (!reason) throw new Error("Record why the assessed value is corrected.");
+  if (correctedCurrency && !/^[A-Z]{3}$/.test(correctedCurrency)) {
+    throw new Error("Enter the corrected currency as a three-letter code.");
+  }
+
+  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  const { data: finding, error: findingError } = await supabase
+    .from("assurance_findings")
+    .select("id, domain, condition, severity, headline, explanation, baseline_value, current_value")
+    .eq("id", findingId)
+    .eq("review_id", reviewId)
+    .eq("project_id", projectId)
+    .maybeSingle();
+  if (findingError) throw new Error(findingError.message);
+  if (!finding) throw new Error("That finding is not part of this review.");
+  if (finding.domain !== "budget") {
+    throw new Error("Only the Budget finding supports a corrected cost value here.");
+  }
+
+  const baselineValue = finding.baseline_value as Record<string, unknown> | null;
+  const currentValue = finding.current_value as Record<string, unknown> | null;
+  const baselineAmount = Number(baselineValue?.amount);
+  const baselineCurrency = String(baselineValue?.currency ?? "");
+  if (!Number.isFinite(baselineAmount) || !/^[A-Z]{3}$/.test(baselineCurrency)) {
+    throw new Error(
+      "Accept a cost baseline before correcting the assessed value; a correction cannot create a baseline.",
+    );
+  }
+
+  const originalEac = Number(currentValue?.amount);
+  const amount = correctedEac ? Number(correctedEac.replace(/[,\s]/g, "")) : originalEac;
+  if (!Number.isFinite(amount)) {
+    throw new Error("Enter the corrected estimate at completion as a number.");
+  }
+  const currency = correctedCurrency || String(currentValue?.currency ?? baselineCurrency);
+
+  const corrected = evaluateProjectBudget({
+    baseline: {
+      id: String(baselineValue?.baseline_id ?? finding.id),
+      scopeLevel: "project",
+      scopeLabel: null,
+      amount: baselineAmount,
+      currency: baselineCurrency,
+      effectiveDate: String(baselineValue?.effective_date ?? ""),
+      state: "accepted",
+      observationId: null,
+      sourceDocumentId: null,
+      approvalNote: null,
+      approvedAt: String(baselineValue?.accepted_at ?? ""),
+    },
+    baselineObservation: null,
+    eac: { state: "reported", amount, currency, observations: [] },
+    separateMeasures: [],
+  });
+
+  const { error: updateError } = await supabase
+    .from("assurance_findings")
+    .update({
+      condition: corrected.condition,
+      severity: corrected.severity,
+      headline: corrected.headline,
+      explanation: corrected.explanation,
+      confirmation_state: "user_edited",
+      correction: {
+        corrected_measure: "eac",
+        corrected_amount: amount,
+        corrected_currency: currency,
+        variance: corrected.variance,
+        superseded_assessment: {
+          condition: finding.condition,
+          severity: finding.severity,
+          headline: finding.headline,
+          explanation: finding.explanation,
+        },
+      },
+      correction_reason: reason.slice(0, 1000),
+      corrected_by: user.id,
+      corrected_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", findingId)
+    .eq("review_id", reviewId)
+    .eq("project_id", projectId);
+  if (updateError) throw new Error(updateError.message);
+
   revalidateAssurance(projectId);
 }
 
@@ -577,527 +780,305 @@ export async function updateAssuranceAction(formData: FormData): Promise<void> {
   revalidateAssurance(projectId);
 }
 
-async function replaceReviewFindings({
-  supabase,
-  projectId,
-  reviewId,
-  findings,
-  baselineIds,
-  currentIds,
-  provider,
-  model,
-}: {
-  supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"];
-  projectId: string;
-  reviewId: string;
-  findings: EvaluatedFinding[];
-  baselineIds: string[];
-  currentIds: string[];
-  provider: string;
-  model: string;
-}): Promise<AutomaticAssessmentResult> {
-  const { error: actionDeleteError } = await supabase
-    .from("assurance_actions")
-    .delete()
-    .eq("review_id", reviewId);
-  if (actionDeleteError) {
-    return { ok: false, changed: false, message: actionDeleteError.message };
-  }
 
-  const { error: findingDeleteError } = await supabase
-    .from("assurance_findings")
-    .delete()
-    .eq("review_id", reviewId);
-  if (findingDeleteError) {
-    return { ok: false, changed: false, message: findingDeleteError.message };
-  }
 
-  const { data: insertedFindings, error: findingInsertError } = await supabase
-    .from("assurance_findings")
-    .insert(
-      findings.map((finding) => ({
-        project_id: projectId,
-        review_id: reviewId,
-        domain: finding.domain,
-        condition: finding.condition,
-        severity: finding.severity,
-        headline: finding.headline,
-        explanation: finding.explanation,
-        baseline_value: finding.baselineValue,
-        current_value: finding.currentValue,
-        variance: finding.variance,
-        required_evidence: finding.requiredEvidence,
-        baseline_document_ids: baselineIds,
-        current_document_ids: currentIds,
-        source_excerpts: finding.sourceExcerpts,
-        confidence: finding.confidence,
-        provenance: {
-          extraction_provider: provider,
-          extraction_model: model,
-          comparison_engine: "deterministic_phase_5_v1",
-          thresholds: "phase_3_usable_mvp_defaults",
-          evidence_selection: "automatic",
-        },
-      })),
-    )
-    .select("id, domain, condition");
-  if (findingInsertError) {
-    return { ok: false, changed: false, message: findingInsertError.message };
-  }
-
-  const actionRows = buildActionRows(
-    projectId,
-    reviewId,
-    findings,
-    insertedFindings ?? [],
-  );
-  if (actionRows.length > 0) {
-    const { error: actionInsertError } = await supabase
-      .from("assurance_actions")
-      .insert(actionRows);
-    if (actionInsertError) {
-      return { ok: false, changed: false, message: actionInsertError.message };
-    }
-  }
-
-  return { ok: true, changed: true, message: "Assessment saved." };
-}
-
-async function persistAutomaticReviewPeriod({
-  supabase,
-  userId,
-  projectId,
-  reportingPeriod,
-  extraction,
-  baselineIds,
-  currentIds,
-  provider,
-  model,
-  projectFingerprint,
-  projectDocumentCount,
-}: {
-  supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"];
-  userId: string;
-  projectId: string;
-  reportingPeriod: string;
-  extraction: NonNullable<ReturnType<typeof parseReviewExtraction>>;
-  baselineIds: string[];
-  currentIds: string[];
-  provider: string;
-  model: string;
-  projectFingerprint: string;
-  projectDocumentCount: number;
-}): Promise<AutomaticAssessmentResult> {
-  const title = `${formatReportingPeriod(reportingPeriod)} Project Assessment`;
-  const { data: existingReview, error: existingReviewError } = await supabase
-    .from("assurance_reviews")
-    .select("id")
-    .eq("project_id", projectId)
-    .eq("reporting_period", reportingPeriod)
-    .maybeSingle();
-  if (existingReviewError) {
-    return { ok: false, changed: false, message: existingReviewError.message };
-  }
-
-  let reviewId = existingReview?.id as string | undefined;
-  if (!reviewId) {
-    const { data: createdReview, error: createError } = await supabase
-      .from("assurance_reviews")
-      .insert({
-        project_id: projectId,
-        reporting_period: reportingPeriod,
-        title,
-        status: "analyzing",
-        current_step: "analysis",
-        created_by: userId,
-      })
-      .select("id")
-      .single();
-    if (createError || !createdReview) {
-      return {
-        ok: false,
-        changed: false,
-        message: createError?.message ?? "Automatic assessment could not be created.",
-      };
-    }
-    reviewId = createdReview.id;
-  } else {
-    const { error: updateError } = await supabase
-      .from("assurance_reviews")
-      .update({
-        title,
-        status: "analyzing",
-        current_step: "analysis",
-        analysis_error: null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", reviewId)
-      .eq("project_id", projectId);
-    if (updateError) {
-      return { ok: false, changed: false, message: updateError.message };
-    }
-  }
-
-  if (!reviewId) {
-    return {
-      ok: false,
-      changed: false,
-      message: "Automatic assessment could not identify its saved review.",
-    };
-  }
-
-  const { error: deleteLinksError } = await supabase
-    .from("assurance_review_documents")
-    .delete()
-    .eq("review_id", reviewId)
-    .eq("project_id", projectId);
-  if (deleteLinksError) {
-    return { ok: false, changed: false, message: deleteLinksError.message };
-  }
-
-  const evidenceRows = [
-    ...baselineIds.map((documentId) => ({
-      project_id: projectId,
-      review_id: reviewId,
-      document_id: documentId,
-      evidence_role: "baseline",
-      added_by: userId,
-    })),
-    ...currentIds.map((documentId) => ({
-      project_id: projectId,
-      review_id: reviewId,
-      document_id: documentId,
-      evidence_role: "current",
-      added_by: userId,
-    })),
-  ];
-  if (evidenceRows.length > 0) {
-    const { error: linkError } = await supabase
-      .from("assurance_review_documents")
-      .insert(evidenceRows);
-    if (linkError) {
-      return { ok: false, changed: false, message: linkError.message };
-    }
-  }
-
-  const findings = evaluateAssuranceReview(extraction);
-  const persisted = await replaceReviewFindings({
-    supabase,
-    projectId,
-    reviewId,
-    findings,
-    baselineIds,
-    currentIds,
-    provider,
-    model,
-  });
-  if (!persisted.ok) return persisted;
-
-  const periodFingerprint = [...baselineIds, ...currentIds].sort().join(":");
-  const { error: completeError } = await supabase
-    .from("assurance_reviews")
-    .update({
-      status: "findings_ready",
-      current_step: "findings",
-      analysis_error: null,
-      analysis_metadata: {
-        mode: "automatic",
-        provider,
-        model,
-        completed_at: new Date().toISOString(),
-        document_fingerprint: periodFingerprint,
-        project_document_fingerprint: projectFingerprint,
-        project_document_count: projectDocumentCount,
-        baseline_document_count: baselineIds.length,
-        current_document_count: currentIds.length,
-        assessment_version: "multi_period_v1",
-      },
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", reviewId)
-    .eq("project_id", projectId);
-
-  if (completeError) {
-    return { ok: false, changed: false, message: completeError.message };
-  }
-
-  return { ok: true, changed: true, message: "Assessment period saved." };
-}
-
-function normalizePeriodAssessments(
-  value: unknown,
-  legacyValue: unknown,
-  fallbackPeriod: string,
-): AutomaticPeriodAssessment[] {
-  const byPeriod = new Map<string, AutomaticPeriodAssessment>();
-  const rawItems = Array.isArray(value) ? value : [];
-
-  for (const item of rawItems) {
-    const row = recordValue(item);
-    if (!row) continue;
-    const reportingPeriod = normalizedMonth(textValue(row.reporting_period));
-    const assessment = recordValue(row.assessment) ?? row;
-    const extraction = parseReviewExtraction(assessment);
-    if (reportingPeriod && extraction) {
-      byPeriod.set(reportingPeriod, { reportingPeriod, extraction });
-    }
-  }
-
-  if (byPeriod.size === 0) {
-    const legacyAssessment = recordValue(legacyValue);
-    const extraction = legacyAssessment
-      ? parseReviewExtraction(legacyAssessment)
-      : null;
-    if (extraction) {
-      byPeriod.set(fallbackPeriod, {
-        reportingPeriod: fallbackPeriod,
-        extraction,
-      });
-    }
-  }
-
-  return [...byPeriod.values()].sort((a, b) =>
-    a.reportingPeriod.localeCompare(b.reportingPeriod),
-  );
-}
-
-function buildAutomaticAssessmentPrompt(
-  documents: AutomaticDocumentRow[],
-  chunks: {
-    document_id: string;
-    chunk_text: string;
-    page_number: number | null;
-    documents: { title: string } | { title: string }[] | null;
-  }[],
+/**
+ * The project-total Budget finding for this review: the accepted baseline
+ * active for the period, compared only with an explicitly reported EAC from
+ * the selected current evidence.
+ */
+async function buildProjectBudgetFinding(
+  supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
+  projectId: string,
+  currentDocumentIds: string[],
+  asOf: string,
 ) {
-  const evidence = documents
-    .map((document) => {
-      const text = chunks
-        .filter((chunk) => chunk.document_id === document.id)
-        .map((chunk) => chunk.chunk_text)
-        .join("\n")
-        .slice(0, 6000);
-      return `DOCUMENT_ID: ${document.id}\nTITLE: ${document.title}\nFILE_NAME: ${document.file_name}\nUPLOADED_TYPE_HINT: ${document.document_type}\nDATE_HINT: ${document.document_date ?? "unknown"}\nTEXT:\n${text}`;
-    })
-    .join("\n\n--- NEXT DOCUMENT ---\n\n")
-    .slice(0, 30000);
+  const [baselineResult, observationResult] = await Promise.all([
+    supabase
+      .from("cost_baselines")
+      .select(costBaselineColumns)
+      .eq("project_id", projectId)
+      .eq("state", "accepted"),
+    currentDocumentIds.length
+      ? supabase
+          .from("cost_observations")
+          .select(costObservationColumns)
+          .eq("project_id", projectId)
+          .in("document_id", currentDocumentIds)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+  if (baselineResult.error) throw new Error(baselineResult.error.message);
+  if (observationResult.error) throw new Error(observationResult.error.message);
 
-  return `Organize the complete project evidence set, then extract a comparable Budget, Schedule, and Risk assessment for every reporting period found.
+  const baselines = ((baselineResult.data ?? []) as CostBaselineRow[]).map(mapCostBaselineRow);
+  const observations = ((observationResult.data ?? []) as CostObservationRow[]).map(
+    mapCostObservationRow,
+  );
+  const baseline = selectAcceptedCostBaseline(baselines, { scopeLevel: "project", asOf });
 
-Organization rules:
-- Return every supplied DOCUMENT_ID exactly once.
-- document_type must be one of: ${documentTypes.join(", ")}.
-- evidence_role is baseline only for approved plans, approved budgets, baseline schedules, contracts, charters, or equivalent plan evidence.
-- evidence_role is current for reporting-period performance, forecasts, risk registers, issue logs, actual costs, and current schedules.
-- evidence_role is supporting for useful evidence that is neither an approved plan nor current performance evidence.
-- reporting_period is YYYY-MM-01 only when the document states or strongly identifies a reporting month. Otherwise use null.
-- reason must be a short plain-language explanation grounded in title or document text.
-
-Assessment rules:
-- Return one period_assessments item for every distinct reporting month in current evidence.
-- Reuse approved baseline evidence in each period assessment.
-- Use only current or supporting evidence from that item's reporting period for current values.
-- Never calculate a condition, health label, or score. The application calculates conditions deterministically.
-- Use null when an amount or date is not explicit.
-- has_current_evidence is true only when current evidence contains identifiable risk information.
-- Counts must represent explicit open risks. Absence of a statement is not zero.
-- Copy short source excerpts that help a reviewer locate the evidence.
-
-Return exactly this JSON shape:
-{
-  "organization": [
-    {
-      "document_id": "supplied UUID",
-      "document_type": "progress_report",
-      "evidence_role": "baseline | current | supporting",
-      "reporting_period": "YYYY-MM-01 or null",
-      "reason": "short reason",
-      "confidence": 0.0
-    }
-  ],
-  "period_assessments": [
-    {
-      "reporting_period": "YYYY-MM-01",
-      "assessment": {
-        "budget": {
-          "baseline_amount": null,
-          "current_forecast": null,
-          "current_actual": null,
-          "currency": null,
-          "baseline_excerpt": null,
-          "current_excerpt": null,
-          "confidence": 0.0
-        },
-        "schedule": {
-          "milestones": [
-            {
-              "name": "Milestone name",
-              "baseline_date": "YYYY-MM-DD or null",
-              "current_forecast_date": "YYYY-MM-DD or null",
-              "baseline_excerpt": null,
-              "current_excerpt": null
-            }
-          ],
-          "confidence": 0.0
-        },
-        "risk": {
-          "has_current_evidence": false,
-          "open_critical_count": 0,
-          "open_high_count": 0,
-          "high_risks_missing_owner_or_mitigation": 0,
-          "increased_risk_count": 0,
-          "new_high_risk_count": 0,
-          "max_mitigation_overdue_days": 0,
-          "baseline_excerpt": null,
-          "current_excerpt": null,
-          "confidence": 0.0
-        }
-      }
-    }
-  ]
-}
-
-PROJECT EVIDENCE:
-${evidence}`;
-}
-
-function normalizeAutomaticClassifications(
-  value: unknown,
-  documents: AutomaticDocumentRow[],
-): AutomaticClassification[] {
-  const rawItems = Array.isArray(value) ? value : [];
-  const byId = new Map<string, Record<string, unknown>>();
-  for (const item of rawItems) {
-    const row = recordValue(item);
-    const documentId = textValue(row?.document_id);
-    if (row && documents.some((document) => document.id === documentId)) {
-      byId.set(documentId, row);
-    }
+  let baselineObservation = null;
+  if (baseline?.observationId) {
+    const { data, error } = await supabase
+      .from("cost_observations")
+      .select(costObservationColumns)
+      .eq("project_id", projectId)
+      .eq("id", baseline.observationId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    baselineObservation = data ? mapCostObservationRow(data as CostObservationRow) : null;
   }
 
-  return documents.map((document) => {
-    const raw = byId.get(document.id);
-    const rawType = textValue(raw?.document_type);
-    const rawRole = textValue(raw?.evidence_role);
-    const fallback = fallbackClassification(document);
-
-    return {
-      documentId: document.id,
-      documentType: documentTypes.includes(rawType as DocumentType)
-        ? (rawType as DocumentType)
-        : fallback.documentType,
-      evidenceRole: ["baseline", "current", "supporting"].includes(rawRole)
-        ? (rawRole as AutomaticClassification["evidenceRole"])
-        : fallback.evidenceRole,
-      reportingPeriod:
-        normalizedMonth(textValue(raw?.reporting_period)) ??
-        (fallback.evidenceRole === "baseline"
-          ? null
-          : normalizedMonth(document.document_date ?? document.created_at)),
-      reason:
-        textValue(raw?.reason).slice(0, 280) || fallback.reason,
-      confidence: boundedConfidence(raw?.confidence),
-    };
-  });
-}
-
-function fallbackClassification(document: AutomaticDocumentRow) {
-  const clue = `${document.title} ${document.file_name}`.toLowerCase();
-  const documentType: DocumentType = /risk/.test(clue)
-    ? "risk_register"
-    : /issue/.test(clue)
-      ? "issue_log"
-      : /cost|budget|financial/.test(clue)
-        ? "cost_report"
-        : /schedule|programme|timeline/.test(clue)
-          ? "schedule"
-          : /minute|meeting/.test(clue)
-            ? "meeting_minutes"
-            : /approval/.test(clue)
-              ? "approval"
-              : /change/.test(clue)
-                ? "change_record"
-                : document.document_type;
-  const baseline = /baseline|approved plan|charter|contract/.test(clue);
-
-  return {
-    documentType,
-    evidenceRole: baseline ? ("baseline" as const) : ("current" as const),
-    reason: baseline
-      ? "The file name identifies approved plan or baseline evidence."
-      : "The file is treated as current evidence until the document text indicates otherwise.",
-  };
-}
-
-function latestReportingPeriod(
-  classifications: AutomaticClassification[],
-  documents: AutomaticDocumentRow[],
-) {
-  const candidates = [
-    ...classifications
-      .map((classification) => classification.reportingPeriod)
-      .filter((value): value is string => Boolean(value)),
-    ...documents.map((document) =>
-      normalizedMonth(document.document_date ?? document.created_at),
+  return evaluateProjectBudget({
+    baseline,
+    baselineObservation,
+    eac: selectReportedEac(observations, { scopeLevel: "project" }),
+    separateMeasures: observations.filter(
+      (observation) =>
+        observation.scopeLevel === "project" &&
+        (observation.measure === "actual_to_date" || observation.measure === "committed"),
     ),
-  ].filter((value): value is string => Boolean(value));
-
-  return candidates.sort().at(-1) ?? `${new Date().toISOString().slice(0, 7)}-01`;
+  });
 }
 
-function normalizedMonth(value: string) {
-  const match = value.match(/^(\d{4})-(\d{2})/);
-  return match ? `${match[1]}-${match[2]}-01` : null;
+/**
+ * WBS-level cost comparisons and scope candidates for this review. These sit
+ * beside the single project-total Budget finding and never replace it: a WBS
+ * evidence gap is reported as its own gap and leaves the project total intact.
+ * Differing work-package labels are grouped only through reviewer-accepted
+ * mappings; identical labels match directly.
+ */
+async function buildWbsComparison(
+  supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
+  projectId: string,
+  baselineDocumentIds: string[],
+  currentDocumentIds: string[],
+  asOf: string,
+) {
+  const reviewDocumentIds = [...new Set([...baselineDocumentIds, ...currentDocumentIds])];
+  if (reviewDocumentIds.length === 0) {
+    return { findings: [], scopeCandidates: [] };
+  }
+
+  const [observationResult, baselineResult, mappingResult] = await Promise.all([
+    supabase
+      .from("cost_observations")
+      .select(costObservationColumns)
+      .eq("project_id", projectId)
+      .eq("scope_level", "wbs")
+      .in("document_id", reviewDocumentIds),
+    supabase
+      .from("cost_baselines")
+      .select(costBaselineColumns)
+      .eq("project_id", projectId)
+      .eq("scope_level", "wbs")
+      .eq("state", "accepted"),
+    supabase
+      .from("wbs_mappings")
+      .select(wbsMappingColumns)
+      .eq("project_id", projectId)
+      .eq("state", "accepted"),
+  ]);
+  if (observationResult.error) throw new Error(observationResult.error.message);
+  if (baselineResult.error) throw new Error(baselineResult.error.message);
+  if (mappingResult.error) throw new Error(mappingResult.error.message);
+
+  const observations = ((observationResult.data ?? []) as CostObservationRow[]).map(mapCostObservationRow);
+  const baselines = ((baselineResult.data ?? []) as CostBaselineRow[]).map(mapCostBaselineRow);
+  const mappings = ((mappingResult.data ?? []) as WbsMappingRow[]).map(mapWbsMappingRow);
+
+  const baselineSet = new Set(baselineDocumentIds);
+  const currentSet = new Set(currentDocumentIds);
+  const currentObservations = observations.filter((observation) => currentSet.has(observation.documentId));
+  const baselineObservations = observations.filter((observation) => baselineSet.has(observation.documentId));
+
+  const findings = buildWbsBudgetFindings({
+    observations: currentObservations,
+    baselineObservations: observations,
+    baselines,
+    mappings,
+    asOf,
+  });
+  const scopeCandidates = buildWbsScopeCandidates({
+    baselineObservations,
+    currentObservations,
+    mappings,
+  });
+  return { findings, scopeCandidates };
 }
 
-function boundedConfidence(value: unknown) {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : 0.5;
+/**
+ * Per-milestone schedule comparisons, the single Schedule finding, and reported
+ * progress for this review. Milestones are grouped only through reviewer-accepted
+ * mappings; identical labels match directly. Progress values are preserved as
+ * reported — never aggregated into a project total and never turned into dates —
+ * and compared across periods only within a comparable scope. WBS progress scope
+ * is canonicalized through the existing accepted WBS mappings.
+ */
+async function buildScheduleComparison(
+  supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
+  projectId: string,
+  extraction: ReviewExtraction,
+) {
+  const [milestoneMappingResult, wbsMappingResult] = await Promise.all([
+    supabase
+      .from("milestone_mappings")
+      .select(milestoneMappingColumns)
+      .eq("project_id", projectId)
+      .eq("state", "accepted"),
+    supabase
+      .from("wbs_mappings")
+      .select(wbsMappingColumns)
+      .eq("project_id", projectId)
+      .eq("state", "accepted"),
+  ]);
+  if (milestoneMappingResult.error) throw new Error(milestoneMappingResult.error.message);
+  if (wbsMappingResult.error) throw new Error(wbsMappingResult.error.message);
+
+  const milestoneMappings = ((milestoneMappingResult.data ?? []) as MilestoneMappingRow[]).map(
+    mapMilestoneMappingRow,
+  );
+  const wbsMappings = ((wbsMappingResult.data ?? []) as WbsMappingRow[]).map(mapWbsMappingRow);
+
+  const comparisons = buildMilestoneComparisons({
+    baselineMilestones: extraction.schedule.baselineMilestones,
+    currentMilestones: extraction.schedule.currentMilestones,
+    mappings: milestoneMappings,
+  });
+  const finding = buildScheduleFinding(comparisons, extraction.schedule.confidence);
+  const progress = buildProgressComparison({
+    observations: extraction.progress.observations,
+    wbsMappings,
+  });
+  const milestoneLabels = milestoneSourceLabels({
+    baselineMilestones: extraction.schedule.baselineMilestones,
+    currentMilestones: extraction.schedule.currentMilestones,
+  });
+  return { finding, comparisons, progress, milestoneLabels };
 }
 
-function recordValue(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
+/**
+ * Item-level risk comparison for this review. Risks are matched only by exact
+ * source ID or a reviewer-accepted identity mapping, and ratings compare only
+ * within the same scale or an accepted scale mapping; both mapping sets are
+ * reusable within the project. No project Risk score or composite is produced —
+ * the Risk domain condition stays separate.
+ */
+async function buildRiskSnapshotComparison(
+  supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
+  projectId: string,
+  extraction: ReviewExtraction,
+) {
+  const [identityResult, scaleResult] = await Promise.all([
+    supabase
+      .from("risk_identity_mappings")
+      .select(riskMappingColumns)
+      .eq("project_id", projectId)
+      .eq("state", "accepted"),
+    supabase
+      .from("risk_scale_mappings")
+      .select(riskMappingColumns)
+      .eq("project_id", projectId)
+      .eq("state", "accepted"),
+  ]);
+  if (identityResult.error) throw new Error(identityResult.error.message);
+  if (scaleResult.error) throw new Error(scaleResult.error.message);
+
+  const identityMappings = ((identityResult.data ?? []) as RiskMappingRow[]).map(mapRiskMappingRow);
+  const scaleMappings = ((scaleResult.data ?? []) as RiskMappingRow[]).map(mapRiskMappingRow);
+
+  const comparison = buildRiskComparison({
+    baselineSnapshots: extraction.riskItems.baselineSnapshots,
+    currentSnapshots: extraction.riskItems.currentSnapshots,
+    identityMappings,
+    scaleMappings,
+  });
+  const sourceIds = riskSourceIds(extraction.riskItems);
+  const sourceScales = riskSourceScales(extraction.riskItems);
+  return { comparison, sourceIds, sourceScales };
 }
 
-function textValue(value: unknown) {
-  return typeof value === "string" ? value.trim() : "";
+// The reviewed month's last day: a baseline accepted later does not apply.
+function reportingPeriodEnd(reportingPeriod: string) {
+  const start = new Date(`${reportingPeriod.slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(start.getTime())) return reportingPeriod.slice(0, 10);
+  return new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0))
+    .toISOString()
+    .slice(0, 10);
 }
 
 function buildReviewPrompt(baseline: string, current: string) {
-  return `Extract comparable Budget, Schedule, and Risk values from the two evidence groups.
+  return `Extract comparable Schedule, Progress, and Risk values from the two evidence groups.
 
 Rules:
-- Never calculate a condition, score, percentage, or health label. The application calculates those deterministically.
-- A baseline value must come from BASELINE EVIDENCE.
-- A current value must come from CURRENT EVIDENCE.
-- Use null when a value or date is not explicit.
+- Never calculate a condition, score, variance, delay, or health label. The application calculates those deterministically.
+- Never pair, match, or rename milestones across the two groups. List each milestone under the label its own evidence uses; the application matches milestones by label.
+- A baseline value must come from BASELINE EVIDENCE. A current value must come from CURRENT EVIDENCE.
+- Use null when a value or date is not explicit. Copy each date as YYYY-MM-DD only when the source states it; never infer a date from a percentage or a status.
+- Report each progress percentage exactly as stated, at the level it is stated (project or WBS). Never sum or average WBS percentages into a project figure.
 - has_current_evidence is true only when current evidence contains identifiable risk information.
 - Counts must represent explicit open risks. Do not treat an absent statement as zero unless the evidence explicitly indicates none.
-- Copy short source excerpts verbatim enough for a reviewer to locate the evidence.
+- For risk_items, list each risk item under the ID and scale its own evidence uses. Never match risks across groups, rename them, or align rating scales; the application matches by exact ID or a reviewer-accepted mapping. Set rating_value only when the source states a number for the rating; otherwise null. Do not label an item new or increased.
+- Copy short source excerpts verbatim enough for a reviewer to locate the evidence. Record each source's own period or as-of date when it states one.
+
+Do not extract cost or budget values here; project cost evidence is collected separately.
 
 Return exactly:
 {
-  "budget": {
-    "baseline_amount": null,
-    "current_forecast": null,
-    "current_actual": null,
-    "currency": null,
-    "baseline_excerpt": null,
-    "current_excerpt": null,
-    "confidence": 0.0
-  },
   "schedule": {
-    "milestones": [
+    "baseline_milestones": [
       {
-        "name": "Milestone name",
-        "baseline_date": "YYYY-MM-DD or null",
-        "current_forecast_date": "YYYY-MM-DD or null",
-        "baseline_excerpt": null,
-        "current_excerpt": null
+        "label": "Milestone name as baseline evidence states it",
+        "date": "YYYY-MM-DD or null",
+        "period_label": "source period or null",
+        "as_of_date": "YYYY-MM-DD or null",
+        "excerpt": "verbatim source text or null"
       }
     ],
+    "current_milestones": [
+      {
+        "label": "Milestone name as current evidence states it",
+        "date": "YYYY-MM-DD or null",
+        "period_label": "source period or null",
+        "as_of_date": "YYYY-MM-DD or null",
+        "excerpt": "verbatim source text or null"
+      }
+    ],
+    "confidence": 0.0
+  },
+  "progress": {
+    "observations": [
+      {
+        "role": "baseline or current",
+        "scope_level": "project or wbs",
+        "scope_label": "WBS label, or null for project",
+        "percent": 0,
+        "period_label": "source period or null",
+        "as_of_date": "YYYY-MM-DD or null",
+        "excerpt": "verbatim source text or null"
+      }
+    ],
+    "confidence": 0.0
+  },
+  "risk_items": {
+    "baseline_snapshots": [
+      {
+        "source_id": "risk ID as stated, or null",
+        "name": "short risk name or null",
+        "description": "risk description or null",
+        "status": "status as stated or null",
+        "rating_label": "rating as stated (e.g. High) or null",
+        "rating_value": null,
+        "scale_label": "rating scale as stated (e.g. 1-5, Low/Med/High) or null",
+        "owner": "owner as stated or null",
+        "mitigation": "mitigation as stated or null",
+        "due_date": "YYYY-MM-DD or null",
+        "wbs": "WBS label or null",
+        "period_label": "source period or null",
+        "as_of_date": "YYYY-MM-DD or null",
+        "excerpt": "verbatim source text or null"
+      }
+    ],
+    "current_snapshots": [],
     "confidence": 0.0
   },
   "risk": {
@@ -1115,10 +1096,10 @@ Return exactly:
 }
 
 BASELINE EVIDENCE:
-${baseline.slice(0, 12000)}
+${baseline}
 
 CURRENT EVIDENCE:
-${current.slice(0, 12000)}`;
+${current}`;
 }
 
 function formatEvidence(
@@ -1141,15 +1122,10 @@ function formatEvidence(
     .join("\n\n");
 }
 
-function buildActionRows(
-  projectId: string,
-  reviewId: string,
-  findings: EvaluatedFinding[],
-  inserted: { id: string; domain: string; condition: string }[],
-) {
+function buildActionRows(findings: ReturnType<typeof evaluateAssuranceReview>) {
   const titles = {
     budget:
-      "Confirm the cost forecast, explain the variance, and agree a budget recovery decision.",
+      "Confirm the reported estimate at completion, explain the variance against the accepted baseline, and agree a budget decision.",
     schedule:
       "Confirm the delayed milestone owner and approve a dated schedule recovery plan.",
     risk:
@@ -1161,10 +1137,7 @@ function buildActionRows(
       ["needs_attention", "critical"].includes(finding.condition),
     )
     .map((finding) => ({
-      project_id: projectId,
-      review_id: reviewId,
-      finding_id:
-        inserted.find((row) => row.domain === finding.domain)?.id ?? null,
+      domain: finding.domain,
       title: titles[finding.domain],
       priority: finding.condition === "critical" ? "high" : "medium",
       status: "open",
@@ -1175,18 +1148,14 @@ async function setAnalysisFailure(
   supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
   projectId: string,
   reviewId: string,
+  attemptId: string,
   message: string,
 ) {
-  await supabase
-    .from("assurance_reviews")
-    .update({
-      status: "analysis_failed",
-      current_step: "analysis",
-      analysis_error: message.slice(0, 1000),
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", reviewId)
-    .eq("project_id", projectId);
+  const { error } = await supabase.rpc("finish_assurance_analysis", {
+    p_project_id: projectId, p_review_id: reviewId, p_attempt_id: attemptId,
+    p_error: message.slice(0, 1000),
+  });
+  if (error) throw new Error(error.message);
   revalidateAssurance(projectId);
 }
 
@@ -1197,6 +1166,12 @@ function uniqueStrings(values: FormDataEntryValue[]) {
 function assertCanManage(role: Parameters<typeof canManageProject>[0]) {
   if (!canManageProject(role)) {
     throw new Error("Your project role cannot manage an assurance review.");
+  }
+}
+
+function assertCanApproveBaseline(role: Parameters<typeof canApproveAssuranceBaseline>[0]) {
+  if (!canApproveAssuranceBaseline(role)) {
+    throw new Error("Your project role cannot accept a baseline or correct an assessed value.");
   }
 }
 

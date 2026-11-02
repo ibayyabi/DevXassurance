@@ -1,0 +1,3 @@
+# Evidence authority is field-specific
+
+The pipeline evaluates authority by value meaning, domain, scope, period, and explicit approval; it does not rank all documents globally or let the newest upload overwrite other claims. Clear, source-located observations may be assessment-eligible after validation, while baseline and mapping decisions require reviewer acceptance and unclear conflicts remain for review. Budget variance is calculated only when the approved baseline and reported EAC use the same currency; differing currencies remain preserved as source values but are not compared. Currency conversion and exchange-rate handling are outside the initial scope.

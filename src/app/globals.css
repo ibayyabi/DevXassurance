@@ -4,59 +4,64 @@
 
 @layer base {
   :root {
-    /* Foundation: soft monochrome, with color reserved for real status. */
-    --base: #f7f7f5;
+    /* Foundation: cool neutrals, blue interaction, and navy structure. */
+    --base: #f5f7fb;
     --surface: #ffffff;
-    --text: #151515;
-    --text-muted: #666662;
-    --border: #e2e2de;
-    --accent: #151515;
-    --accent-soft: #f0f0ed;
+    --text: #17243b;
+    --text-muted: #506078;
+    --border: #d9e1ec;
+    --accent: #1d5bd7;
+    --accent-soft: #dbe8ff;
     --on-accent: #ffffff;
 
     /* Status: reserved for actual project and workflow conditions. */
-    --status-ok: #639922;
-    --status-ok-bg: #eaf3de;
-    --status-ok-text: #27500a;
-    --status-warn: #ef9f27;
-    --status-warn-bg: #faeeda;
-    --status-warn-text: #633806;
-    --status-critical: #e24b4a;
-    --status-crit-bg: #fcebeb;
-    --status-crit-text: #791f1f;
-    --status-neutral: #888780;
-    --plan-track: #f0f0ed;
+    --status-ok: #087f68;
+    --status-ok-bg: #bcebdc;
+    --status-ok-text: #075746;
+    --status-warn: #b35c08;
+    --status-warn-bg: #ffdda0;
+    --status-warn-text: #703800;
+    --status-critical: #c93648;
+    --status-crit-bg: #ffcdd4;
+    --status-crit-text: #871e30;
+    --status-neutral: #68778d;
+    --plan-track: #edf1f6;
 
     /* Sidebar is a structural anchor, not an additional accent palette. */
-    --sidebar: #151515;
-    --sidebar-hover: #242424;
-    --sidebar-text: #f7f7f5;
-    --sidebar-muted: #a3a3a0;
+    --sidebar: #06183e;
+    --sidebar-hover: #122f5b;
+    --sidebar-text: #f4f7fc;
+    --sidebar-muted: #b0bfd4;
 
     /* RGB channels let Tailwind opacity modifiers keep working. */
-    --base-rgb: 247 247 245;
+    --base-rgb: 245 247 251;
     --surface-rgb: 255 255 255;
-    --text-rgb: 21 21 21;
-    --text-muted-rgb: 102 102 98;
-    --border-rgb: 226 226 222;
-    --accent-rgb: 21 21 21;
-    --accent-soft-rgb: 240 240 237;
+    --text-rgb: 23 36 59;
+    --text-muted-rgb: 80 96 120;
+    --border-rgb: 217 225 236;
+    --accent-rgb: 29 91 215;
+    --accent-soft-rgb: 219 232 255;
     --on-accent-rgb: 255 255 255;
-    --status-ok-rgb: 99 153 34;
-    --status-ok-bg-rgb: 234 243 222;
-    --status-ok-text-rgb: 39 80 10;
-    --status-warn-rgb: 239 159 39;
-    --status-warn-bg-rgb: 250 238 218;
-    --status-warn-text-rgb: 99 56 6;
-    --status-critical-rgb: 226 75 74;
-    --status-crit-bg-rgb: 252 235 235;
-    --status-crit-text-rgb: 121 31 31;
-    --status-neutral-rgb: 136 135 128;
-    --plan-track-rgb: 240 240 237;
-    --sidebar-rgb: 21 21 21;
-    --sidebar-hover-rgb: 36 36 36;
-    --sidebar-text-rgb: 247 247 245;
-    --sidebar-muted-rgb: 163 163 160;
+    --status-ok-rgb: 8 127 104;
+    --status-ok-bg-rgb: 188 235 220;
+    --status-ok-text-rgb: 7 87 70;
+    --status-warn-rgb: 179 92 8;
+    --status-warn-bg-rgb: 255 221 160;
+    --status-warn-text-rgb: 112 56 0;
+    --status-critical-rgb: 201 54 72;
+    --status-crit-bg-rgb: 255 205 212;
+    --status-crit-text-rgb: 135 30 48;
+    --status-neutral-rgb: 104 119 141;
+    --plan-track-rgb: 237 241 246;
+    --sidebar-rgb: 6 24 62;
+    --sidebar-hover-rgb: 18 47 91;
+    --sidebar-text-rgb: 244 247 252;
+    --sidebar-muted-rgb: 176 191 212;
+    /* Analytical emphasis stays separate from workflow status. */
+    --analysis: #7040bf;
+    --analysis-soft: #e3d4fa;
+    --analysis-rgb: 112 64 191;
+    --analysis-soft-rgb: 227 212 250;
     --radius: 0.5rem;
   }
 }

@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import {readFileSync,writeFileSync} from 'node:fs';
+import ts from 'typescript';
+import {PostgrestClient} from '@supabase/postgrest-js';
+const headers={apikey:process.env.SUPABASE_SERVICE_ROLE_KEY,Authorization:`Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`};
+const supabase=new PostgrestClient(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1`,{headers});
+const compile=file=>ts.transpileModule(readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+const metadata={};new Function('exports',compile('src/features/documents/lib/metadata.ts'))(metadata);
+const queries={};new Function('require','exports',compile('src/features/documents/lib/queries.ts'))(name=>name.includes('metadata')?metadata:{requireProjectMembership:async()=>({supabase,membership:{role:'admin'}})},queries);
+const result=await queries.getDocumentIntelligence('f2f5ba32-3887-43ea-9e75-4a5c3225f465');
+writeFileSync('.scratch/evidence-inspect/live-workspace.json',JSON.stringify({documents:result.documents,facts:result.facts,summaries:result.summaries}));
+const perDocument=result.documents.map(document=>({id:document.id,fileName:document.fileName,status:document.processingStatus,total:result.facts.filter(fact=>fact.documentId===document.id).length,types:result.facts.filter(fact=>fact.documentId===document.id).reduce((counts,fact)=>(counts[fact.factType]=(counts[fact.factType]??0)+1,counts),{}),missingCitations:result.facts.filter(fact=>fact.documentId===document.id&&!fact.evidenceLinks.length).length}));
+const sum=perDocument.reduce((n,doc)=>n+doc.total,0);
+assert.equal(sum,result.facts.length);
+assert.equal(new Set(result.facts.map(f=>f.id)).size,result.facts.length);
+const data={total:result.facts.length,sum,types:result.facts.reduce((counts,fact)=>(counts[fact.factType]=(counts[fact.factType]??0)+1,counts),{}),perDocument};
+writeFileSync('.scratch/evidence-inspect/reconciled-counts.json',JSON.stringify(data,null,2));
+console.log(JSON.stringify({...data,perDocument:undefined,water:perDocument.find(d=>d.fileName.includes('07_Air_Bersih')),sourceGaps:perDocument.filter(d=>d.missingCitations)},null,2));

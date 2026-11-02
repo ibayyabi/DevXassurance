@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  BrainCircuit,
   FileCheck2,
   FileClock,
   FileText,
@@ -9,9 +8,9 @@ import {
   Trash2,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 
-import { AutomaticAssessment } from "@/features/assurance/components/automatic-assessment";
 import {
   deleteDocument,
   retryDocumentProcessing,
@@ -22,42 +21,79 @@ import { UploadDocumentForm } from "@/features/documents/components/upload-docum
 import {
   documentTypeLabels,
   documentTypes,
-  factTypeLabels,
-  factTypes,
   statusLabels,
 } from "@/features/documents/lib/constants";
 import { fileKindLabel } from "@/features/documents/lib/file-types";
 import type {
   DocumentSummary,
   EvidenceDocument,
+  UploadSubmission,
   ExtractedFact,
 } from "@/features/documents/lib/queries";
+import { formatArchiveMemberState, uploadBatchState } from "@/features/documents/lib/archive-status";
+import { groupUploadBatches } from "@/features/documents/lib/upload-batch";
+import { requestJson } from "@/features/documents/lib/request-json";
+import { ExtractedFacts, FileFactReview, documentFacts, extractedCounts, extractionPointer, shortSummary, statedTotal, summaryGaps, type ReviewFacts } from "@/features/documents/components/fact-review";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
 const roleLabels = {
-  baseline: "Approved plan",
-  current: "Current evidence",
-  supporting: "Supporting evidence",
+  baseline: "Approved Baseline",
+  current: "Current Period",
+  supporting: "Supporting Evidence",
 } as const;
+
+const SourceNavigation = createContext<(documentId: string) => void>(() => {});
+
+function SourceReference({ documentId, title }: { documentId: string; title: string }) {
+  const navigate = useContext(SourceNavigation);
+  return <button type="button" onClick={() => navigate(documentId)} className="break-words text-left font-medium text-brand underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">{title}</button>;
+}
 
 export function DocumentIntelligence({
   projectId,
   documents,
   facts,
   summaries,
-  assessedFingerprint,
+  uploadSubmissions,
 }: {
   projectId: string;
   documents: EvidenceDocument[];
   facts: ExtractedFact[];
   summaries: DocumentSummary[];
-  assessedFingerprint: string | null;
+  uploadSubmissions: UploadSubmission[];
 }) {
+  const [step, setStep] = useState("prepare");
+  const focusStep = useRef(false);
+  const [sourceRequest, setSourceRequest] = useState<{ documentId: string } | null>(null);
+  const [sourceMessage, setSourceMessage] = useState("");
+
+  function navigateStep(next: string) {
+    focusStep.current = true;
+    setStep(next);
+    if (step === next) document.getElementById(`evidence-${next}`)?.focus();
+  }
+
+  useEffect(() => {
+    if (!focusStep.current) return;
+    focusStep.current = false;
+    document.getElementById(`evidence-${step}`)?.focus({ preventScroll: true });
+  }, [step]);
+
+  function navigateSource(documentId: string) {
+    if (!documents.some((document) => document.id === documentId)) {
+      setSourceMessage("This source document is not available in the loaded collection.");
+      return;
+    }
+    setSourceMessage("");
+    setStep("check");
+    setSourceRequest({ documentId });
+  }
+
   const router = useRouter();
-  const hasActiveProcessing = documents.some((document) =>
-    ["uploaded", "queued", "processing"].includes(document.processingStatus),
-  );
+  const hasActiveProcessing =
+    documents.some((document) => ["uploaded", "queued", "processing"].includes(document.processingStatus)) ||
+    uploadSubmissions.some((submission) => archiveManifestStatus(submission.archiveManifest) === "processing");
 
   useEffect(() => {
     if (!hasActiveProcessing) return;
@@ -66,155 +102,501 @@ export function DocumentIntelligence({
   }, [hasActiveProcessing, router]);
 
   return (
+    <SourceNavigation.Provider value={navigateSource}>
     <div className="space-y-5">
-      <AutomaticAssessment
-        projectId={projectId}
-        documents={documents}
-        assessedFingerprint={assessedFingerprint}
-      />
-
-      <div className="grid gap-5 xl:grid-cols-[minmax(300px,0.72fr)_minmax(0,1.28fr)]">
-        <div className="space-y-5">
-          <UploadDocumentForm projectId={projectId} />
-          <ProcessingSummary documents={documents} />
+      <div className="grid gap-5 md:grid-cols-[200px_minmax(0,1fr)]">
+        <nav aria-label="Evidence steps" className="flex flex-col gap-2">
+          {[
+            ["prepare", "1. Siapkan evidence", true],
+            ["check", "2. Baca & periksa", documents.length > 0],
+            ["review", "3. Tinjau hasil", true],
+          ].map(([key, label, hasContent]) => (
+            <Button key={String(key)} type="button" variant={step === key ? "default" : "outline"} className={`justify-start ${step !== key && !hasContent ? "text-ink-muted" : ""}`} aria-current={step === key ? "step" : undefined} aria-controls={`evidence-${key}`} onClick={() => navigateStep(String(key))}>{label}</Button>
+          ))}
+        </nav>
+        <div className="min-w-0 space-y-5">
+          <div id="evidence-prepare" hidden={step !== "prepare"} tabIndex={-1} className="space-y-5 scroll-mt-24 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+          <UploadDocumentForm
+            projectId={projectId}
+            retryCandidates={[
+              ...documents
+                .filter((document) => ["failed", "uploaded"].includes(document.processingStatus) && document.submissionId)
+                .map((document) => ({
+                  documentId: document.id,
+                  submissionId: document.submissionId!,
+                  fileName: document.fileName,
+                  fileSize: document.fileSize,
+                })),
+              ...uploadSubmissions
+                .filter((submission) => submission.archiveName)
+                .map((submission) => ({
+                  submissionId: submission.id,
+                  fileName: submission.archiveName!,
+                })),
+            ]}
+          />
+          <details>
+            <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Upload batches and file status</summary>
+            <UploadBatchStatus projectId={projectId} documents={documents} submissions={uploadSubmissions} />
+          </details>
+          <Button type="button" variant="outline" onClick={() => navigateStep("check")}>Baca &amp; periksa</Button>
+          </div>
+          <div id="evidence-check" hidden={step !== "check"} tabIndex={-1} className="space-y-5 scroll-mt-24 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+            <h2 className="text-lg font-semibold text-ink">Baca &amp; periksa</h2>
+            <p className="text-sm text-ink-muted">Inspect document status, metadata, reading limitations, and supporting sources before continuing to Assurance Review.</p>
+            <DocumentLibrary projectId={projectId} documents={documents} facts={facts} summaries={summaries} sourceRequest={sourceRequest} />
+          </div>
+      <section id="evidence-review" hidden={step !== "review"} tabIndex={-1} className="scroll-mt-24 rounded-2xl border border-ui-border bg-surface p-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+        <h2 className="text-lg font-semibold text-ink">Review results</h2>
+        <p className="mt-2 text-sm text-ink-muted">Assessment results are not available on this screen. Open Assurance Review to inspect the review or select evidence and run the existing assessment workflow.</p>
+        <Button asChild className="mt-3">
+          <Link prefetch={false} href={`/app/projects/${projectId}/assurance`}>Open Assurance Review</Link>
+        </Button>
+        <div className="mt-3 flex flex-wrap gap-4 text-sm text-brand underline">
+          <Link prefetch={false} href={`/app/projects/${projectId}/dashboard`}>Open Overview</Link>
+          <Link prefetch={false} href={`/app/projects/${projectId}/reports`}>Open Reports</Link>
         </div>
-        <DocumentLibrary
-          projectId={projectId}
-          documents={documents}
-          summaries={summaries}
-        />
+      </section>
+        </div>
       </div>
-
-      <details className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
-        <summary className="cursor-pointer font-semibold text-ink">
-          Review extracted details
-        </summary>
-        <p className="mt-2 max-w-3xl text-sm leading-6 text-ink-muted">
-          These source-linked facts are available when a reviewer needs to
-          inspect or correct the extraction. Most users can rely on the Overview.
-        </p>
-        <div className="mt-5">
-          <ExtractedInformationPanel projectId={projectId} facts={facts} />
-        </div>
-      </details>
+      <p role="status" className="text-sm text-ink-muted">{sourceMessage}</p>
     </div>
+    </SourceNavigation.Provider>
   );
 }
 
-function ProcessingSummary({ documents }: { documents: EvidenceDocument[] }) {
-  const ready = documents.filter(
-    (document) => document.processingStatus === "completed",
-  ).length;
-  const active = documents.filter((document) =>
-    ["uploaded", "queued", "processing"].includes(document.processingStatus),
-  ).length;
-  const failed = documents.filter(
-    (document) => document.processingStatus === "failed",
-  ).length;
-
+function UploadBatchStatus({ projectId, documents, submissions }: {
+  projectId: string;
+  documents: EvidenceDocument[];
+  submissions: UploadSubmission[];
+}) {
+  const batches = groupUploadBatches(submissions, documents);
+  if (batches.length === 0) return null;
   return (
     <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
-      <div className="flex items-center gap-3">
-        <span className="rounded-xl bg-plan-track p-2 text-ink-muted">
-          <BrainCircuit className="h-5 w-5" />
-        </span>
-        <div>
-          <h2 className="font-semibold text-ink">Evidence status</h2>
-          <p className="text-sm text-ink-muted">Updates automatically</p>
-        </div>
-      </div>
-      <dl className="mt-5 grid grid-cols-3 gap-3">
-        <StatusCount label="Ready" value={ready} tone="text-status-ok-text" />
-        <StatusCount label="Analyzing" value={active} tone="text-status-warn-text" />
-        <StatusCount label="Failed" value={failed} tone="text-status-critical-text" />
-      </dl>
+      <h2 className="font-semibold text-ink">Upload batches</h2>
+      <ul className="mt-3 space-y-4">
+        {batches.map(({ batchId, submissions: batchSubmissions, documents: batchDocuments }) => {
+          const batchState = uploadBatchState(batchDocuments, batchSubmissions);
+          return (
+            <li key={batchId} className="rounded-xl border border-ui-border bg-base p-3">
+              <p className="text-sm font-semibold text-ink">Batch {batchId.slice(0, 8)}</p>
+              <p className="mt-1 text-xs text-ink-muted">
+                {batchDocuments.length} file(s) · {batchState === "partial_failure" ? "Partial success; failed items can be retried" : batchState === "processing" ? "Processing" : "File processing results available"}
+              </p>
+              {batchDocuments.length > 0 && (
+                <ul className="mt-2 space-y-1 text-xs text-ink-muted">
+                  {batchDocuments.map((document) => (
+                    <li key={document.id}>{document.fileName} — {document.processingStatus.replaceAll("_", " ")}</li>
+                  ))}
+                </ul>
+              )}
+              <ArchiveSubmissionStatus projectId={projectId} submissions={batchSubmissions} />
+            </li>
+          );
+        })}
+      </ul>
     </section>
   );
 }
 
-function StatusCount({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: number;
-  tone: string;
-}) {
+function ArchiveSubmissionStatus({ projectId, submissions }: { projectId: string; submissions: UploadSubmission[] }) {
+  const router = useRouter();
+  const archives = submissions.filter((submission) => submission.archiveName);
+  const [retrying, setRetrying] = useState<string | null>(null);
+  const [retryErrors, setRetryErrors] = useState<Record<string, string>>({});
+  if (archives.length === 0) return null;
+
+  async function retryCleanup(submissionId: string) {
+    setRetrying(submissionId);
+    setRetryErrors((current) => ({ ...current, [submissionId]: "" }));
+    try {
+      await requestJson<{ message?: string }>(`/api/projects/${projectId}/documents/upload/import-archive`, { submissionId, cleanupOnly: true });
+      router.refresh();
+    } catch (error) {
+      setRetryErrors((current) => ({
+        ...current,
+        [submissionId]: error instanceof Error ? error.message : "Archive cleanup is still pending.",
+      }));
+      router.refresh();
+    } finally {
+      setRetrying(null);
+    }
+  }
+
+  async function retryFailedMember(submissionId: string, memberIdentity: string) {
+    const retryKey = `${submissionId}:${memberIdentity}`;
+    setRetrying(retryKey);
+    setRetryErrors((current) => ({ ...current, [submissionId]: "" }));
+    try {
+      await requestJson<{ message?: string }>(`/api/projects/${projectId}/documents/upload/import-archive`, {
+        submissionId,
+        retryMemberIdentity: memberIdentity,
+      });
+      router.refresh();
+    } catch (error) {
+      setRetryErrors((current) => ({
+        ...current,
+        [submissionId]: error instanceof Error ? error.message : "This archive member could not be retried.",
+      }));
+      router.refresh();
+    } finally {
+      setRetrying(null);
+    }
+  }
+
   return (
-    <div className="rounded-xl bg-base px-3 py-3">
-      <dt className="text-xs font-medium text-ink-muted">{label}</dt>
-      <dd className={`mt-1 text-2xl font-semibold ${tone}`}>{value}</dd>
-    </div>
+    <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
+      <h2 className="font-semibold text-ink">ZIP import status</h2>
+      <ul className="mt-3 divide-y divide-ui-border">
+        {archives.map((submission) => {
+          const manifest = archiveMembers(submission.archiveManifest);
+          const status = archiveManifestStatus(submission.archiveManifest);
+          const cleanupError = archiveManifestCleanupError(submission.archiveManifest);
+          const statusLabel = status === "complete"
+            ? "Import complete"
+            : status === "processing"
+              ? "Importing members"
+              : status === "retry_required"
+                ? "Member retry available"
+                : status === "cleanup_pending"
+                  ? "Cleanup pending"
+                  : status === "upload_failed"
+                    ? "Upload interrupted"
+                    : status === "uploading"
+                      ? "Uploading archive"
+                      : "Ready to import";
+          return (
+            <li key={submission.id} className="py-3 first:pt-0 last:pb-0">
+              <p className="text-sm font-medium text-ink">{submission.archiveName}</p>
+              <p className="mt-1 text-xs text-ink-muted">
+                Submission {submission.id.slice(0, 8)} · {statusLabel} · {manifest.length} member result(s)
+                {submission.archiveStoragePath ? " · temporary archive retained" : ""}
+              </p>
+              {cleanupError && <p className="mt-1 text-xs text-status-warn-text">{cleanupError}</p>}
+              {retryErrors[submission.id] && <p className="mt-1 text-xs text-status-critical-text" role="alert">{retryErrors[submission.id]}</p>}
+              {status === "cleanup_pending" && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="mt-2"
+                  disabled={retrying !== null}
+                  onClick={() => void retryCleanup(submission.id)}
+                >
+                  {retrying === submission.id ? "Retrying cleanup..." : "Retry archive cleanup"}
+                </Button>
+              )}
+              {manifest.length > 0 && (
+                <ul className="mt-2 space-y-1 text-xs text-ink-muted">
+                  {manifest.map((member) => {
+                    const state = formatArchiveMemberState(member);
+                    return (
+                      <li key={`${member.index}:${member.displayPath}`} className="flex flex-wrap items-center justify-between gap-2">
+                        <span>
+                          {member.displayPath}: Import {state.importOutcome} · Analysis {state.analysisState}
+                          {state.explanation ? ` — ${state.explanation}` : ""}
+                          {member.duplicateWarning ? ` — ${member.duplicateWarning}` : ""}
+                          {member.cleanupError ? ` — ${member.cleanupError}` : ""}
+                        </span>
+                        {member.status === "failed" && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={retrying !== null}
+                            onClick={() => void retryFailedMember(submission.id, member.identity)}
+                          >
+                            {retrying === `${submission.id}:${member.identity}` ? "Retrying member..." : "Retry this member"}
+                          </Button>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
 }
+function archiveManifestStatus(value: unknown) {
+  if (!value || typeof value !== "object" || !("status" in value) || typeof value.status !== "string") return null;
+  return value.status;
+}
+
+function archiveManifestCleanupError(value: unknown) {
+  if (!value || typeof value !== "object" || !("cleanupError" in value) || typeof value.cleanupError !== "string") return null;
+  return value.cleanupError;
+}
+
+
+function archiveMembers(value: unknown): Array<{
+  index: number;
+  identity: string;
+  displayPath: string;
+  status: string;
+  reason?: string;
+  processingStatus?: string;
+  duplicateWarning?: string;
+  cleanupError?: string;
+}> {
+  if (!value || typeof value !== "object" || !("members" in value) || !Array.isArray(value.members)) return [];
+  return value.members.filter((member): member is {
+    index: number;
+    identity: string;
+    displayPath: string;
+    status: string;
+    reason?: string;
+    processingStatus?: string;
+    duplicateWarning?: string;
+    cleanupError?: string;
+  } => !!member && typeof member === "object" &&
+    typeof member.index === "number" &&
+    typeof member.identity === "string" &&
+    typeof member.displayPath === "string" &&
+    typeof member.status === "string");
+}
+
+
 
 function DocumentLibrary({
   projectId,
   documents,
   summaries,
+  sourceRequest,
+  facts = [],
 }: {
   projectId: string;
   documents: EvidenceDocument[];
   summaries: DocumentSummary[];
+  sourceRequest: { documentId: string } | null;
+  facts?: ExtractedFact[];
 }) {
-  const groups = groupDocuments(documents);
+  const [filters, setFilters] = useState({ type: "all", period: "all", workstream: "all", status: "all" });
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState("newest");
+  const [page, setPage] = useState(0);
+  const [tab, setTab] = useState("documents");
+  const [reviewedFacts, setReviewedFacts] = useState(facts);
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const reviewLock = useRef(false);
+  const [reviewError, setReviewError] = useState("");
+  const navigateSource = useContext(SourceNavigation);
+  useEffect(() => { setReviewedFacts(facts); }, [facts]);
+  const onReview: ReviewFacts = async (ids, intent, value) => {
+    if (reviewLock.current) return;
+    reviewLock.current = true;
+    setReviewBusy(true);
+    setReviewError("");
+    try {
+      const data = new FormData();
+      data.set("projectId", projectId);
+      ids.forEach((id) => data.append("factIds", id));
+      data.set("intent", intent);
+      if (value !== undefined) data.set("editedValue", value);
+      await updateExtractedFact(data);
+      setReviewedFacts((current) => current.map((fact) => ids.includes(fact.id) ? {
+        ...fact,
+        confirmationState: intent === "accept" ? "user_confirmed" : intent === "reject" ? "user_rejected" : "user_edited",
+        editedValue: intent === "edit" ? value!.trim() : fact.editedValue,
+      } : fact));
+    } catch (error) {
+      setReviewError(error instanceof Error ? error.message : "Fact review could not be saved.");
+      throw error;
+    } finally { reviewLock.current = false; setReviewBusy(false); }
+  };
+  const focusedRequest = useRef<typeof sourceRequest>(null);
+  function updateFilters(next: typeof filters) {
+    setFilters(next);
+    setPage(0);
+  }
+  function clearFilters() {
+    updateFilters({ type: "all", period: "all", workstream: "all", status: "all" });
+    setSearch("");
+  }
+  const sortedDocuments = [...documents].sort((left, right) => compareArchiveDocuments(left, right, sort));
+  const categoryDocuments = sortedDocuments.filter((document) =>
+    document.fileName.toLowerCase().includes(search.trim().toLowerCase()) &&
+    (filters.period === "all" || document.effectiveReportingPeriod === filters.period) &&
+    (filters.workstream === "all" || document.effectiveWorkstream === filters.workstream) &&
+    (filters.status === "all" || document.processingStatus === filters.status),
+  );
+  const filteredDocuments = categoryDocuments.filter((document) => filters.type === "all" || document.effectiveDocumentType === filters.type);
+  const activeFilters = [
+    search.trim() && `Filename: ${search.trim()}`,
+    filters.type !== "all" && `Category: ${documentTypeLabels[filters.type as keyof typeof documentTypeLabels]}`,
+    filters.period !== "all" && `Period: ${periodLabel(filters.period)}`,
+    filters.workstream !== "all" && `Workstream: ${filters.workstream}`,
+    filters.status !== "all" && `State: ${statusLabels[filters.status as keyof typeof statusLabels]}`,
+  ].filter(Boolean);
+  const pageCount = Math.max(1, Math.ceil(filteredDocuments.length / 10));
+  const currentPage = Math.min(page, pageCount - 1);
+  const visibleIds = new Set(filteredDocuments.slice(currentPage * 10, (currentPage + 1) * 10).map((document) => document.id));
+
+  useEffect(() => {
+    if (!sourceRequest) return;
+    setTab("documents");
+    setFilters({ type: "all", period: "all", workstream: "all", status: "all" });
+    setSearch("");
+  }, [sourceRequest]);
+  useEffect(() => {
+    if (!sourceRequest || focusedRequest.current === sourceRequest || search || Object.values(filters).some((value) => value !== "all")) return;
+    const index = filteredDocuments.findIndex((document) => document.id === sourceRequest.documentId);
+    if (index < 0) return;
+    const sourcePage = Math.floor(index / 10);
+    if (currentPage !== sourcePage) {
+      setPage(sourcePage);
+      return;
+    }
+    const target = document.getElementById(`document-${sourceRequest.documentId}`);
+    const panel = target?.querySelector<HTMLDialogElement>("dialog[data-document-details]");
+    if (!target || !panel) return;
+    document.querySelectorAll<HTMLDialogElement>("#evidence-library dialog[open]").forEach((dialog) => dialog.close());
+    target.querySelector<HTMLButtonElement>(":scope > button")?.focus({ preventScroll: true });
+    target.scrollIntoView({ block: "center" });
+    panel.showModal();
+    focusedRequest.current = sourceRequest;
+  }, [sourceRequest, filters, search, currentPage, filteredDocuments]);
 
   return (
-    <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
+    <section id="evidence-library" tabIndex={-1} className="scroll-mt-24 rounded-2xl border border-ui-border bg-surface p-5 shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
       <div className="flex items-end justify-between gap-3 border-b border-ui-border pb-4">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-brand">
-            Organized by AI
-          </p>
-          <h2 className="mt-1 text-xl font-semibold text-ink">
-            Project documents
-          </h2>
-        </div>
-        <p className="text-sm text-ink-muted">
-          {documents.length} file{documents.length === 1 ? "" : "s"}
+        <h2 className="text-xl font-semibold text-ink">Project documents</h2>
+        <p className="mt-1 text-sm text-ink-muted">
+          Project archive. Review roles are separate from artifact type.
         </p>
       </div>
-
-      <div className="mt-4 grid gap-5">
+      <p className="shrink-0 whitespace-nowrap text-sm text-ink-muted" role="status" aria-live="polite">
+        {documents.length} file{documents.length === 1 ? "" : "s"} in archive
+      </p>
+      </div>
+      <div role="tablist" aria-label="Evidence views" className="my-4 flex gap-2" onKeyDown={(event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const next = event.key === "Home" ? "documents" : event.key === "End" ? "facts" : tab === "documents" ? "facts" : "documents";
+        setTab(next);
+        document.getElementById(`evidence-tab-${next}`)?.focus();
+      }}>
+        {[["documents", "Documents"], ["facts", "Extracted facts"]].map(([key, label]) => <Button key={key} id={`evidence-tab-${key}`} type="button" role="tab" aria-selected={tab === key} aria-controls={`evidence-panel-${key}`} tabIndex={tab === key ? 0 : -1} variant={tab === key ? "default" : "outline"} onClick={() => setTab(key)}>{label}</Button>)}
+      </div>
+      <div role="tabpanel" id="evidence-panel-facts" aria-labelledby="evidence-tab-facts" hidden={tab !== "facts"} tabIndex={0} className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+        <ExtractedFacts facts={reviewedFacts} onReview={onReview} onSource={navigateSource} busy={reviewBusy} />
+      </div>
+      <div role="tabpanel" id="evidence-panel-documents" aria-labelledby="evidence-tab-documents" hidden={tab !== "documents"} tabIndex={0} className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+      <div className="mt-4 flex flex-wrap items-end gap-2">
+        <label className="grid min-w-0 flex-1 basis-full gap-1 text-sm text-ink sm:basis-64">Search filenames
+          <Input type="search" value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder="Find a loaded document" />
+        </label>
+        <Button type="button" variant="outline" className="border-status-critical text-status-critical-text hover:bg-status-critical-bg" onClick={() => updateFilters({ ...filters, status: "failed" })} aria-pressed={filters.status === "failed"}>Failed{documents.some((document) => document.processingStatus === "failed") && ` (${documents.filter((document) => document.processingStatus === "failed").length})`}</Button>
+        <Button type="button" variant="outline" className="border-status-warn text-status-warn-text hover:bg-status-warn-bg" onClick={() => updateFilters({ ...filters, status: "needs_review" })} aria-pressed={filters.status === "needs_review"}>Needs review{documents.some((document) => document.processingStatus === "needs_review") && ` (${documents.filter((document) => document.processingStatus === "needs_review").length})`}</Button>
+        <Button type="button" variant="outline" onClick={clearFilters}>Clear filters</Button>
+        <Button type="button" variant="outline" onClick={clearFilters}>All documents</Button>
+      </div>
+      <details className="mt-4">
+        <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Additional filters</summary>
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <label className="grid gap-1 text-xs font-medium text-ink-muted">
+          Artifact type
+          <select value={filters.type} onChange={(event) => updateFilters({ ...filters, type: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+            <option value="all">All types</option>
+            {documentTypes.map((type) => <option key={type} value={type}>{documentTypeLabels[type]}</option>)}
+          </select>
+        </label>
+        <label className="grid gap-1 text-xs font-medium text-ink-muted">
+          Reporting period
+          <select value={filters.period} onChange={(event) => updateFilters({ ...filters, period: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+            <option value="all">All periods</option>
+            {uniqueDocumentValues(documents, (document) => document.effectiveReportingPeriod).map((period) => <option key={period} value={period}>{periodLabel(period)}</option>)}
+          </select>
+        </label>
+        <label className="grid gap-1 text-xs font-medium text-ink-muted">
+          Workstream
+          <select value={filters.workstream} onChange={(event) => updateFilters({ ...filters, workstream: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+            <option value="all">All workstreams</option>
+            {uniqueDocumentValues(documents, (document) => document.effectiveWorkstream).map((workstream) => <option key={workstream} value={workstream}>{workstream}</option>)}
+          </select>
+        </label>
+        <label className="grid gap-1 text-xs font-medium text-ink-muted">
+          Processing state
+          <select value={filters.status} onChange={(event) => updateFilters({ ...filters, status: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+            <option value="all">All states</option>
+            {Object.entries(statusLabels).map(([status, label]) => <option key={status} value={status}>{label}</option>)}
+          </select>
+        </label>
+      </div>
+      </details>
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <label className="flex min-w-0 flex-wrap items-center gap-2 text-xs font-medium text-ink-muted">
+          Document category
+          <select aria-label="Document category" aria-controls="document-results" value={filters.type} onChange={(event) => updateFilters({ ...filters, type: event.target.value })} className="h-9 max-w-full rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+            <option value="all">All categories ({categoryDocuments.length})</option>
+            {documentTypes.map((type) => <option key={type} value={type}>{documentTypeLabels[type]} ({categoryDocuments.filter((document) => document.effectiveDocumentType === type).length})</option>)}
+          </select>
+        </label>
+        <label className="flex min-w-0 flex-wrap items-center gap-2 text-xs font-medium text-ink-muted">
+          Sort by
+          <select aria-label="Sort documents" value={sort} onChange={(event) => { setSort(event.target.value); setPage(0); }} className="h-9 max-w-full rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+            <option value="newest">Newest uploads</option>
+            <option value="name-asc">Filename A to Z</option>
+            <option value="name-desc">Filename Z to A</option>
+            <option value="type">Artifact type A to Z</option>
+            <option value="period-desc">Reporting period newest</option>
+            <option value="period-asc">Reporting period oldest</option>
+            <option value="status">Processing state A to Z</option>
+          </select>
+        </label>
+        {activeFilters.length > 0 && <p className="min-w-0 break-words text-xs text-ink-muted">{activeFilters.join(" / ")}</p>}
+      </div>
+      {documents.length > 0 && filteredDocuments.length === 0 && <p className="mt-4 text-sm text-ink-muted" role="status">No documents match these filters.</p>}
+      <div id="document-results" hidden={documents.length > 0 && filteredDocuments.length === 0} className="mt-3 overflow-hidden rounded-lg border border-ui-border">
         {documents.length === 0 ? (
           <div className="rounded-xl border border-dashed border-ui-border bg-base p-6">
             <FileClock className="h-7 w-7 text-ink-muted" />
-            <p className="mt-3 font-semibold text-ink">
-              No project evidence yet
-            </p>
+            <p className="mt-3 font-semibold text-ink">No project evidence yet</p>
             <p className="mt-1 text-sm leading-6 text-ink-muted">
-              Upload plans, progress reports, cost reports, schedules, risk
-              registers, issue logs, and any supporting project records.
+              Upload evidence files to build the project archive. Assign review roles only when the review context is known.
             </p>
           </div>
         ) : (
-          groups.map((group) => (
-            <section key={group.key}>
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <h3 className="text-sm font-semibold text-ink">
-                  {group.label}
-                </h3>
-                <span className="text-xs text-ink-muted">
-                  {group.documents.length} file{group.documents.length === 1 ? "" : "s"}
-                </span>
+
+          <>
+            {filteredDocuments.length > 0 && (
+              <div aria-hidden="true" className="hidden grid-cols-[minmax(0,1fr)_8rem_8rem_9rem_11rem] items-center gap-3 border-b border-ui-border bg-base px-3 py-2 text-xs font-medium text-ink-muted xl:grid">
+                <span>Document</span><span>Artifact type</span><span>Reporting period</span><span>Processing state</span><span>Extracted</span>
               </div>
-              <div className="grid gap-3">
-                {group.documents.map((document) => (
-                  <DocumentRow
-                    key={document.id}
-                    projectId={projectId}
-                    document={document}
-                    summary={summaries.find((item) =>
-                      item.selectedDocumentIds.includes(document.id),
-                    )}
-                  />
-                ))}
-              </div>
-            </section>
-          ))
+            )}
+            {sortedDocuments.map((document) => (
+              <DocumentRow
+                key={document.id}
+                projectId={projectId}
+                document={document}
+                hidden={!visibleIds.has(document.id)}
+                facts={documentFacts(reviewedFacts, document.id)}
+                onReview={onReview}
+                busy={reviewBusy}
+                reviewError={reviewError}
+                summary={summaries.find((item) => item.selectedDocumentIds.includes(document.id))}
+              />
+            ))}
+          </>
         )}
       </div>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+        <p role="status" aria-live="polite" className="text-sm text-ink-muted">
+          Showing {filteredDocuments.length ? currentPage * 10 + 1 : 0}&#8211;{Math.min((currentPage + 1) * 10, filteredDocuments.length)} of {filteredDocuments.length}
+        </p>
+        <nav aria-label="Document pages" className="flex items-center gap-2">
+          <Button type="button" variant="outline" size="sm" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>Previous</Button>
+          <span className="text-xs text-ink-muted">Page {currentPage + 1} of {pageCount}</span>
+          <Button type="button" variant="outline" size="sm" disabled={currentPage + 1 >= pageCount} onClick={() => setPage(currentPage + 1)}>Next</Button>
+        </nav>
+      </div>
+      </div>
+      {reviewError && <p role="alert" className="mt-3 text-sm text-status-critical-text">{reviewError}</p>}
     </section>
   );
 }
@@ -223,16 +605,84 @@ function DocumentRow({
   projectId,
   document,
   summary,
+  hidden,
+  facts = [],
+  onReview,
+  busy,
+  reviewError,
 }: {
   projectId: string;
   document: EvidenceDocument;
+  hidden: boolean;
+  facts?: ExtractedFact[];
+  onReview: ReviewFacts;
+  busy: boolean;
+  reviewError: string;
   summary?: DocumentSummary;
 }) {
+  const panelRef = useRef<HTMLDialogElement>(null);
+  const fullSummaryRef = useRef<HTMLDetailsElement>(null);
+  const onSource = useContext(SourceNavigation);
+  const total = statedTotal(facts);
+  const summaryText = summary?.summaryText ?? "";
+  const condensed = shortSummary(summaryText);
+  const gaps = summary?.selectedDocumentIds.length === 1 ? summaryGaps(summaryText, facts) : [];
+  const flagged = facts.filter((fact) => fact.factType === "risk" || fact.factType === "issue");
+  const missingCitations = facts.filter((fact) => !fact.evidenceLinks.length).length;
+  const hasReviewNotice = flagged.length > 0 || missingCitations > 0 || gaps.length > 0 || document.processingStatus === "failed" || Boolean(document.processingError || summary?.qualityWarning);
+  useEffect(() => {
+    if (hidden && panelRef.current?.open) panelRef.current.close();
+  }, [hidden]);
   return (
-    <article className="rounded-xl border border-ui-border bg-surface p-4 transition-colors hover:border-ui-border">
+    <article hidden={hidden} tabIndex={-1} id={`document-${document.id}`} className="border-b border-ui-border last:border-b-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand">
+        <button type="button" aria-haspopup="dialog" aria-controls={`document-panel-${document.id}`} onClick={() => panelRef.current?.showModal()} className="grid w-full cursor-pointer text-left grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-3 py-3.5 text-sm text-ink hover:bg-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand xl:grid-cols-[minmax(0,1fr)_8rem_8rem_9rem_11rem]">
+          <span className="col-span-2 flex min-w-0 items-center gap-2 xl:col-span-1">
+            <span aria-hidden="true" className="text-ink-muted">&#8250;</span>
+            <span className="truncate font-medium" title={document.fileName}>{document.fileName}</span>
+          </span>
+          <span className="min-w-0 truncate text-xs text-ink-muted">{documentTypeLabels[document.effectiveDocumentType]}</span>
+          <span className="hidden truncate text-xs text-ink-muted xl:block">{document.effectiveReportingPeriod ? periodLabel(document.effectiveReportingPeriod) : <span aria-label="Reporting period not provided">&#8212;</span>}</span>
+          <span className="justify-self-end xl:justify-self-start"><StatusBadge status={document.processingStatus} /></span>
+          <span className={`col-span-2 text-xs xl:col-span-1 ${document.processingStatus === "failed" && facts.length ? "text-status-warn-text" : "text-ink-muted"}`}>{extractionPointer(facts.length, document.processingStatus)}</span>
+        </button>
+      <dialog ref={panelRef} data-document-details id={`document-panel-${document.id}`} aria-labelledby={`document-title-${document.id}`} className="fixed inset-y-0 left-auto right-0 m-0 h-dvh max-h-none w-full max-w-2xl overflow-y-auto overscroll-contain border-l border-ui-border bg-surface p-0 text-ink shadow-xl backdrop:bg-ink/20">
+        <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-ui-border bg-surface p-5">
+          <div className="min-w-0"><h3 id={`document-title-${document.id}`} className="text-base font-semibold text-ink [overflow-wrap:anywhere]">{document.fileName}</h3><div className="mt-2"><StatusBadge status={document.processingStatus} /></div></div>
+          <Button type="button" variant="outline" size="sm" className="shrink-0" aria-label="Close document details" onClick={() => panelRef.current?.close()}>Close</Button>
+        </header>
+        <div className="p-5 [overflow-wrap:anywhere]">
+          <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-3">
+            <div className={`rounded-lg border border-ui-border p-3 ${document.effectiveDocumentType === "unknown" ? "bg-status-warn-bg text-status-warn-text" : "bg-base text-ink"}`}><p className="text-xs">Artifact type</p><p className="mt-1 text-sm font-semibold">{documentTypeLabels[document.effectiveDocumentType]}</p></div>
+            <div className="rounded-lg border border-ui-border bg-base p-3 text-ink"><p className="text-xs">Reporting period</p><p className="mt-1 text-sm font-semibold">{document.effectiveReportingPeriod ? periodLabel(document.effectiveReportingPeriod) : "Not provided"}</p></div>
+            {total && <div className="rounded-lg border border-ui-border bg-base p-3 text-ink"><p className="text-xs">Total stated</p><p className="mt-1 text-sm font-semibold">{total}</p></div>}
+          </div>
+          <section className="mb-4 space-y-3">
+            <h4 className="text-sm font-semibold text-ink">Summary preview</h4>
+            <p className="text-sm leading-6 text-ink-muted">{condensed.length < summaryText.trim().length ? `${condensed.replace(/[.!?…]+$/, "")}…` : condensed || "No summary available."}</p>
+            {condensed.length < summaryText.trim().length && <details ref={fullSummaryRef}><summary className="cursor-pointer text-sm font-medium text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Show full summary</summary><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-ink-muted">{summaryText}</p></details>}
+          </section>
+          {hasReviewNotice && <aside aria-label="Document review notice" className="my-4 space-y-2 rounded-lg bg-status-warn-bg p-3 text-sm text-status-warn-text">
+            {flagged.length > 0 && <p>{extractedCounts(flagged)} extracted. These categories are not verified findings.</p>}
+            {document.processingStatus === "failed" && <p>{facts.length ? `Partial processing · ${facts.length} saved items; completion was not confirmed.` : "Processing failed; no stored items are available."}</p>}
+            {missingCitations > 0 && <p>{missingCitations} stored rows lack source citations. Document ownership is known; verify against the original file.</p>}
+            {gaps.length > 0 && <p>Possible summary/extraction mismatch: {gaps.join(" and ")} mentioned without matching structured rows. Verify the source.</p>}
+            {document.processingStatus !== "failed" && (document.processingError || summary?.qualityWarning) && <p>Document metadata or reading needs review.</p>}
+            {(document.processingError || summary?.qualityWarning) && <details><summary className="cursor-pointer font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Read processing details</summary>{document.processingError && <p className="mt-2 whitespace-pre-wrap">{document.processingError}</p>}{summary?.qualityWarning && <p className="mt-2 whitespace-pre-wrap">Reading limitation: {summary.qualityWarning}</p>}</details>}
+            {condensed.length < summaryText.trim().length && <button type="button" className="font-medium underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand" onClick={() => { if (fullSummaryRef.current) { fullSummaryRef.current.open = true; fullSummaryRef.current.querySelector("summary")?.focus(); fullSummaryRef.current.scrollIntoView({ block: "nearest" }); } }}>Show full summary</button>}
+          </aside>}
+          <FileFactReview facts={facts} onReview={onReview} onSource={onSource} busy={busy} />
+          {reviewError && <p role="alert" className="mb-3 text-sm text-status-critical-text">{reviewError}</p>}
+          <details className="mb-4 text-sm">
+            <summary className="cursor-pointer font-medium text-ink">Source details ({summary?.sources.length ?? 0})</summary>
+            <ul className="mt-2 space-y-3">{summary?.sources.map((source) => <li key={source.id} className="rounded bg-base p-3"><SourceReference documentId={source.documentId} title={source.documentTitle} />{source.location && <p className="mt-1 text-xs text-ink-muted">{source.location}</p>}{source.excerpt && <p className="mt-1 whitespace-pre-wrap text-sm text-ink-muted">{source.excerpt}</p>}{source.confidence !== null && <p className="text-xs text-ink-muted">Source confidence: {Math.round(source.confidence * 100)}%</p>}</li>)}</ul>
+            {!summary?.sources.length && <p className="mt-2 text-ink-muted">No summary source details available.</p>}
+          </details>
+          <details className="text-sm">
+          <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Document metadata and reading details</summary>
+          <div className="mt-3">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex min-w-0 gap-3">
-          <span className={`rounded-xl p-2.5 ${document.processingStatus === "completed" ? "bg-status-ok-bg text-status-ok-text" : document.processingStatus === "failed" ? "bg-status-critical-bg text-status-critical-text" : "bg-plan-track text-ink-muted"}`}>
+          <span className={`rounded-xl p-2.5 ${document.processingStatus === "completed" ? "bg-status-ok-bg text-status-ok-text" : document.processingStatus === "failed" ? "bg-status-critical-bg text-status-critical-text" : "bg-status-warn-bg text-status-warn-text"}`}>
             {document.processingStatus === "completed" ? (
               <FileCheck2 className="h-5 w-5" />
             ) : (
@@ -240,12 +690,16 @@ function DocumentRow({
             )}
           </span>
           <div className="min-w-0">
-            <h3 className="break-words font-semibold text-ink">
-              {document.title}
-            </h3>
+            {document.title !== document.fileName && <p className="mt-1 text-sm text-ink-muted">{document.title}</p>}
             <p className="mt-1 text-xs leading-5 text-ink-muted">
-              {fileKindLabel(document.mimeType, document.fileName)} · {formatBytes(document.fileSize)} · {formatDate(document.documentDate ?? document.createdAt)}
+              {fileKindLabel(document.mimeType, document.fileName)} · {formatBytes(document.fileSize)} · {document.effectiveDocumentDate ? `Document date ${formatDate(document.effectiveDocumentDate)}` : "No document date"} · Uploaded {formatDate(document.createdAt)}
             </p>
+            {document.submissionId && (
+              <p className="mt-1 text-xs text-ink-muted">
+                Submission {document.submissionId.slice(0, 8)}
+                {document.submissionBatchId && ` · Batch ${document.submissionBatchId.slice(0, 8)}`}
+              </p>
+            )}
           </div>
         </div>
         <form
@@ -271,31 +725,49 @@ function DocumentRow({
       </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        <StatusBadge status={document.processingStatus} />
-        {document.evidenceRole && (
-          <span className="rounded-full bg-plan-track px-2.5 py-1 text-xs font-semibold text-ink-muted">
-            {roleLabels[document.evidenceRole]}
-          </span>
+        <MetadataBadge
+          label="Type"
+          value={documentTypeLabels[document.effectiveDocumentType]}
+          source={metadataSource(document.confirmedDocumentType, document.suggestedDocumentType, document.documentTypeHint)}
+        />
+        <MetadataBadge
+          label="Evidence role"
+          value={document.effectiveEvidenceRole ? roleLabels[document.effectiveEvidenceRole] : "Unassigned"}
+          source={metadataSource(document.confirmedEvidenceRole, document.suggestedEvidenceRole, null)}
+        />
+        {document.effectiveDocumentDate && (
+          <MetadataBadge label="Date" value={formatDate(document.effectiveDocumentDate)} source={metadataSource(document.confirmedDocumentDate, document.suggestedDocumentDate, document.documentDateHint)} />
         )}
-        {document.evidenceRole && (
-          <span className="rounded-full bg-plan-track px-2.5 py-1 text-xs font-semibold text-ink-muted">
-            {documentTypeLabels[document.documentType]}
-          </span>
+        {document.effectiveReportingPeriod && (
+          <MetadataBadge label="Period" value={periodLabel(document.effectiveReportingPeriod)} source={metadataSource(document.confirmedReportingPeriod, document.detectedReportingPeriod, document.reportingPeriodHint)} />
         )}
-        {["uploaded", "queued", "processing"].includes(
-          document.processingStatus,
-        ) && (
+        {document.effectiveWorkstream && (
+          <MetadataBadge label="Workstream" value={document.effectiveWorkstream} source={metadataSource(document.confirmedWorkstream, document.suggestedWorkstream, document.workstreamHint)} />
+        )}
+        {["uploaded", "queued", "processing"].includes(document.processingStatus) && (
           <span className="inline-flex items-center gap-1.5 text-xs font-medium text-status-warn-text">
             <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-            Analyzing
+            Reading pending or in progress
           </span>
         )}
       </div>
 
-      {document.processingError && (
-        <p className="mt-3 rounded-lg bg-status-critical-bg px-3 py-2 text-sm text-status-critical-text">
-          {document.processingError}
-        </p>
+      {document.reviewDetails.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {document.reviewDetails.map((detail) => (
+            <details key={detail.key} className="rounded-lg border border-ui-border bg-base px-3 py-2 text-sm">
+              <summary className="cursor-pointer font-medium text-ink">{detail.title}</summary>
+              <ul className="mt-2 space-y-1 pl-5 text-ink-muted">
+                {detail.entries.map((entry, index) => (
+                  <li key={`${detail.key}-${index}`}>{entry}</li>
+                ))}
+                {detail.omittedCount > 0 && (
+                  <li>{detail.omittedCount} additional entries not shown.</li>
+                )}
+              </ul>
+            </details>
+          ))}
+        </div>
       )}
 
       {document.processingStatus === "failed" && (
@@ -304,110 +776,68 @@ function DocumentRow({
           <input type="hidden" name="documentId" value={document.id} />
           <Button type="submit" size="sm" variant="outline" className="border-status-critical bg-surface text-status-critical-text hover:bg-status-critical-bg">
             <RefreshCw className="h-4 w-4" />
-            Retry analysis
+            Retry document processing
           </Button>
         </form>
       )}
 
+      <section className="mt-3 text-sm" aria-label="Summary, rationale, and metadata">
       {document.classificationReason && (
         <p className="mt-3 text-sm leading-6 text-ink-muted">
-          <span className="font-medium text-ink">Why it was organized here:</span>{" "}
+          <span className="font-medium text-ink">Suggestion basis:</span>{" "}
           {document.classificationReason}
         </p>
       )}
+      {document.suggestedDocumentType && document.classificationConfidence !== null && (
+        <p className="mt-2 text-xs text-ink-muted">
+          Suggestion confidence: {Math.round(document.classificationConfidence * 100)}%
+        </p>
+      )}
 
-      {summary?.summaryText && (
-        <div className="mt-3 rounded-lg bg-base px-3 py-3">
-          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-ink-muted">
-            Document summary
-          </p>
-          <p className="mt-2 text-sm leading-6 text-ink-muted">
-            {summary.summaryText}
-          </p>
+
+      <details className="mt-3 text-sm">
+        <summary className="cursor-pointer font-medium text-ink">
+          {document.confirmedAt ? "Edit confirmed metadata" : "Review metadata"}
+        </summary>
+        <form action={updateDocumentClassification} className="mt-3 grid max-w-2xl gap-3 sm:grid-cols-2">
+          <input type="hidden" name="projectId" value={projectId} />
+          <input type="hidden" name="documentId" value={document.id} />
+          <label className="grid gap-1 text-xs font-medium text-ink-muted">
+            Artifact type
+            <select name="documentType" defaultValue={document.confirmedDocumentType ?? document.suggestedDocumentType ?? document.documentTypeHint ?? "unknown"} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+              {documentTypes.map((type) => <option key={type} value={type}>{documentTypeLabels[type]}</option>)}
+            </select>
+          </label>
+          <label className="grid gap-1 text-xs font-medium text-ink-muted">
+            Evidence role (not user access)
+            <select name="evidenceRole" defaultValue={document.confirmedEvidenceRole ?? document.suggestedEvidenceRole ?? ""} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+              <option value="">Not assigned</option>
+              <option value="baseline">Approved Baseline</option>
+              <option value="current">Current Period</option>
+              <option value="supporting">Supporting Evidence</option>
+            </select>
+          </label>
+          <label className="grid gap-1 text-xs font-medium text-ink-muted">
+            Document date
+            <Input name="documentDate" type="date" defaultValue={document.confirmedDocumentDate ?? document.suggestedDocumentDate ?? document.documentDateHint ?? document.documentDate ?? ""} className="h-10" />
+          </label>
+          <label className="grid gap-1 text-xs font-medium text-ink-muted">
+            Reporting period
+            <Input name="reportingPeriod" type="month" defaultValue={document.confirmedReportingPeriod ?? document.detectedReportingPeriod ?? document.reportingPeriodHint ?? ""} className="h-10" />
+          </label>
+          <label className="grid gap-1 text-xs font-medium text-ink-muted sm:col-span-2">
+            Workstream
+            <Input name="workstream" maxLength={120} defaultValue={document.confirmedWorkstream ?? document.suggestedWorkstream ?? document.workstreamHint ?? ""} className="h-10" />
+          </label>
+          <Button type="submit" size="sm" className="sm:col-span-2">Save review metadata</Button>
+        </form>
+      </details>
+      </section>
+          </div>
+          </details>
         </div>
-      )}
-
-      {document.processingStatus === "completed" && (
-        <details className="mt-3 text-sm">
-          <summary className="cursor-pointer font-medium text-ink">
-            Correct AI classification
-          </summary>
-          <form action={updateDocumentClassification} className="mt-3 max-w-sm">
-            <input type="hidden" name="projectId" value={projectId} />
-            <input type="hidden" name="documentId" value={document.id} />
-            <label className="text-xs font-medium text-ink-muted">
-              Document type
-              <select
-                name="documentType"
-                defaultValue={document.documentType}
-                className="mt-1 h-10 w-full rounded-lg border border-ui-border bg-surface px-3 text-sm text-ink shadow-sm"
-                onChange={(event) => event.currentTarget.form?.requestSubmit()}
-              >
-                {documentTypes.map((type) => (
-                  <option key={type} value={type}>
-                    {documentTypeLabels[type]}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </form>
-        </details>
-      )}
+      </dialog>
     </article>
-  );
-}
-
-function ExtractedInformationPanel({
-  projectId,
-  facts,
-}: {
-  projectId: string;
-  facts: ExtractedFact[];
-}) {
-  return (
-    <div className="grid gap-5 lg:grid-cols-2">
-      {factTypes.map((type) => {
-        const groupedFacts = facts.filter((fact) => fact.factType === type);
-        return (
-          <section key={type} className="rounded-xl bg-base p-4">
-            <h3 className="text-sm font-semibold text-ink">
-              {factTypeLabels[type]} ({groupedFacts.length})
-            </h3>
-            <div className="mt-3 grid gap-2">
-              {groupedFacts.length === 0 ? (
-                <p className="text-sm text-ink-muted">Nothing extracted.</p>
-              ) : (
-                groupedFacts.map((fact) => (
-                  <div key={fact.id} className="rounded-lg border border-ui-border bg-surface p-3">
-                    <p className="break-words text-sm leading-6 text-ink">
-                      {fact.editedValue ?? fact.extractedText}
-                    </p>
-                    {fact.evidenceLinks[0] && (
-                      <p className="mt-2 text-xs leading-5 text-ink-muted">
-                        Source: {fact.evidenceLinks[0].documentTitle}
-                      </p>
-                    )}
-                    <form action={updateExtractedFact} className="mt-3 flex gap-2">
-                      <input type="hidden" name="projectId" value={projectId} />
-                      <input type="hidden" name="factId" value={fact.id} />
-                      <Input
-                        name="editedValue"
-                        placeholder="Correct extracted value"
-                        defaultValue={fact.editedValue ?? ""}
-                        className="h-9"
-                      />
-                      <Button type="submit" size="sm" variant="outline">
-                        Save
-                      </Button>
-                    </form>
-                  </div>
-                ))
-              )}
-            </div>
-          </section>
-        );
-      })}
-    </div>
   );
 }
 
@@ -421,13 +851,28 @@ function StatusBadge({
       ? "bg-status-critical-bg text-status-critical-text"
       : status === "completed"
         ? "bg-status-ok-bg text-status-ok-text"
-        : status === "needs_review"
-          ? "bg-status-warn-bg text-status-warn-text"
+        : status === "cancelled"
+          ? "bg-base text-ink-muted"
           : "bg-status-warn-bg text-status-warn-text";
 
   return (
-    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${tone}`}>
+    <span className={`inline-block rounded-md px-2 py-0.5 text-xs font-medium ${tone}`}>
       {statusLabels[status]}
+    </span>
+  );
+}
+
+function metadataSource(confirmed: string | null, suggested: string | null, hint: string | null) {
+  if (confirmed) return "Confirmed";
+  if (suggested) return "Suggested";
+  if (hint) return "User hint";
+  return "Unclassified";
+}
+
+function MetadataBadge({ label, value, source }: { label: string; value: string; source: string }) {
+  return (
+    <span className="rounded-full bg-plan-track px-2.5 py-1 text-xs font-medium text-ink-muted">
+      {label}: {value} <span className="font-normal">· {source}</span>
     </span>
   );
 }
@@ -446,40 +891,30 @@ function formatDate(value: string) {
   }).format(new Date(value));
 }
 
-function groupDocuments(documents: EvidenceDocument[]) {
-  const groups = new Map<string, EvidenceDocument[]>();
-  for (const document of documents) {
-    const key =
-      document.evidenceRole === "baseline"
-        ? "baseline"
-        : document.detectedReportingPeriod ?? "organizing";
-    groups.set(key, [...(groups.get(key) ?? []), document]);
-  }
-
-  return [...groups.entries()]
-    .sort(([left], [right]) => {
-      if (left === "baseline") return -1;
-      if (right === "baseline") return 1;
-      if (left === "organizing") return 1;
-      if (right === "organizing") return -1;
-      return right.localeCompare(left);
-    })
-    .map(([key, groupedDocuments]) => ({
-      key,
-      label:
-        key === "baseline"
-          ? "Approved baseline"
-          : key === "organizing"
-            ? "Awaiting organization"
-            : formatPeriod(key),
-      documents: groupedDocuments,
-    }));
+function compareArchiveDocuments(left: EvidenceDocument, right: EvidenceDocument, sort: string) {
+  if (sort === "newest") return right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id);
+  const value = (document: EvidenceDocument) => sort === "type" ? documentTypeLabels[document.effectiveDocumentType]
+    : sort === "status" ? statusLabels[document.processingStatus]
+    : sort.startsWith("period") ? document.effectiveReportingPeriod : document.fileName;
+  const leftValue = value(left);
+  const rightValue = value(right);
+  // Absent optional periods stay last in either direction.
+  if (!leftValue || !rightValue) return leftValue ? -1 : rightValue ? 1 : left.id.localeCompare(right.id);
+  const direction = sort === "name-desc" || sort === "period-desc" ? -1 : 1;
+  return direction * leftValue.localeCompare(rightValue, undefined, { numeric: true, sensitivity: "base" }) || left.id.localeCompare(right.id);
 }
 
-function formatPeriod(value: string) {
-  return new Intl.DateTimeFormat("en", {
-    month: "long",
-    timeZone: "UTC",
-    year: "numeric",
-  }).format(new Date(`${value}T00:00:00Z`));
+function uniqueDocumentValues(
+  documents: EvidenceDocument[],
+  getValue: (document: EvidenceDocument) => string | null,
+) {
+  return [...new Set(documents.map(getValue).filter((value): value is string => Boolean(value)))].sort();
 }
+
+function periodLabel(value: string) {
+  const match = /^(\d{4})-(\d{2})$/.exec(value);
+  if (!match) return value;
+  return new Intl.DateTimeFormat("en", { month: "long", timeZone: "UTC", year: "numeric" })
+    .format(new Date(`${match[1]}-${match[2]}-01T00:00:00Z`));
+}
+

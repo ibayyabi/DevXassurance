@@ -1,12 +1,20 @@
+export const maxEvidenceFileSizeBytes = 50 * 1024 * 1024;
 export const processableEvidenceMimeTypes = [
   "application/pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "text/csv",
   "text/plain",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/tiff",
+  "image/bmp",
 ] as const;
 
 export const supportedEvidenceMimeTypes = [
+  "application/zip",
   "application/pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -14,9 +22,10 @@ export const supportedEvidenceMimeTypes = [
   "text/plain",
   "application/vnd.ms-powerpoint",
   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  "image/png",
   "image/jpeg",
   "image/webp",
+  "image/tiff",
+  "image/bmp",
 ] as const;
 
 export const supportedEvidenceExtensions = [
@@ -31,6 +40,10 @@ export const supportedEvidenceExtensions = [
   ".jpg",
   ".jpeg",
   ".webp",
+  ".tif",
+  ".tiff",
+  ".bmp",
+  ".zip",
 ] as const;
 
 export const evidenceFileAccept = [
@@ -59,7 +72,7 @@ export function isProcessableEvidenceFile(file: File) {
   return (
     processableEvidenceMimeTypes.includes(
       mimeType as (typeof processableEvidenceMimeTypes)[number],
-    ) || [".pdf", ".docx", ".xlsx", ".csv", ".txt"].includes(extension)
+    ) || [".pdf", ".docx", ".xlsx", ".csv", ".txt", ".pptx", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"].includes(extension)
   );
 }
 
@@ -118,6 +131,9 @@ function mimeFromExtension(fileName: string) {
   if (extension === ".png") return "image/png";
   if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
   if (extension === ".webp") return "image/webp";
+  if (extension === ".tif" || extension === ".tiff") return "image/tiff";
+  if (extension === ".bmp") return "image/bmp";
+  if (extension === ".zip") return "application/zip";
 
   return null;
 }

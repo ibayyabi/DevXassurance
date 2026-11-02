@@ -1,10 +1,27 @@
-import { redirect } from "next/navigation";
+import { AssuranceWorkspace } from "@/features/assurance/components/assurance-workspace";
+import { getAssuranceWorkspace } from "@/features/assurance/lib/queries";
+import { canApproveAssuranceBaseline } from "@/features/projects/lib/roles";
 
-export default async function LegacyAssurancePage({
+export default async function AssurancePage({
   params,
 }: {
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = await params;
-  redirect(`/app/projects/${projectId}/documents`);
+  const workspace = await getAssuranceWorkspace(projectId);
+  return (
+    <AssuranceWorkspace
+      projectId={projectId}
+      review={workspace.review}
+      documents={workspace.documents}
+      costObservations={workspace.costObservations}
+      costBaselines={workspace.costBaselines}
+      wbsScopeLabels={workspace.wbsScopeLabels}
+      wbsMappings={workspace.wbsMappings}
+      milestoneMappings={workspace.milestoneMappings}
+      riskIdentityMappings={workspace.riskIdentityMappings}
+      riskScaleMappings={workspace.riskScaleMappings}
+      canApproveBaseline={canApproveAssuranceBaseline(workspace.membership.role)}
+    />
+  );
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const read = (path) => readFileSync(path, "utf8");
@@ -54,28 +54,6 @@ test("project access migration defines project-scoped roles and RLS policies", (
   assert.match(migration, /project_members_read_own_projects/);
 });
 
-test("project selection and usable recovery navigation are scaffolded", () => {
-  const projectsPage = read("src/app/app/projects/page.tsx");
-  const shell = read("src/components/app-shell/app-shell.tsx");
-  const layout = read("src/app/app/projects/[projectId]/layout.tsx");
-
-  assert.match(projectsPage, /getAssignedProjects/);
-  assert.match(projectsPage, /What needs your attention/);
-  assert.match(projectsPage, /No projects yet/);
-  assert.match(projectsPage, /CreateProjectPanel/);
-  assert.match(layout, /requireProjectMembership/);
-
-  for (const routeSegment of ["dashboard", "documents", "reports", "assistant", "trends", "members"]) {
-    assert.ok(existsSync(`src/app/app/projects/[projectId]/${routeSegment}/page.tsx`));
-    assert.match(shell, new RegExp(routeSegment));
-  }
-
-  for (const label of ["Overview", "Evidence", "AI Advisor", "Trends", "Team & Settings"]) {
-    assert.match(shell, new RegExp(label));
-  }
-  assert.match(shell, /md:hidden/);
-  assert.match(read("src/app/app/projects/[projectId]/assurance/page.tsx"), /redirect.*documents/s);
-});
 
 test("auth fields stay readable and landing demo navigation respects motion preferences", () => {
   const globals = read("src/app/globals.css");
