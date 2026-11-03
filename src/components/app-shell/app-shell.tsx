@@ -109,7 +109,7 @@ export function AppShell({
         </aside>
 
         <div className="flex min-w-0 flex-1 flex-col">
-          <header className="sticky top-0 z-10 border-b border-ui-border bg-surface/95 px-4 py-3 backdrop-blur md:px-6">
+          <header className="sticky top-0 z-20 border-b border-ui-border bg-surface px-4 py-3 md:px-6">
             <div className="flex items-center justify-between gap-4">
               <div className="min-w-0">
                 <p className="text-sm font-medium text-ink-muted">

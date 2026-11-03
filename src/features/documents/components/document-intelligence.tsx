@@ -3,6 +3,7 @@
 import {
   Archive,
   Check,
+  ChevronDown,
   FileCheck2,
   FileClock,
   FileText,
@@ -72,7 +73,7 @@ const statusLabelsId: Record<string, string> = {
 
 const SourceNavigation = createContext<(documentId: string) => void>(() => {});
 
-/** Small colored square with the file kind, e.g. green XLS, blue DOC, red PDF. */
+/** Small colored square with a compact, recognizable file-kind label. */
 function FileTypeIcon({ fileName, mimeType }: { fileName: string; mimeType: string }) {
   const ext = fileName.includes(".") ? fileName.split(".").pop()!.toLowerCase() : "";
   const is = (...list: string[]) => list.includes(ext) || mimeType.includes(list[0]);
@@ -85,7 +86,17 @@ function FileTypeIcon({ fileName, mimeType }: { fileName: string; mimeType: stri
         : is("ppt", "pptx")
           ? "bg-status-warn-bg text-status-warn-text"
           : "bg-plan-track text-ink-muted";
-  const short = is("xls", "xlsx") ? "XLS" : is("csv") ? "CSV" : is("doc", "docx") ? "DOC" : is("ppt", "pptx") ? "PPT" : is("pdf") ? "PDF" : "FILE";
+  const short = is("xls", "xlsx")
+    ? "X"
+    : is("csv")
+      ? "CSV"
+      : is("doc", "docx")
+        ? "W"
+        : is("ppt", "pptx")
+          ? "PPT"
+          : is("pdf")
+            ? "P"
+            : "FILE";
   return (
     <span aria-hidden="true" className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[10px] font-bold ${style}`}>
       {short}
@@ -585,10 +596,13 @@ function DocumentLibrary({
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <label className="flex min-w-0 flex-wrap items-center gap-2 text-xs font-medium text-ink-muted">
           Jenis dokumen
-          <select aria-label="Jenis dokumen" aria-controls="document-results" value={filters.type} onChange={(event) => updateFilters({ ...filters, type: event.target.value })} className="h-9 max-w-full rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
-            <option value="all">Semua jenis ({categoryDocuments.length})</option>
-            {documentTypes.map((type) => <option key={type} value={type}>{documentTypeLabels[type]} ({categoryDocuments.filter((document) => document.effectiveDocumentType === type).length})</option>)}
-          </select>
+          <span className="relative inline-flex max-w-full">
+            <select aria-label="Jenis dokumen" aria-controls="document-results" value={filters.type} onChange={(event) => updateFilters({ ...filters, type: event.target.value })} className="h-9 max-w-full appearance-none rounded-md border border-ui-border bg-surface px-3 pe-9 text-sm text-ink">
+              <option value="all">Semua jenis ({categoryDocuments.length})</option>
+              {documentTypes.map((type) => <option key={type} value={type}>{documentTypeLabels[type]} ({categoryDocuments.filter((document) => document.effectiveDocumentType === type).length})</option>)}
+            </select>
+            <ChevronDown aria-hidden="true" className="pointer-events-none absolute end-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-muted" />
+          </span>
         </label>
         <label className="flex min-w-0 flex-wrap items-center gap-2 text-xs font-medium text-ink-muted">
           Urutkan

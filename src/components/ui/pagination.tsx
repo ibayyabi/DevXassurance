@@ -16,7 +16,7 @@ export function PaginationFooter({ rangeLabel, page, pageCount, onPrevious, onNe
   return (
     <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
       <p className="text-sm text-ink-muted">{rangeLabel}</p>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <Button type="button" variant="outline" size="sm" onClick={onPrevious} disabled={previousDisabled}>
           <ChevronLeft className="h-4 w-4" aria-hidden="true" />
           Sebelumnya

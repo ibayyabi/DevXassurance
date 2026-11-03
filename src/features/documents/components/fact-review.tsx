@@ -104,7 +104,7 @@ function FactItem({ fact, onReview, onSource, busy, showType, documentScope }: O
         </div>
         <span role="status" className="text-xs text-ink-muted">{reviewLabel(fact)}{fact.documentProcessingStatus === "failed" && <span className="ml-2 text-status-warn-text">Parsial</span>}</span>
         <div className="min-w-0 text-xs">
-          {!documentScope && (fact.documentId ? <button type="button" onClick={() => onSource(fact.documentId!)} className="line-clamp-2 text-left text-brand underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">{fact.documentTitle ?? fact.evidenceLinks[0]?.documentTitle ?? "Buka dokumen sumber"}</button> : <span className="text-ink-muted">Tidak ada referensi sumber</span>)}
+          {!documentScope && (fact.documentId ? <button type="button" onClick={() => onSource(fact.documentId!)} className="min-w-0 line-clamp-2 [overflow-wrap:anywhere] text-left text-brand underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">{fact.documentTitle ?? fact.evidenceLinks[0]?.documentTitle ?? "Buka dokumen sumber"}</button> : <span className="text-ink-muted">Tidak ada referensi sumber</span>)}
           {!fact.evidenceLinks.length && <span className="text-status-warn-text">Kutipan tidak ada</span>}
           {documentScope && fact.evidenceLinks[0]?.location && <span className="text-ink-muted">{fact.evidenceLinks[0].location}</span>}
         </div>
