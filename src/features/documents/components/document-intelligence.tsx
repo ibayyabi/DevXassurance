@@ -1,11 +1,21 @@
 "use client";
 
 import {
+  Archive,
+  Check,
   FileCheck2,
   FileClock,
   FileText,
+  Flag,
+  Layers,
+  ListChecks,
   RefreshCw,
+  RotateCcw,
+  ScanSearch,
+  Search,
   Trash2,
+  UploadCloud,
+  X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { createContext, useContext, useEffect, useRef, useState } from "react";
@@ -36,14 +46,59 @@ import { requestJson } from "@/features/documents/lib/request-json";
 import { ExtractedFacts, FileFactReview, documentFacts, extractedCounts, extractionPointer, shortSummary, statedTotal, summaryGaps, type ReviewFacts } from "@/features/documents/components/fact-review";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SectionCard } from "@/components/ui/section-card";
+import { MetaPill, StatusPill, type StatusTone } from "@/components/ui/status-pill";
+import { PillTabs } from "@/components/ui/pill-tabs";
+import { StepNav } from "@/components/ui/step-nav";
+import { FilterChip } from "@/components/ui/filter-chip";
+import { EmptyState } from "@/components/ui/empty-state";
+import { PaginationFooter } from "@/components/ui/pagination";
 
 const roleLabels = {
-  baseline: "Approved Baseline",
-  current: "Current Period",
-  supporting: "Supporting Evidence",
+  baseline: "Baseline Disetujui",
+  current: "Periode Berjalan",
+  supporting: "Bukti Pendukung",
 } as const;
 
+const statusLabelsId: Record<string, string> = {
+  uploaded: "Diunggah",
+  queued: "Dalam antrean",
+  processing: "Diproses",
+  completed: "Selesai",
+  needs_review: "Perlu diperiksa",
+  failed: "Gagal",
+  cancelled: "Dibatalkan",
+};
+
 const SourceNavigation = createContext<(documentId: string) => void>(() => {});
+
+/** Small colored square with the file kind, e.g. green XLS, blue DOC, red PDF. */
+function FileTypeIcon({ fileName, mimeType }: { fileName: string; mimeType: string }) {
+  const ext = fileName.includes(".") ? fileName.split(".").pop()!.toLowerCase() : "";
+  const is = (...list: string[]) => list.includes(ext) || mimeType.includes(list[0]);
+  const style = is("xls", "xlsx") || is("csv")
+    ? "bg-status-ok-bg text-status-ok-text"
+    : is("doc", "docx") || is("txt")
+      ? "bg-brand-soft text-brand"
+      : is("pdf")
+        ? "bg-status-critical-bg text-status-critical-text"
+        : is("ppt", "pptx")
+          ? "bg-status-warn-bg text-status-warn-text"
+          : "bg-plan-track text-ink-muted";
+  const short = is("xls", "xlsx") ? "XLS" : is("csv") ? "CSV" : is("doc", "docx") ? "DOC" : is("ppt", "pptx") ? "PPT" : is("pdf") ? "PDF" : "FILE";
+  return (
+    <span aria-hidden="true" className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[10px] font-bold ${style}`}>
+      {short}
+    </span>
+  );
+}
+
+/** Tinted pill tone per artifact type; status hues stay reserved for conditions. */
+function documentTypeTone(type: string): StatusTone {
+  if (type === "progress_report" || type === "weekly_report") return "brand";
+  if (type === "proposal" || type === "contract") return "analysis";
+  return "neutral";
+}
 
 function SourceReference({ documentId, title }: { documentId: string; title: string }) {
   const navigate = useContext(SourceNavigation);
@@ -82,7 +137,7 @@ export function DocumentIntelligence({
 
   function navigateSource(documentId: string) {
     if (!documents.some((document) => document.id === documentId)) {
-      setSourceMessage("This source document is not available in the loaded collection.");
+      setSourceMessage("Dokumen sumber ini tidak tersedia dalam koleksi yang dimuat.");
       return;
     }
     setSourceMessage("");
@@ -104,16 +159,17 @@ export function DocumentIntelligence({
   return (
     <SourceNavigation.Provider value={navigateSource}>
     <div className="space-y-5">
-      <div className="grid gap-5 md:grid-cols-[200px_minmax(0,1fr)]">
-        <nav aria-label="Evidence steps" className="flex flex-col gap-2">
-          {[
-            ["prepare", "1. Siapkan evidence", true],
-            ["check", "2. Baca & periksa", documents.length > 0],
-            ["review", "3. Tinjau hasil", true],
-          ].map(([key, label, hasContent]) => (
-            <Button key={String(key)} type="button" variant={step === key ? "default" : "outline"} className={`justify-start ${step !== key && !hasContent ? "text-ink-muted" : ""}`} aria-current={step === key ? "step" : undefined} aria-controls={`evidence-${key}`} onClick={() => navigateStep(String(key))}>{label}</Button>
-          ))}
-        </nav>
+      <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
+        <StepNav
+          label="Langkah evidence"
+          direction="vertical"
+          onSelect={navigateStep}
+          steps={[
+            { key: "prepare", label: "1. Siapkan bukti", icon: UploadCloud, state: step === "prepare" ? "active" : "complete", panelId: "evidence-prepare" },
+            { key: "check", label: "2. Baca & periksa", icon: ScanSearch, state: documents.length === 0 ? "locked" : step === "check" ? "active" : step === "review" ? "complete" : "upcoming", panelId: "evidence-check" },
+            { key: "review", label: "3. Tinjau hasil", icon: Flag, state: step === "review" ? "active" : "upcoming", panelId: "evidence-review" },
+          ]}
+        />
         <div className="min-w-0 space-y-5">
           <div id="evidence-prepare" hidden={step !== "prepare"} tabIndex={-1} className="space-y-5 scroll-mt-24 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
           <UploadDocumentForm
@@ -136,25 +192,25 @@ export function DocumentIntelligence({
             ]}
           />
           <details>
-            <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Upload batches and file status</summary>
+            <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Batch unggahan dan status file</summary>
             <UploadBatchStatus projectId={projectId} documents={documents} submissions={uploadSubmissions} />
           </details>
           <Button type="button" variant="outline" onClick={() => navigateStep("check")}>Baca &amp; periksa</Button>
           </div>
           <div id="evidence-check" hidden={step !== "check"} tabIndex={-1} className="space-y-5 scroll-mt-24 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
             <h2 className="text-lg font-semibold text-ink">Baca &amp; periksa</h2>
-            <p className="text-sm text-ink-muted">Inspect document status, metadata, reading limitations, and supporting sources before continuing to Assurance Review.</p>
+            <p className="text-sm text-ink-muted">Periksa status dokumen, metadata, keterbatasan pembacaan, dan sumber pendukung sebelum melanjutkan ke Tinjauan Assurance.</p>
             <DocumentLibrary projectId={projectId} documents={documents} facts={facts} summaries={summaries} sourceRequest={sourceRequest} />
           </div>
       <section id="evidence-review" hidden={step !== "review"} tabIndex={-1} className="scroll-mt-24 rounded-2xl border border-ui-border bg-surface p-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
-        <h2 className="text-lg font-semibold text-ink">Review results</h2>
-        <p className="mt-2 text-sm text-ink-muted">Assessment results are not available on this screen. Open Assurance Review to inspect the review or select evidence and run the existing assessment workflow.</p>
+        <h2 className="text-lg font-semibold text-ink">Tinjau hasil</h2>
+        <p className="mt-2 text-sm text-ink-muted">Hasil asesmen tidak tersedia di layar ini. Buka Tinjauan Assurance untuk memeriksa hasil atau pilih bukti dan jalankan alur asesmen yang ada.</p>
         <Button asChild className="mt-3">
-          <Link prefetch={false} href={`/app/projects/${projectId}/assurance`}>Open Assurance Review</Link>
+          <Link prefetch={false} href={`/app/projects/${projectId}/assurance`}>Buka Tinjauan Assurance</Link>
         </Button>
         <div className="mt-3 flex flex-wrap gap-4 text-sm text-brand underline">
-          <Link prefetch={false} href={`/app/projects/${projectId}/dashboard`}>Open Overview</Link>
-          <Link prefetch={false} href={`/app/projects/${projectId}/reports`}>Open Reports</Link>
+          <Link prefetch={false} href={`/app/projects/${projectId}/dashboard`}>Buka Overview</Link>
+          <Link prefetch={false} href={`/app/projects/${projectId}/reports`}>Buka Laporan</Link>
         </div>
       </section>
         </div>
@@ -174,7 +230,7 @@ function UploadBatchStatus({ projectId, documents, submissions }: {
   if (batches.length === 0) return null;
   return (
     <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
-      <h2 className="font-semibold text-ink">Upload batches</h2>
+      <h2 className="font-semibold text-ink">Batch unggahan</h2>
       <ul className="mt-3 space-y-4">
         {batches.map(({ batchId, submissions: batchSubmissions, documents: batchDocuments }) => {
           const batchState = uploadBatchState(batchDocuments, batchSubmissions);
@@ -182,7 +238,7 @@ function UploadBatchStatus({ projectId, documents, submissions }: {
             <li key={batchId} className="rounded-xl border border-ui-border bg-base p-3">
               <p className="text-sm font-semibold text-ink">Batch {batchId.slice(0, 8)}</p>
               <p className="mt-1 text-xs text-ink-muted">
-                {batchDocuments.length} file(s) · {batchState === "partial_failure" ? "Partial success; failed items can be retried" : batchState === "processing" ? "Processing" : "File processing results available"}
+                {batchDocuments.length} file · {batchState === "partial_failure" ? "Sebagian berhasil; item yang gagal dapat diulangi" : batchState === "processing" ? "Sedang diproses" : "Hasil pemrosesan file tersedia"}
               </p>
               {batchDocuments.length > 0 && (
                 <ul className="mt-2 space-y-1 text-xs text-ink-muted">
@@ -254,24 +310,24 @@ function ArchiveSubmissionStatus({ projectId, submissions }: { projectId: string
           const status = archiveManifestStatus(submission.archiveManifest);
           const cleanupError = archiveManifestCleanupError(submission.archiveManifest);
           const statusLabel = status === "complete"
-            ? "Import complete"
+            ? "Impor selesai"
             : status === "processing"
-              ? "Importing members"
+              ? "Mengimpor anggota"
               : status === "retry_required"
-                ? "Member retry available"
+                ? "Anggota dapat diulangi"
                 : status === "cleanup_pending"
-                  ? "Cleanup pending"
+                  ? "Pembersihan tertunda"
                   : status === "upload_failed"
-                    ? "Upload interrupted"
+                    ? "Unggahan terputus"
                     : status === "uploading"
-                      ? "Uploading archive"
-                      : "Ready to import";
+                      ? "Mengunggah arsip"
+                      : "Siap diimpor";
           return (
             <li key={submission.id} className="py-3 first:pt-0 last:pb-0">
               <p className="text-sm font-medium text-ink">{submission.archiveName}</p>
               <p className="mt-1 text-xs text-ink-muted">
-                Submission {submission.id.slice(0, 8)} · {statusLabel} · {manifest.length} member result(s)
-                {submission.archiveStoragePath ? " · temporary archive retained" : ""}
+                Submission {submission.id.slice(0, 8)} · {statusLabel} · {manifest.length} hasil anggota
+                {submission.archiveStoragePath ? " · arsip sementara disimpan" : ""}
               </p>
               {cleanupError && <p className="mt-1 text-xs text-status-warn-text">{cleanupError}</p>}
               {retryErrors[submission.id] && <p className="mt-1 text-xs text-status-critical-text" role="alert">{retryErrors[submission.id]}</p>}
@@ -284,7 +340,7 @@ function ArchiveSubmissionStatus({ projectId, submissions }: { projectId: string
                   disabled={retrying !== null}
                   onClick={() => void retryCleanup(submission.id)}
                 >
-                  {retrying === submission.id ? "Retrying cleanup..." : "Retry archive cleanup"}
+                  {retrying === submission.id ? "Mengulangi pembersihan..." : "Ulangi pembersihan arsip"}
                 </Button>
               )}
               {manifest.length > 0 && (
@@ -293,8 +349,8 @@ function ArchiveSubmissionStatus({ projectId, submissions }: { projectId: string
                     const state = formatArchiveMemberState(member);
                     return (
                       <li key={`${member.index}:${member.displayPath}`} className="flex flex-wrap items-center justify-between gap-2">
-                        <span>
-                          {member.displayPath}: Import {state.importOutcome} · Analysis {state.analysisState}
+                          <span>
+                          {member.displayPath}: Impor {state.importOutcome} · Analisis {state.analysisState}
                           {state.explanation ? ` — ${state.explanation}` : ""}
                           {member.duplicateWarning ? ` — ${member.duplicateWarning}` : ""}
                           {member.cleanupError ? ` — ${member.cleanupError}` : ""}
@@ -307,7 +363,7 @@ function ArchiveSubmissionStatus({ projectId, submissions }: { projectId: string
                             disabled={retrying !== null}
                             onClick={() => void retryFailedMember(submission.id, member.identity)}
                           >
-                            {retrying === `${submission.id}:${member.identity}` ? "Retrying member..." : "Retry this member"}
+                            {retrying === `${submission.id}:${member.identity}` ? "Mengulangi anggota..." : "Ulangi anggota ini"}
                           </Button>
                         )}
                       </li>
@@ -426,12 +482,12 @@ function DocumentLibrary({
   );
   const filteredDocuments = categoryDocuments.filter((document) => filters.type === "all" || document.effectiveDocumentType === filters.type);
   const activeFilters = [
-    search.trim() && `Filename: ${search.trim()}`,
-    filters.type !== "all" && `Category: ${documentTypeLabels[filters.type as keyof typeof documentTypeLabels]}`,
-    filters.period !== "all" && `Period: ${periodLabel(filters.period)}`,
-    filters.workstream !== "all" && `Workstream: ${filters.workstream}`,
-    filters.status !== "all" && `State: ${statusLabels[filters.status as keyof typeof statusLabels]}`,
-  ].filter(Boolean);
+    search.trim() && { label: `Nama file: ${search.trim()}`, clear: () => setSearch("") },
+    filters.type !== "all" && { label: `Jenis: ${documentTypeLabels[filters.type as keyof typeof documentTypeLabels]}`, clear: () => updateFilters({ ...filters, type: "all" }) },
+    filters.period !== "all" && { label: `Periode: ${periodLabel(filters.period)}`, clear: () => updateFilters({ ...filters, period: "all" }) },
+    filters.workstream !== "all" && { label: `Workstream: ${filters.workstream}`, clear: () => updateFilters({ ...filters, workstream: "all" }) },
+    filters.status !== "all" && { label: `Status: ${statusLabelsId[filters.status as keyof typeof statusLabelsId] ?? filters.status}`, clear: () => updateFilters({ ...filters, status: "all" }) },
+  ].filter((chip): chip is { label: string; clear: () => void } => Boolean(chip));
   const pageCount = Math.max(1, Math.ceil(filteredDocuments.length / 10));
   const currentPage = Math.min(page, pageCount - 1);
   const visibleIds = new Set(filteredDocuments.slice(currentPage * 10, (currentPage + 1) * 10).map((document) => document.id));
@@ -462,111 +518,113 @@ function DocumentLibrary({
   }, [sourceRequest, filters, search, currentPage, filteredDocuments]);
 
   return (
-    <section id="evidence-library" tabIndex={-1} className="scroll-mt-24 rounded-2xl border border-ui-border bg-surface p-5 shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
-      <div className="flex items-end justify-between gap-3 border-b border-ui-border pb-4">
-        <div>
-        <h2 className="text-xl font-semibold text-ink">Project documents</h2>
-        <p className="mt-1 text-sm text-ink-muted">
-          Project archive. Review roles are separate from artifact type.
-        </p>
-      </div>
-      <p className="shrink-0 whitespace-nowrap text-sm text-ink-muted" role="status" aria-live="polite">
-        {documents.length} file{documents.length === 1 ? "" : "s"} in archive
-      </p>
-      </div>
-      <div role="tablist" aria-label="Evidence views" className="my-4 flex gap-2" onKeyDown={(event) => {
-        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-        event.preventDefault();
-        const next = event.key === "Home" ? "documents" : event.key === "End" ? "facts" : tab === "documents" ? "facts" : "documents";
-        setTab(next);
-        document.getElementById(`evidence-tab-${next}`)?.focus();
-      }}>
-        {[["documents", "Documents"], ["facts", "Extracted facts"]].map(([key, label]) => <Button key={key} id={`evidence-tab-${key}`} type="button" role="tab" aria-selected={tab === key} aria-controls={`evidence-panel-${key}`} tabIndex={tab === key ? 0 : -1} variant={tab === key ? "default" : "outline"} onClick={() => setTab(key)}>{label}</Button>)}
-      </div>
+    <SectionCard
+      id="evidence-library"
+      icon={Layers}
+      title="Dokumen proyek"
+      subtitle="Arsip proyek. Peran tinjauan terpisah dari jenis artefak."
+      aside={<MetaPill icon={Archive}><span role="status" aria-live="polite">{documents.length} file dalam arsip</span></MetaPill>}
+    >
+      <PillTabs
+        label="Tampilan evidence"
+        value={tab}
+        onChange={setTab}
+        idPrefix="evidence-tab"
+        tabs={[
+          { key: "documents", label: "Dokumen", icon: FileText, panelId: "evidence-panel-documents" },
+          { key: "facts", label: "Fakta terekstraksi", icon: ListChecks, panelId: "evidence-panel-facts" },
+        ]}
+      />
       <div role="tabpanel" id="evidence-panel-facts" aria-labelledby="evidence-tab-facts" hidden={tab !== "facts"} tabIndex={0} className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
         <ExtractedFacts facts={reviewedFacts} onReview={onReview} onSource={navigateSource} busy={reviewBusy} />
       </div>
       <div role="tabpanel" id="evidence-panel-documents" aria-labelledby="evidence-tab-documents" hidden={tab !== "documents"} tabIndex={0} className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
-      <div className="mt-4 flex flex-wrap items-end gap-2">
-        <label className="grid min-w-0 flex-1 basis-full gap-1 text-sm text-ink sm:basis-64">Search filenames
-          <Input type="search" value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder="Find a loaded document" />
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <label className="relative grid min-w-0 flex-1 basis-full gap-1 text-sm text-ink sm:basis-72">
+          <span className="sr-only">Cari nama file</span>
+          <Search className="pointer-events-none absolute bottom-2.5 left-3 h-4 w-4 text-ink-muted" aria-hidden="true" />
+          <Input type="search" value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder="Cari nama file, mis. proposal, laporan, alarm…" className="pl-9" />
         </label>
-        <Button type="button" variant="outline" className="border-status-critical text-status-critical-text hover:bg-status-critical-bg" onClick={() => updateFilters({ ...filters, status: "failed" })} aria-pressed={filters.status === "failed"}>Failed{documents.some((document) => document.processingStatus === "failed") && ` (${documents.filter((document) => document.processingStatus === "failed").length})`}</Button>
-        <Button type="button" variant="outline" className="border-status-warn text-status-warn-text hover:bg-status-warn-bg" onClick={() => updateFilters({ ...filters, status: "needs_review" })} aria-pressed={filters.status === "needs_review"}>Needs review{documents.some((document) => document.processingStatus === "needs_review") && ` (${documents.filter((document) => document.processingStatus === "needs_review").length})`}</Button>
-        <Button type="button" variant="outline" onClick={clearFilters}>Clear filters</Button>
-        <Button type="button" variant="outline" onClick={clearFilters}>All documents</Button>
+        <FilterChip pressed={filters.status === "failed"} onToggle={() => updateFilters({ ...filters, status: filters.status === "failed" ? "all" : "failed" })} dotTone="critical">
+          Gagal{documents.some((document) => document.processingStatus === "failed") && ` (${documents.filter((document) => document.processingStatus === "failed").length})`}
+        </FilterChip>
+        <FilterChip pressed={filters.status === "needs_review"} onToggle={() => updateFilters({ ...filters, status: filters.status === "needs_review" ? "all" : "needs_review" })} dotTone="warn">
+          Perlu diperiksa{documents.some((document) => document.processingStatus === "needs_review") && ` (${documents.filter((document) => document.processingStatus === "needs_review").length})`}
+        </FilterChip>
+        <Button type="button" variant="ghost" onClick={clearFilters}>
+          <RotateCcw className="h-4 w-4" aria-hidden="true" />
+          Bersihkan filter
+        </Button>
       </div>
       <details className="mt-4">
-        <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Additional filters</summary>
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Filter tambahan</summary>
+      <div className="mt-4 grid gap-3 sm:grid-cols-3">
         <label className="grid gap-1 text-xs font-medium text-ink-muted">
-          Artifact type
-          <select value={filters.type} onChange={(event) => updateFilters({ ...filters, type: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
-            <option value="all">All types</option>
-            {documentTypes.map((type) => <option key={type} value={type}>{documentTypeLabels[type]}</option>)}
-          </select>
-        </label>
-        <label className="grid gap-1 text-xs font-medium text-ink-muted">
-          Reporting period
+          Periode pelaporan
           <select value={filters.period} onChange={(event) => updateFilters({ ...filters, period: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
-            <option value="all">All periods</option>
+            <option value="all">Semua periode</option>
             {uniqueDocumentValues(documents, (document) => document.effectiveReportingPeriod).map((period) => <option key={period} value={period}>{periodLabel(period)}</option>)}
           </select>
         </label>
         <label className="grid gap-1 text-xs font-medium text-ink-muted">
           Workstream
           <select value={filters.workstream} onChange={(event) => updateFilters({ ...filters, workstream: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
-            <option value="all">All workstreams</option>
+            <option value="all">Semua workstream</option>
             {uniqueDocumentValues(documents, (document) => document.effectiveWorkstream).map((workstream) => <option key={workstream} value={workstream}>{workstream}</option>)}
           </select>
         </label>
         <label className="grid gap-1 text-xs font-medium text-ink-muted">
-          Processing state
+          Status pemrosesan
           <select value={filters.status} onChange={(event) => updateFilters({ ...filters, status: event.target.value })} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
-            <option value="all">All states</option>
-            {Object.entries(statusLabels).map(([status, label]) => <option key={status} value={status}>{label}</option>)}
+            <option value="all">Semua status</option>
+            {Object.entries(statusLabels).map(([status, label]) => <option key={status} value={status}>{statusLabelsId[status as keyof typeof statusLabelsId] ?? label}</option>)}
           </select>
         </label>
       </div>
       </details>
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <label className="flex min-w-0 flex-wrap items-center gap-2 text-xs font-medium text-ink-muted">
-          Document category
-          <select aria-label="Document category" aria-controls="document-results" value={filters.type} onChange={(event) => updateFilters({ ...filters, type: event.target.value })} className="h-9 max-w-full rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
-            <option value="all">All categories ({categoryDocuments.length})</option>
+          Jenis dokumen
+          <select aria-label="Jenis dokumen" aria-controls="document-results" value={filters.type} onChange={(event) => updateFilters({ ...filters, type: event.target.value })} className="h-9 max-w-full rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+            <option value="all">Semua jenis ({categoryDocuments.length})</option>
             {documentTypes.map((type) => <option key={type} value={type}>{documentTypeLabels[type]} ({categoryDocuments.filter((document) => document.effectiveDocumentType === type).length})</option>)}
           </select>
         </label>
         <label className="flex min-w-0 flex-wrap items-center gap-2 text-xs font-medium text-ink-muted">
-          Sort by
-          <select aria-label="Sort documents" value={sort} onChange={(event) => { setSort(event.target.value); setPage(0); }} className="h-9 max-w-full rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
-            <option value="newest">Newest uploads</option>
-            <option value="name-asc">Filename A to Z</option>
-            <option value="name-desc">Filename Z to A</option>
-            <option value="type">Artifact type A to Z</option>
-            <option value="period-desc">Reporting period newest</option>
-            <option value="period-asc">Reporting period oldest</option>
-            <option value="status">Processing state A to Z</option>
+          Urutkan
+          <select aria-label="Urutkan dokumen" value={sort} onChange={(event) => { setSort(event.target.value); setPage(0); }} className="h-9 max-w-full rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
+            <option value="newest">Unggahan terbaru</option>
+            <option value="name-asc">Nama file A–Z</option>
+            <option value="name-desc">Nama file Z–A</option>
+            <option value="type">Jenis artefak A–Z</option>
+            <option value="period-desc">Periode pelaporan terbaru</option>
+            <option value="period-asc">Periode pelaporan terlama</option>
+            <option value="status">Status pemrosesan A–Z</option>
           </select>
         </label>
-        {activeFilters.length > 0 && <p className="min-w-0 break-words text-xs text-ink-muted">{activeFilters.join(" / ")}</p>}
+        {activeFilters.map((chip) => (
+          <button key={chip.label} type="button" onClick={chip.clear} className="inline-flex items-center gap-1 rounded-full bg-brand-soft px-2.5 py-1 text-xs font-medium text-brand transition-colors duration-150 hover:bg-brand hover:text-brand-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+            {chip.label}
+            <X className="h-3 w-3" aria-hidden="true" />
+          </button>
+        ))}
       </div>
-      {documents.length > 0 && filteredDocuments.length === 0 && <p className="mt-4 text-sm text-ink-muted" role="status">No documents match these filters.</p>}
+      {documents.length > 0 && filteredDocuments.length === 0 && <p className="mt-4 text-sm text-ink-muted" role="status">Tidak ada dokumen yang cocok dengan filter ini.</p>}
       <div id="document-results" hidden={documents.length > 0 && filteredDocuments.length === 0} className="mt-3 overflow-hidden rounded-lg border border-ui-border">
         {documents.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-ui-border bg-base p-6">
-            <FileClock className="h-7 w-7 text-ink-muted" />
-            <p className="mt-3 font-semibold text-ink">No project evidence yet</p>
-            <p className="mt-1 text-sm leading-6 text-ink-muted">
-              Upload evidence files to build the project archive. Assign review roles only when the review context is known.
-            </p>
+          <div className="p-5">
+            <EmptyState
+              icon={FileClock}
+              title="Belum ada bukti proyek"
+              description="Unggah file bukti untuk membangun arsip proyek. Tetapkan peran tinjauan hanya ketika konteks peninjauannya sudah diketahui."
+            />
           </div>
         ) : (
 
           <>
             {filteredDocuments.length > 0 && (
-              <div aria-hidden="true" className="hidden grid-cols-[minmax(0,1fr)_8rem_8rem_9rem_11rem] items-center gap-3 border-b border-ui-border bg-base px-3 py-2 text-xs font-medium text-ink-muted xl:grid">
-                <span>Document</span><span>Artifact type</span><span>Reporting period</span><span>Processing state</span><span>Extracted</span>
+              <div aria-hidden="true" className="hidden grid-cols-[minmax(0,1fr)_8rem_8rem_9rem_11rem] items-center gap-3 border-b border-ui-border bg-base px-3 py-2 text-xs font-medium text-ink-muted 2xl:grid">
+                <span>Dokumen</span><span>Jenis artefak</span><span>Periode pelaporan</span><span>Status pemrosesan</span><span>Terekstraksi</span>
               </div>
             )}
             {sortedDocuments.map((document) => (
@@ -585,19 +643,18 @@ function DocumentLibrary({
           </>
         )}
       </div>
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-        <p role="status" aria-live="polite" className="text-sm text-ink-muted">
-          Showing {filteredDocuments.length ? currentPage * 10 + 1 : 0}&#8211;{Math.min((currentPage + 1) * 10, filteredDocuments.length)} of {filteredDocuments.length}
-        </p>
-        <nav aria-label="Document pages" className="flex items-center gap-2">
-          <Button type="button" variant="outline" size="sm" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>Previous</Button>
-          <span className="text-xs text-ink-muted">Page {currentPage + 1} of {pageCount}</span>
-          <Button type="button" variant="outline" size="sm" disabled={currentPage + 1 >= pageCount} onClick={() => setPage(currentPage + 1)}>Next</Button>
-        </nav>
-      </div>
+      <PaginationFooter
+        rangeLabel={<span role="status" aria-live="polite">Menampilkan {filteredDocuments.length ? currentPage * 10 + 1 : 0}&#8211;{Math.min((currentPage + 1) * 10, filteredDocuments.length)} dari {filteredDocuments.length}</span>}
+        page={currentPage + 1}
+        pageCount={pageCount}
+        onPrevious={() => setPage(currentPage - 1)}
+        onNext={() => setPage(currentPage + 1)}
+        previousDisabled={currentPage === 0}
+        nextDisabled={currentPage + 1 >= pageCount}
+      />
       </div>
       {reviewError && <p role="alert" className="mt-3 text-sm text-status-critical-text">{reviewError}</p>}
-    </section>
+    </SectionCard>
   );
 }
 
@@ -635,50 +692,50 @@ function DocumentRow({
   }, [hidden]);
   return (
     <article hidden={hidden} tabIndex={-1} id={`document-${document.id}`} className="border-b border-ui-border last:border-b-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand">
-        <button type="button" aria-haspopup="dialog" aria-controls={`document-panel-${document.id}`} onClick={() => panelRef.current?.showModal()} className="grid w-full cursor-pointer text-left grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-3 py-3.5 text-sm text-ink hover:bg-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand xl:grid-cols-[minmax(0,1fr)_8rem_8rem_9rem_11rem]">
-          <span className="col-span-2 flex min-w-0 items-center gap-2 xl:col-span-1">
-            <span aria-hidden="true" className="text-ink-muted">&#8250;</span>
+        <button type="button" aria-haspopup="dialog" aria-controls={`document-panel-${document.id}`} onClick={() => panelRef.current?.showModal()} className="grid w-full cursor-pointer text-left grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-3 py-3.5 text-sm text-ink hover:bg-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand 2xl:grid-cols-[minmax(0,1fr)_8rem_8rem_9rem_11rem]">
+          <span className="col-span-2 flex min-w-0 items-center gap-2.5 2xl:col-span-1">
+            <FileTypeIcon fileName={document.fileName} mimeType={document.mimeType} />
             <span className="truncate font-medium" title={document.fileName}>{document.fileName}</span>
           </span>
-          <span className="min-w-0 truncate text-xs text-ink-muted">{documentTypeLabels[document.effectiveDocumentType]}</span>
-          <span className="hidden truncate text-xs text-ink-muted xl:block">{document.effectiveReportingPeriod ? periodLabel(document.effectiveReportingPeriod) : <span aria-label="Reporting period not provided">&#8212;</span>}</span>
-          <span className="justify-self-end xl:justify-self-start"><StatusBadge status={document.processingStatus} /></span>
-          <span className={`col-span-2 text-xs xl:col-span-1 ${document.processingStatus === "failed" && facts.length ? "text-status-warn-text" : "text-ink-muted"}`}>{extractionPointer(facts.length, document.processingStatus)}</span>
+          <span className="min-w-0 justify-self-start"><StatusPill tone={documentTypeTone(document.effectiveDocumentType)}>{documentTypeLabels[document.effectiveDocumentType]}</StatusPill></span>
+          <span className="hidden truncate text-xs text-ink-muted 2xl:block">{document.effectiveReportingPeriod ? periodLabel(document.effectiveReportingPeriod) : <span aria-label="Reporting period not provided">&#8212;</span>}</span>
+          <span className="justify-self-end 2xl:justify-self-start"><StatusBadge status={document.processingStatus} /></span>
+          <span className={`col-span-2 text-xs 2xl:col-span-1 ${document.processingStatus === "failed" && facts.length ? "text-status-warn-text" : "text-ink-muted"}`}>{extractionPointer(facts.length, document.processingStatus)}</span>
         </button>
       <dialog ref={panelRef} data-document-details id={`document-panel-${document.id}`} aria-labelledby={`document-title-${document.id}`} className="fixed inset-y-0 left-auto right-0 m-0 h-dvh max-h-none w-full max-w-2xl overflow-y-auto overscroll-contain border-l border-ui-border bg-surface p-0 text-ink shadow-xl backdrop:bg-ink/20">
         <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-ui-border bg-surface p-5">
           <div className="min-w-0"><h3 id={`document-title-${document.id}`} className="text-base font-semibold text-ink [overflow-wrap:anywhere]">{document.fileName}</h3><div className="mt-2"><StatusBadge status={document.processingStatus} /></div></div>
-          <Button type="button" variant="outline" size="sm" className="shrink-0" aria-label="Close document details" onClick={() => panelRef.current?.close()}>Close</Button>
+          <Button type="button" variant="outline" size="sm" className="shrink-0" aria-label="Tutup detail dokumen" onClick={() => panelRef.current?.close()}>Tutup</Button>
         </header>
         <div className="p-5 [overflow-wrap:anywhere]">
           <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-3">
-            <div className={`rounded-lg border border-ui-border p-3 ${document.effectiveDocumentType === "unknown" ? "bg-status-warn-bg text-status-warn-text" : "bg-base text-ink"}`}><p className="text-xs">Artifact type</p><p className="mt-1 text-sm font-semibold">{documentTypeLabels[document.effectiveDocumentType]}</p></div>
-            <div className="rounded-lg border border-ui-border bg-base p-3 text-ink"><p className="text-xs">Reporting period</p><p className="mt-1 text-sm font-semibold">{document.effectiveReportingPeriod ? periodLabel(document.effectiveReportingPeriod) : "Not provided"}</p></div>
-            {total && <div className="rounded-lg border border-ui-border bg-base p-3 text-ink"><p className="text-xs">Total stated</p><p className="mt-1 text-sm font-semibold">{total}</p></div>}
+            <div className={`rounded-lg border border-ui-border p-3 ${document.effectiveDocumentType === "unknown" ? "bg-status-warn-bg text-status-warn-text" : "bg-base text-ink"}`}><p className="text-xs">Jenis artefak</p><p className="mt-1 text-sm font-semibold">{documentTypeLabels[document.effectiveDocumentType]}</p></div>
+            <div className="rounded-lg border border-ui-border bg-base p-3 text-ink"><p className="text-xs">Periode pelaporan</p><p className="mt-1 text-sm font-semibold">{document.effectiveReportingPeriod ? periodLabel(document.effectiveReportingPeriod) : "Tidak dicantumkan"}</p></div>
+            {total && <div className="rounded-lg border border-ui-border bg-base p-3 text-ink"><p className="text-xs">Total disebutkan</p><p className="mt-1 text-sm font-semibold">{total}</p></div>}
           </div>
           <section className="mb-4 space-y-3">
-            <h4 className="text-sm font-semibold text-ink">Summary preview</h4>
-            <p className="text-sm leading-6 text-ink-muted">{condensed.length < summaryText.trim().length ? `${condensed.replace(/[.!?…]+$/, "")}…` : condensed || "No summary available."}</p>
-            {condensed.length < summaryText.trim().length && <details ref={fullSummaryRef}><summary className="cursor-pointer text-sm font-medium text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Show full summary</summary><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-ink-muted">{summaryText}</p></details>}
+            <h4 className="text-sm font-semibold text-ink">Pratinjau ringkasan</h4>
+            <p className="text-sm leading-6 text-ink-muted">{condensed.length < summaryText.trim().length ? `${condensed.replace(/[.!?…]+$/, "")}…` : condensed || "Belum ada ringkasan."}</p>
+            {condensed.length < summaryText.trim().length && <details ref={fullSummaryRef}><summary className="cursor-pointer text-sm font-medium text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Tampilkan ringkasan lengkap</summary><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-ink-muted">{summaryText}</p></details>}
           </section>
-          {hasReviewNotice && <aside aria-label="Document review notice" className="my-4 space-y-2 rounded-lg bg-status-warn-bg p-3 text-sm text-status-warn-text">
-            {flagged.length > 0 && <p>{extractedCounts(flagged)} extracted. These categories are not verified findings.</p>}
-            {document.processingStatus === "failed" && <p>{facts.length ? `Partial processing · ${facts.length} saved items; completion was not confirmed.` : "Processing failed; no stored items are available."}</p>}
-            {missingCitations > 0 && <p>{missingCitations} stored rows lack source citations. Document ownership is known; verify against the original file.</p>}
-            {gaps.length > 0 && <p>Possible summary/extraction mismatch: {gaps.join(" and ")} mentioned without matching structured rows. Verify the source.</p>}
-            {document.processingStatus !== "failed" && (document.processingError || summary?.qualityWarning) && <p>Document metadata or reading needs review.</p>}
-            {(document.processingError || summary?.qualityWarning) && <details><summary className="cursor-pointer font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Read processing details</summary>{document.processingError && <p className="mt-2 whitespace-pre-wrap">{document.processingError}</p>}{summary?.qualityWarning && <p className="mt-2 whitespace-pre-wrap">Reading limitation: {summary.qualityWarning}</p>}</details>}
-            {condensed.length < summaryText.trim().length && <button type="button" className="font-medium underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand" onClick={() => { if (fullSummaryRef.current) { fullSummaryRef.current.open = true; fullSummaryRef.current.querySelector("summary")?.focus(); fullSummaryRef.current.scrollIntoView({ block: "nearest" }); } }}>Show full summary</button>}
+          {hasReviewNotice && <aside aria-label="Catatan peninjauan dokumen" className="my-4 space-y-2 rounded-lg bg-status-warn-bg p-3 text-sm text-status-warn-text">
+            {flagged.length > 0 && <p>{extractedCounts(flagged)} terekstraksi. Kategori ini bukan temuan yang terverifikasi.</p>}
+            {document.processingStatus === "failed" && <p>{facts.length ? `Pemrosesan parsial · ${facts.length} item tersimpan; penyelesaian tidak terkonfirmasi.` : "Pemrosesan gagal; tidak ada item tersimpan yang tersedia."}</p>}
+            {missingCitations > 0 && <p>{missingCitations} baris tersimpan tanpa kutipan sumber. Kepemilikan dokumen diketahui; verifikasi terhadap file aslinya.</p>}
+            {gaps.length > 0 && <p>Kemungkinan ketidaksesuaian ringkasan/ekstraksi: {gaps.join(" dan ")} disebutkan tanpa baris terstruktur yang cocok. Verifikasi sumbernya.</p>}
+            {document.processingStatus !== "failed" && (document.processingError || summary?.qualityWarning) && <p>Metadata dokumen atau pembacaannya perlu diperiksa.</p>}
+            {(document.processingError || summary?.qualityWarning) && <details><summary className="cursor-pointer font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Baca detail pemrosesan</summary>{document.processingError && <p className="mt-2 whitespace-pre-wrap">{document.processingError}</p>}{summary?.qualityWarning && <p className="mt-2 whitespace-pre-wrap">Keterbatasan pembacaan: {summary.qualityWarning}</p>}</details>}
+            {condensed.length < summaryText.trim().length && <button type="button" className="font-medium underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand" onClick={() => { if (fullSummaryRef.current) { fullSummaryRef.current.open = true; fullSummaryRef.current.querySelector("summary")?.focus(); fullSummaryRef.current.scrollIntoView({ block: "nearest" }); } }}>Tampilkan ringkasan lengkap</button>}
           </aside>}
           <FileFactReview facts={facts} onReview={onReview} onSource={onSource} busy={busy} />
           {reviewError && <p role="alert" className="mb-3 text-sm text-status-critical-text">{reviewError}</p>}
           <details className="mb-4 text-sm">
-            <summary className="cursor-pointer font-medium text-ink">Source details ({summary?.sources.length ?? 0})</summary>
-            <ul className="mt-2 space-y-3">{summary?.sources.map((source) => <li key={source.id} className="rounded bg-base p-3"><SourceReference documentId={source.documentId} title={source.documentTitle} />{source.location && <p className="mt-1 text-xs text-ink-muted">{source.location}</p>}{source.excerpt && <p className="mt-1 whitespace-pre-wrap text-sm text-ink-muted">{source.excerpt}</p>}{source.confidence !== null && <p className="text-xs text-ink-muted">Source confidence: {Math.round(source.confidence * 100)}%</p>}</li>)}</ul>
-            {!summary?.sources.length && <p className="mt-2 text-ink-muted">No summary source details available.</p>}
+            <summary className="cursor-pointer font-medium text-ink">Detail sumber ({summary?.sources.length ?? 0})</summary>
+            <ul className="mt-2 space-y-3">{summary?.sources.map((source) => <li key={source.id} className="rounded bg-base p-3"><SourceReference documentId={source.documentId} title={source.documentTitle} />{source.location && <p className="mt-1 text-xs text-ink-muted">{source.location}</p>}{source.excerpt && <p className="mt-1 whitespace-pre-wrap text-sm text-ink-muted">{source.excerpt}</p>}{source.confidence !== null && <p className="text-xs text-ink-muted">Keyakinan sumber: {Math.round(source.confidence * 100)}%</p>}</li>)}</ul>
+            {!summary?.sources.length && <p className="mt-2 text-ink-muted">Belum ada detail sumber ringkasan.</p>}
           </details>
           <details className="text-sm">
-          <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Document metadata and reading details</summary>
+          <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Metadata dokumen dan detail pembacaan</summary>
           <div className="mt-3">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex min-w-0 gap-3">
@@ -692,7 +749,7 @@ function DocumentRow({
           <div className="min-w-0">
             {document.title !== document.fileName && <p className="mt-1 text-sm text-ink-muted">{document.title}</p>}
             <p className="mt-1 text-xs leading-5 text-ink-muted">
-              {fileKindLabel(document.mimeType, document.fileName)} · {formatBytes(document.fileSize)} · {document.effectiveDocumentDate ? `Document date ${formatDate(document.effectiveDocumentDate)}` : "No document date"} · Uploaded {formatDate(document.createdAt)}
+              {fileKindLabel(document.mimeType, document.fileName)} · {formatBytes(document.fileSize)} · {document.effectiveDocumentDate ? `Tanggal dokumen ${formatDate(document.effectiveDocumentDate)}` : "Tanpa tanggal dokumen"} · Diunggah {formatDate(document.createdAt)}
             </p>
             {document.submissionId && (
               <p className="mt-1 text-xs text-ink-muted">
@@ -705,7 +762,7 @@ function DocumentRow({
         <form
           action={deleteDocument}
           onSubmit={(event) => {
-            if (!window.confirm(`Remove "${document.title}" from this project?`)) {
+            if (!window.confirm(`Hapus "${document.title}" dari proyek ini?`)) {
               event.preventDefault();
             }
           }}
@@ -719,27 +776,27 @@ function DocumentRow({
             className="border-status-critical bg-surface text-status-critical-text hover:bg-status-critical-bg hover:text-status-critical-text"
           >
             <Trash2 className="h-4 w-4" />
-            Remove
+            Hapus
           </Button>
         </form>
       </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <MetadataBadge
-          label="Type"
+          label="Jenis"
           value={documentTypeLabels[document.effectiveDocumentType]}
           source={metadataSource(document.confirmedDocumentType, document.suggestedDocumentType, document.documentTypeHint)}
         />
         <MetadataBadge
-          label="Evidence role"
-          value={document.effectiveEvidenceRole ? roleLabels[document.effectiveEvidenceRole] : "Unassigned"}
+          label="Peran bukti"
+          value={document.effectiveEvidenceRole ? roleLabels[document.effectiveEvidenceRole] : "Belum ditetapkan"}
           source={metadataSource(document.confirmedEvidenceRole, document.suggestedEvidenceRole, null)}
         />
         {document.effectiveDocumentDate && (
-          <MetadataBadge label="Date" value={formatDate(document.effectiveDocumentDate)} source={metadataSource(document.confirmedDocumentDate, document.suggestedDocumentDate, document.documentDateHint)} />
+          <MetadataBadge label="Tanggal" value={formatDate(document.effectiveDocumentDate)} source={metadataSource(document.confirmedDocumentDate, document.suggestedDocumentDate, document.documentDateHint)} />
         )}
         {document.effectiveReportingPeriod && (
-          <MetadataBadge label="Period" value={periodLabel(document.effectiveReportingPeriod)} source={metadataSource(document.confirmedReportingPeriod, document.detectedReportingPeriod, document.reportingPeriodHint)} />
+          <MetadataBadge label="Periode" value={periodLabel(document.effectiveReportingPeriod)} source={metadataSource(document.confirmedReportingPeriod, document.detectedReportingPeriod, document.reportingPeriodHint)} />
         )}
         {document.effectiveWorkstream && (
           <MetadataBadge label="Workstream" value={document.effectiveWorkstream} source={metadataSource(document.confirmedWorkstream, document.suggestedWorkstream, document.workstreamHint)} />
@@ -747,7 +804,7 @@ function DocumentRow({
         {["uploaded", "queued", "processing"].includes(document.processingStatus) && (
           <span className="inline-flex items-center gap-1.5 text-xs font-medium text-status-warn-text">
             <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-            Reading pending or in progress
+            Pembacaan menunggu atau sedang berlangsung
           </span>
         )}
       </div>
@@ -776,60 +833,60 @@ function DocumentRow({
           <input type="hidden" name="documentId" value={document.id} />
           <Button type="submit" size="sm" variant="outline" className="border-status-critical bg-surface text-status-critical-text hover:bg-status-critical-bg">
             <RefreshCw className="h-4 w-4" />
-            Retry document processing
+            Ulangi pemrosesan dokumen
           </Button>
         </form>
       )}
 
-      <section className="mt-3 text-sm" aria-label="Summary, rationale, and metadata">
+      <section className="mt-3 text-sm" aria-label="Ringkasan, dasar saran, dan metadata">
       {document.classificationReason && (
         <p className="mt-3 text-sm leading-6 text-ink-muted">
-          <span className="font-medium text-ink">Suggestion basis:</span>{" "}
+          <span className="font-medium text-ink">Dasar saran:</span>{" "}
           {document.classificationReason}
         </p>
       )}
       {document.suggestedDocumentType && document.classificationConfidence !== null && (
         <p className="mt-2 text-xs text-ink-muted">
-          Suggestion confidence: {Math.round(document.classificationConfidence * 100)}%
+          Keyakinan saran: {Math.round(document.classificationConfidence * 100)}%
         </p>
       )}
 
 
       <details className="mt-3 text-sm">
         <summary className="cursor-pointer font-medium text-ink">
-          {document.confirmedAt ? "Edit confirmed metadata" : "Review metadata"}
+          {document.confirmedAt ? "Ubah metadata terkonfirmasi" : "Periksa metadata"}
         </summary>
         <form action={updateDocumentClassification} className="mt-3 grid max-w-2xl gap-3 sm:grid-cols-2">
           <input type="hidden" name="projectId" value={projectId} />
           <input type="hidden" name="documentId" value={document.id} />
           <label className="grid gap-1 text-xs font-medium text-ink-muted">
-            Artifact type
+            Jenis artefak
             <select name="documentType" defaultValue={document.confirmedDocumentType ?? document.suggestedDocumentType ?? document.documentTypeHint ?? "unknown"} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
               {documentTypes.map((type) => <option key={type} value={type}>{documentTypeLabels[type]}</option>)}
             </select>
           </label>
           <label className="grid gap-1 text-xs font-medium text-ink-muted">
-            Evidence role (not user access)
+            Peran bukti (bukan akses pengguna)
             <select name="evidenceRole" defaultValue={document.confirmedEvidenceRole ?? document.suggestedEvidenceRole ?? ""} className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink">
-              <option value="">Not assigned</option>
-              <option value="baseline">Approved Baseline</option>
-              <option value="current">Current Period</option>
-              <option value="supporting">Supporting Evidence</option>
+              <option value="">Belum ditetapkan</option>
+              <option value="baseline">Baseline Disetujui</option>
+              <option value="current">Periode Berjalan</option>
+              <option value="supporting">Bukti Pendukung</option>
             </select>
           </label>
           <label className="grid gap-1 text-xs font-medium text-ink-muted">
-            Document date
+            Tanggal dokumen
             <Input name="documentDate" type="date" defaultValue={document.confirmedDocumentDate ?? document.suggestedDocumentDate ?? document.documentDateHint ?? document.documentDate ?? ""} className="h-10" />
           </label>
           <label className="grid gap-1 text-xs font-medium text-ink-muted">
-            Reporting period
+            Periode pelaporan
             <Input name="reportingPeriod" type="month" defaultValue={document.confirmedReportingPeriod ?? document.detectedReportingPeriod ?? document.reportingPeriodHint ?? ""} className="h-10" />
           </label>
           <label className="grid gap-1 text-xs font-medium text-ink-muted sm:col-span-2">
             Workstream
             <Input name="workstream" maxLength={120} defaultValue={document.confirmedWorkstream ?? document.suggestedWorkstream ?? document.workstreamHint ?? ""} className="h-10" />
           </label>
-          <Button type="submit" size="sm" className="sm:col-span-2">Save review metadata</Button>
+          <Button type="submit" size="sm" className="sm:col-span-2">Simpan metadata peninjauan</Button>
         </form>
       </details>
       </section>
@@ -846,27 +903,27 @@ function StatusBadge({
 }: {
   status: EvidenceDocument["processingStatus"];
 }) {
-  const tone =
+  const tone: StatusTone =
     status === "failed"
-      ? "bg-status-critical-bg text-status-critical-text"
+      ? "critical"
       : status === "completed"
-        ? "bg-status-ok-bg text-status-ok-text"
+        ? "ok"
         : status === "cancelled"
-          ? "bg-base text-ink-muted"
-          : "bg-status-warn-bg text-status-warn-text";
+          ? "neutral"
+          : "warn";
 
   return (
-    <span className={`inline-block rounded-md px-2 py-0.5 text-xs font-medium ${tone}`}>
-      {statusLabels[status]}
-    </span>
+    <StatusPill tone={tone} icon={status === "completed" ? Check : undefined}>
+      {statusLabelsId[status] ?? statusLabels[status]}
+    </StatusPill>
   );
 }
 
 function metadataSource(confirmed: string | null, suggested: string | null, hint: string | null) {
-  if (confirmed) return "Confirmed";
-  if (suggested) return "Suggested";
-  if (hint) return "User hint";
-  return "Unclassified";
+  if (confirmed) return "Terkonfirmasi";
+  if (suggested) return "Saran";
+  if (hint) return "Petunjuk pengguna";
+  return "Tidak diklasifikasi";
 }
 
 function MetadataBadge({ label, value, source }: { label: string; value: string; source: string }) {

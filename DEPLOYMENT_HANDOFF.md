@@ -145,6 +145,31 @@ Run database migrations separately in Supabase when an update adds migration
 files. Workflow JSON changes are not automatically imported into n8n; import
 the updated JSON in the n8n editor and publish the new version.
 
+### Document job fencing cutover (migrations 202611020001–002)
+
+Migration `202611020001_document_content_hash.sql` adds `documents.content_hash`
+so cached findings remain tied to current stored bytes. Apply it before
+`202611020002_document_job_fencing.sql`. The fencing migration adds
+`ai_jobs.claim_token` and redefines the claim/fail/retry RPCs so every durable
+write verifies the attempt token and an unexpired lease inside the same
+transaction. It also adds `complete_document_job` (one atomic publication
+transaction), `extend_document_job_lease`, `queue_document_parse_job`, and an
+updated `create_document_with_job`; it drops `recover_and_fetch_document_job`
+and `reset_document_job_results`. Cutover order:
+
+1. Import both updated workflow JSONs in n8n **while they are inactive**.
+2. Let running executions drain (wait until no job is `processing`).
+3. Apply `202611020001_document_content_hash.sql`, then
+   `202611020002_document_job_fencing.sql` in Supabase. In-flight old
+   executions that still call the dropped RPCs fail loudly instead of
+   bypassing fencing.
+4. Activate `x-assurance-supabase-document-polling` (active mode) or the
+   webhook workflow — not both uncontrolled. Deactivate the unused one.
+5. Verify one upload end-to-end on the VPS: document reaches `completed`, one
+   extraction run exists, and no duplicate job appears after a repeated
+   completion request.
+
+
 For Compose or n8n environment changes:
 
 ```bash

@@ -3,10 +3,11 @@
 import { UploadCloud } from "lucide-react";
 import { Upload } from "tus-js-client";
 import { useRouter } from "next/navigation";
-import { type FormEvent, useState } from "react";
+import { type DragEvent, type FormEvent, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SectionCard } from "@/components/ui/section-card";
 import { documentTypeLabels, documentTypes } from "@/features/documents/lib/constants";
 import { evidenceFileAccept, maxEvidenceFileSizeBytes } from "@/features/documents/lib/file-types";
 
@@ -55,6 +56,9 @@ export function UploadDocumentForm({
   const [pending, setPending] = useState(false);
   const [mode, setMode] = useState<UploadMode>("bulk");
   const [submissionError, setSubmissionError] = useState<string | null>(null);
+  const [dragActive, setDragActive] = useState(false);
+  const [fileSummary, setFileSummary] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const failedItems = items.filter((item) => item.status === "failed");
 
   function updateItem(id: string, patch: Partial<UploadItem>) {
@@ -80,7 +84,7 @@ export function UploadDocumentForm({
           workstreamHint: item.metadata?.workstream,
         });
         if (!prepared.storagePath || !prepared.token || !prepared.endpoint || (!isArchive && !prepared.documentId)) {
-          throw new Error(prepared.message ?? "The upload could not be authorized.");
+          throw new Error(prepared.message ?? "Unggahan tidak dapat diotorisasi.");
         }
         documentId = prepared.documentId;
         updateItem(item.id, { prepared, documentId });
@@ -101,7 +105,7 @@ export function UploadDocumentForm({
             }
           }
           updateItem(item.id, { prepared: undefined });
-          throw new Error("Upload interrupted. Retry this file.");
+          throw new Error("Unggahan terputus. Ulangi file ini.");
         }
       }
       let completed: UploadResponse;
@@ -127,7 +131,7 @@ export function UploadDocumentForm({
       }
       if (isArchive) {
         const manifest = normalizeArchiveMemberResults(completed.manifest);
-        if (!manifest) throw new Error(completed.message ?? "The archive results could not be read. Retry the archive.");
+        if (!manifest) throw new Error(completed.message ?? "Hasil arsip tidak dapat dibaca. Ulangi arsipnya.");
         const accepted = manifest.filter((member) => member.status === "accepted").length;
         const rejected = manifest.filter((member) => member.status === "rejected").length;
         const failed = manifest.filter((member) => member.status === "failed").length;
@@ -136,24 +140,24 @@ export function UploadDocumentForm({
           status: failed > 0 ? "failed" : rejected > 0 ? "needs_review" : "queued",
           manifest,
           progress: 100,
-          message: `${accepted} member(s) accepted, ${rejected} rejected${failed ? `, ${failed} need retry` : ""}.`,
+          message: `${accepted} anggota diterima, ${rejected} ditolak${failed ? `, ${failed} perlu diulangi` : ""}.`,
         });
       } else {
         if (!completed.ok || !completed.processingStatus) {
-          throw new Error(completed.message ?? "The file uploaded, but could not be added to the project.");
+          throw new Error(completed.message ?? "File terunggah, tetapi tidak dapat ditambahkan ke proyek.");
         }
         updateItem(item.id, {
           documentId: completed.documentId ?? documentId,
           status: completed.processingStatus,
           progress: 100,
-          message: completed.processingStatus === "queued" ? "Uploaded and queued for analysis." : "Uploaded and stored for review.",
+          message: completed.processingStatus === "queued" ? "Terunggah dan masuk antrean analisis." : "Terunggah dan disimpan untuk ditinjau.",
         });
       }
       router.refresh();
     } catch (error) {
       updateItem(item.id, {
         status: "failed",
-        message: error instanceof Error ? error.message : "Upload failed. Retry this file.",
+        message: error instanceof Error ? error.message : "Unggahan gagal. Ulangi file ini.",
       });
     }
   }
@@ -180,7 +184,7 @@ export function UploadDocumentForm({
       const batch: UploadResponse = needsAnyBatch
         ? await requestJson<UploadResponse>(`/api/projects/${projectId}/documents/submissions`, {})
         : {};
-      if (needsAnyBatch && (!batch.submissionId || !batch.batchId)) throw new Error("Could not start an evidence submission. Try again.");
+      if (needsAnyBatch && (!batch.submissionId || !batch.batchId)) throw new Error("Tidak dapat memulai submisi bukti. Coba lagi.");
       const rootZipIndex = needsRegularBatch ? -1 : needsZipRow.findIndex(Boolean);
       const zipBatches = await Promise.all(needsZipRow.map((needed, index) => {
         if (!needed) return Promise.resolve({} as UploadResponse);
@@ -192,7 +196,7 @@ export function UploadDocumentForm({
         const isZip = file.name.toLowerCase().endsWith(".zip");
         const zipSubmissionId = needsZipRow[index] ? zipBatches[index]?.submissionId : undefined;
         const ownSubmissionId = isZip ? candidate?.submissionId ?? zipSubmissionId : candidate?.submissionId ?? batch.submissionId;
-        if (!ownSubmissionId) throw new Error("Could not start an archive submission. Try again.");
+        if (!ownSubmissionId) throw new Error("Tidak dapat memulai submisi arsip. Coba lagi.");
         return {
           id: crypto.randomUUID(),
           file,
@@ -206,8 +210,9 @@ export function UploadDocumentForm({
       setItems((current) => [...current, ...selected]);
       await Promise.all(selected.map(uploadFile));
       form.reset();
+      setFileSummary(null);
     } catch (error) {
-      setSubmissionError(error instanceof Error ? error.message : "Could not start the upload. Try again.");
+      setSubmissionError(error instanceof Error ? error.message : "Tidak dapat memulai unggahan. Coba lagi.");
     } finally {
       setPending(false);
     }
@@ -219,64 +224,123 @@ export function UploadDocumentForm({
     setPending(false);
   }
 
+  function summarizeFiles(files: FileList | null) {
+    setFileSummary(files?.length ? (files.length === 1 ? files[0].name : `${files.length} file dipilih`) : null);
+  }
+
+  function handleDrop(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    setDragActive(false);
+    const input = fileInputRef.current;
+    const dropped = event.dataTransfer.files;
+    if (!input || dropped.length === 0) return;
+    const transfer = new DataTransfer();
+    if (mode === "bulk") {
+      for (const file of dropped) transfer.items.add(file);
+    } else {
+      transfer.items.add(dropped[0]);
+    }
+    input.files = transfer.files;
+    summarizeFiles(input.files);
+  }
+
   return (
-    <form onSubmit={handleSubmit} className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
-      <div className="flex items-start gap-3">
-        <div className="shrink-0 rounded-xl bg-plan-track p-2.5 text-ink-muted"><UploadCloud className="h-5 w-5" aria-hidden="true" /></div>
-        <div className="min-w-0">
-          <h2 className="text-lg font-semibold text-ink">Prepare project evidence</h2>
-          <p className="mt-1 text-sm leading-6 text-ink-muted">Upload approved plans and current-period evidence in bulk without classifying each file first. One document can support multiple domains. Optional metadata is available for one document.</p>
-        </div>
-      </div>
-      <details className="mt-4 rounded-lg border border-ui-border bg-base p-3 text-sm text-ink-muted">
-        <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">What evidence should I prepare?</summary>
+    <SectionCard icon={UploadCloud} title="Siapkan bukti proyek" subtitle="Unggah rencana yang disetujui dan bukti periode berjalan secara massal tanpa mengklasifikasikan setiap file lebih dulu. Satu dokumen dapat mendukung beberapa domain. Metadata opsional tersedia untuk satu dokumen.">
+    <form
+      onSubmit={handleSubmit}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={(event) => event.preventDefault()}
+      className="contents"
+    >
+      <details className="rounded-lg border border-ui-border bg-base p-3 text-sm text-ink-muted">
+        <summary className="cursor-pointer font-medium text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Bukti apa yang perlu saya siapkan?</summary>
         <div className="mt-2 space-y-2 leading-6">
-          <p>Approved plans describe the agreed baseline, such as the approved budget or schedule. Current evidence describes progress for the reporting period, such as a cost report, progress report, or risk register.</p>
-          <p>Use the reporting period covered by the evidence, which may differ from its upload date. Review suggested metadata in the Evidence Library after reading finishes.</p>
-          <p>Upload acceptance does not mean reading or assessment is complete. Confirm metadata, then select completed Approved Baseline and Current Period evidence in Assurance Review and run the assessment there.</p>
+          <p>Rencana yang disetujui menjelaskan baseline yang disepakati, seperti anggaran atau jadwal yang disetujui. Bukti periode berjalan menjelaskan progres untuk periode pelaporan, seperti laporan biaya, laporan progres, atau register risiko.</p>
+          <p>Gunakan periode pelaporan yang dicakup oleh bukti tersebut, yang bisa berbeda dari tanggal unggahnya. Periksa metadata saran di Pustaka Bukti setelah pembacaan selesai.</p>
+          <p>Diterimanya unggahan bukan berarti pembacaan atau asesmen selesai. Konfirmasi metadata, lalu pilih bukti Baseline Disetujui dan Periode Berjalan yang selesai di Tinjauan Assurance dan jalankan asesmen di sana.</p>
         </div>
       </details>
       <div className="mt-4 grid gap-3">
         <fieldset className="grid gap-2">
-          <legend className="text-sm font-semibold text-ink">Upload mode</legend>
+          <legend className="text-sm font-semibold text-ink">Mode unggah</legend>
           <div className="flex flex-wrap gap-4 text-sm text-ink">
-            <label className="flex items-center gap-2"><input type="radio" name="mode" checked={mode === "bulk"} onChange={() => setMode("bulk")} /> Bulk upload</label>
-            <label className="flex items-center gap-2"><input type="radio" name="mode" checked={mode === "single"} onChange={() => setMode("single")} /> One document</label>
+            <label className="flex items-center gap-2"><input type="radio" name="mode" checked={mode === "bulk"} onChange={() => setMode("bulk")} /> Unggah massal</label>
+            <label className="flex items-center gap-2"><input type="radio" name="mode" checked={mode === "single"} onChange={() => setMode("single")} /> Satu dokumen</label>
           </div>
         </fieldset>
         <div className="grid gap-2">
-          <label htmlFor="file" className="text-sm font-semibold text-ink">{mode === "single" ? "Document file" : "Project files"}</label>
-          <Input id="file" name="file" type="file" aria-describedby="evidence-file-guidance" accept={evidenceFileAccept} multiple={mode === "bulk"} required className="h-12 bg-surface file:mr-3 file:rounded-md file:border file:border-ui-border file:bg-plan-track file:px-3 file:py-1.5 file:text-ink hover:file:bg-base" />
-          <p id="evidence-file-guidance" className="text-sm leading-6 text-ink-muted">PDF, TXT, CSV, DOCX, XLSX, PPTX, and supported images can be processed for reading and extraction. Accepted PPT files are stored for review. ZIP archives are expanded into individual evidence files; unsafe or unsupported members are listed. Scanned pages and images depend on available OCR and may need review; extraction is not guaranteed. Maximum {maxFileSizeLabel} per file.</p>
+          <label htmlFor="file" className="text-sm font-semibold text-ink">{mode === "single" ? "File dokumen" : "File proyek"}</label>
+          <label
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDragActive(true);
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false);
+            }}
+            onDrop={handleDrop}
+            className={`group flex cursor-pointer flex-col items-center gap-1.5 rounded-xl border-2 border-dashed p-6 text-center transition-[border-color,background-color,transform] duration-150 ease-out has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-brand ${
+              dragActive
+                ? "scale-[1.02] border-brand bg-plan-track/60 motion-reduce:scale-100"
+                : "border-ui-border bg-base hover:border-brand hover:bg-plan-track/40"
+            }`}
+          >
+            <Input
+              ref={fileInputRef}
+              id="file"
+              name="file"
+              type="file"
+              aria-describedby="evidence-file-guidance"
+              accept={evidenceFileAccept}
+              multiple={mode === "bulk"}
+              required
+              className="sr-only"
+              onChange={(event) => summarizeFiles(event.target.files)}
+            />
+            <span className={`transition-transform duration-200 ease-out motion-reduce:transition-none ${dragActive ? "scale-125 motion-reduce:scale-100" : "group-hover:scale-110"}`}>
+              <UploadCloud className={`h-7 w-7 ${dragActive ? "animate-bounce text-brand motion-reduce:animate-none" : "text-ink-muted"}`} />
+            </span>
+            <span className="text-sm font-medium text-ink">
+              {dragActive
+                ? "Lepaskan file untuk diunggah"
+                : fileSummary ?? (mode === "single" ? "Klik untuk memilih dokumen" : "Klik untuk memilih file")}
+            </span>
+            <span className="text-xs text-ink-muted">
+              {fileSummary && !dragActive
+                ? "Klik untuk mengganti file."
+                : `atau tarik & lepas dari Finder/File Explorer · Maksimum ${maxFileSizeLabel} per file`}
+            </span>
+          </label>
+          <p id="evidence-file-guidance" className="text-sm leading-6 text-ink-muted">PDF, TXT, CSV, DOCX, XLSX, PPTX, dan gambar yang didukung dapat diproses untuk pembacaan dan ekstraksi. File PPT yang diterima disimpan untuk ditinjau. Arsip ZIP dipecah menjadi file bukti individual; anggota yang tidak aman atau tidak didukung didaftarkan. Halaman hasil pindai dan gambar bergantung pada ketersediaan OCR dan mungkin perlu ditinjau; ekstraksi tidak dijamin. Maksimum {maxFileSizeLabel} per file.</p>
         </div>
         {mode === "single" && (
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="grid gap-1 text-sm font-medium text-ink" htmlFor="documentTypeHint">Document type <span className="font-normal text-ink-muted">Optional</span>
+            <label className="grid gap-1 text-sm font-medium text-ink" htmlFor="documentTypeHint">Jenis dokumen <span className="font-normal text-ink-muted">Opsional</span>
               <select id="documentTypeHint" name="documentTypeHint" defaultValue="" className="h-10 rounded-md border border-ui-border bg-surface px-3 text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
-                <option value="">Not sure — suggest automatically</option>
+                <option value="">Tidak tahu — sarankan otomatis</option>
                 {documentTypes.filter((type) => type !== "unknown").map((type) => <option key={type} value={type}>{documentTypeLabels[type]}</option>)}
               </select>
             </label>
-            <label className="grid gap-1 text-sm font-medium text-ink" htmlFor="documentDate">Document date <span className="font-normal text-ink-muted">Optional</span><Input id="documentDate" name="documentDate" type="date" /></label>
-            <label className="grid gap-1 text-sm font-medium text-ink" htmlFor="reportingPeriod">Reporting period <span className="font-normal text-ink-muted">Optional</span><Input id="reportingPeriod" name="reportingPeriod" type="month" /></label>
-            <label className="grid gap-1 text-sm font-medium text-ink" htmlFor="workstream">Workstream <span className="font-normal text-ink-muted">Optional</span><Input id="workstream" name="workstream" maxLength={120} /></label>
+            <label className="grid gap-1 text-sm font-medium text-ink" htmlFor="documentDate">Tanggal dokumen <span className="font-normal text-ink-muted">Opsional</span><Input id="documentDate" name="documentDate" type="date" /></label>
+            <label className="grid gap-1 text-sm font-medium text-ink" htmlFor="reportingPeriod">Periode pelaporan <span className="font-normal text-ink-muted">Opsional</span><Input id="reportingPeriod" name="reportingPeriod" type="month" /></label>
+            <label className="grid gap-1 text-sm font-medium text-ink" htmlFor="workstream">Workstream <span className="font-normal text-ink-muted">Opsional</span><Input id="workstream" name="workstream" maxLength={120} /></label>
           </div>
         )}
       </div>
       {submissionError && <p className="mt-3 text-sm text-status-critical-text" role="alert">{submissionError}</p>}
       {items.length > 0 && (
-        <ul className="mt-4 divide-y divide-ui-border" aria-label="Upload status">
+        <ul className="mt-4 divide-y divide-ui-border" aria-label="Status unggahan">
           {items.map((item) => (
             <li key={item.id} className="py-3 first:pt-0 last:pb-0">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="min-w-0 flex-1 truncate text-sm font-medium text-ink">{item.file.name}</p>
-                <span className={`text-xs font-medium ${item.status === "failed" ? "bg-status-critical-bg text-status-critical-text" : "bg-status-warn-bg text-status-warn-text"}`} role="status">{item.status === "uploading" ? `Uploading ${Math.round(item.progress)}%` : item.status === "queued" ? "Queued" : item.status === "needs_review" ? "Needs review" : "Upload failed"}</span>
-                {item.status === "failed" && <Button type="button" disabled={pending} onClick={() => void retry(item)}>Retry</Button>}
+                <span className={`text-xs font-medium ${item.status === "failed" ? "bg-status-critical-bg text-status-critical-text" : "bg-status-warn-bg text-status-warn-text"}`} role="status">{item.status === "uploading" ? `Mengunggah ${Math.round(item.progress)}%` : item.status === "queued" ? "Dalam antrean" : item.status === "needs_review" ? "Perlu diperiksa" : "Unggahan gagal"}</span>
+                {item.status === "failed" && <Button type="button" disabled={pending} onClick={() => void retry(item)}>Ulangi</Button>}
               </div>
-              {item.status === "uploading" && <progress className="mt-2 block h-2 w-full accent-brand" value={item.progress} max={100} aria-label={`Uploading ${item.file.name}`} />}
+              {item.status === "uploading" && <progress className="mt-2 block h-2 w-full accent-brand" value={item.progress} max={100} aria-label={`Mengunggah ${item.file.name}`} />}
               {item.message && <p className={`mt-1 text-xs ${item.status === "failed" ? "text-status-critical-text" : "text-ink-muted"}`}>{item.message}</p>}
               {item.manifest && item.manifest.length > 0 && (
-                <ul className="mt-2 space-y-1 text-xs text-ink-muted" aria-label="Archive member results">
+                <ul className="mt-2 space-y-1 text-xs text-ink-muted" aria-label="Hasil anggota arsip">
                   {item.manifest.map((member) => (
                     <li key={`${member.index}:${member.displayPath}`}>
                       {member.displayPath}: {member.status}
@@ -290,9 +354,10 @@ export function UploadDocumentForm({
           ))}
         </ul>
       )}
-      {failedItems.length > 0 && <p className="mt-3 text-sm font-medium text-status-critical-text" role="alert">{failedItems.length} file(s) need retry. Successful files remain available.</p>}
-      <Button type="submit" disabled={pending} className="mt-4 w-full bg-brand text-brand-foreground hover:bg-brand/90">{pending ? "Uploading files..." : mode === "single" ? "Upload document" : "Upload project files"}</Button>
+      {failedItems.length > 0 && <p className="mt-3 text-sm font-medium text-status-critical-text" role="alert">{failedItems.length} file perlu diulangi. File yang berhasil tetap tersedia.</p>}
+      <Button type="submit" disabled={pending} className="mt-4 w-full">{pending ? "Mengunggah file..." : mode === "single" ? "Unggah dokumen" : "Unggah file proyek"}</Button>
     </form>
+    </SectionCard>
   );
 }
 

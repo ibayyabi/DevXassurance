@@ -84,31 +84,21 @@ Workflow polling saat ini melakukan:
 
 1. Trigger setiap 60 detik.
 2. Memanggil RPC `claim_next_available_document_job()`.
-3. RPC melakukan lock kapasitas, memulihkan job dengan lease kadaluarsa, membatasi maksimal dua job aktif, dan memilih satu job `queued`.
-4. Job diubah menjadi `processing`, `attempt_count` dinaikkan, dan lease 15 menit diberikan.
-5. Dokumen terkait diubah menjadi `processing`.
-6. n8n memanggil `reset_document_job_results`.
-7. n8n membaca metadata dokumen.
-8. n8n memanggil endpoint worker:
+3. RPC memulihkan lease kedaluwarsa, membatasi maksimal dua job `processing`, memilih paling banyak satu job, lalu menerbitkan `claim_token`.
+4. Claim mengubah job dan dokumen menjadi `processing` serta membersihkan hasil publikasi attempt sebelumnya dalam transaksi yang sama.
+5. n8n membaca metadata dokumen lalu memanggil worker dengan job id, claim token, project id, dan document id.
+6. Worker mengambil file dari Storage; n8n tidak mengirim file atau seluruh corpus ke model.
+7. Worker menyimpan chunks, extraction-group checkpoints, cost observations, dan suggestions hanya melalui RPC yang memeriksa claim token dan lease.
+8. n8n memvalidasi citation lalu memanggil `complete_document_job` satu kali. RPC menerbitkan hasil, extraction run, status dokumen, dan status job secara atomik. Kegagalan memakai RPC fail/retry fenced dengan token yang sama.
 
-```text
-POST /api/workers/parse-document
-```
-
-9. Setelah worker selesai, n8n membaca chunks yang dipersist worker dan menulis hasil turunan ke Supabase.
-10. n8n menyelesaikan extraction run, job, dan document state.
-
-Request ke worker membawa metadata seperti:
+Request worker:
 
 ```json
 {
   "job_id": "...",
+  "claim_token": "...",
   "project_id": "...",
-  "document_id": "...",
-  "storage_bucket": "project-evidence",
-  "storage_path": "...",
-  "title": "...",
-  "file_name": "..."
+  "document_id": "..."
 }
 ```
 
@@ -116,36 +106,32 @@ n8n tidak mengirim seluruh file atau seluruh corpus ke model. Worker mengambil f
 
 ### 2.2 Webhook mode
 
-Webhook mode memiliki alur:
+Webhook merupakan entry point alternatif dengan aturan ownership dan admission yang sama:
 
 ```text
 Supabase INSERT ai_jobs
 → n8n webhook
-→ normalisasi payload
-→ cek queued parse job
-→ claim job
-→ mark document processing
-→ call worker
-→ persist result
-→ complete job/document
+→ validasi queued parse job
+→ claim_document_job(job_id)
+→ worker menerima claim_token
+→ complete_document_job / fail_document_job_attempt
 ```
 
-Mode webhook merupakan jalur lama/alternatif. Ia perlu diaudit saat cutover karena workflow webhook dan polling dapat memiliki writer serta failure behavior yang berbeda.
+`claim_document_job` memakai batas kapasitas global yang sama dengan polling. Aktifkan tepat satu entry point; dua workflow aktif tanpa deduplikasi eksternal dapat memicu dua request untuk job yang sama, tetapi hanya claim valid yang dapat menulis.
 
 ### 2.3 Batas tanggung jawab n8n
 
 n8n bertanggung jawab atas:
 
-- trigger dan dispatch;
-- claim job;
-- lease dan recovery melalui backend/RPC;
-- memanggil worker;
-- memindahkan payload;
-- menulis hasil turunan ke Supabase;
-- menyelesaikan state job.
+- memicu dan memilih satu entry point;
+- memperoleh token claim dari RPC fenced;
+- memanggil worker dengan identitas job dan token;
+- memvalidasi citation pada payload;
+- menerbitkan hasil melalui `complete_document_job` atau mencatat kegagalan melalui RPC fenced.
 
-n8n tidak seharusnya bertanggung jawab atas:
+n8n tidak bertanggung jawab atas:
 
+- menulis langsung chunks, checkpoints, atau state terminal;
 - menentukan baseline valid;
 - menyetujui mapping;
 - menghitung Budget/Schedule/Risk;
@@ -177,12 +163,13 @@ Endpoint dilindungi `XASS_WORKER_SECRET`.
 Worker:
 
 1. Memvalidasi secret.
-2. Memastikan `job_id`, `project_id`, dan `document_id` tersedia.
-3. Membaca dokumen dengan kondisi `document_id + project_id`.
-4. Mengunduh file dari Supabase Storage menggunakan service role.
-5. Memanggil `processDocumentJob`.
+2. Memastikan `job_id`, `claim_token`, `project_id`, dan `document_id` tersedia.
+3. Memastikan job `parse_document` masih `processing`, token cocok, dan project/document cocok.
+4. Memperpanjang lease melalui RPC sebelum memulai proses.
+5. Membaca dokumen dan mengunduh file dari Supabase Storage menggunakan service role.
+6. Memanggil `processDocumentJob`.
 
-Jika dokumen tidak berada di project yang diminta, worker mengembalikan kegagalan terminal.
+Token atau lease yang tidak valid menghasilkan `409` tanpa memulai parsing atau menulis state.
 
 ### 3.2 Parsing dan OCR
 
@@ -364,9 +351,11 @@ Lokasi: `worker/src/services/document-extraction.ts`.
 
 Provider yang dipahami:
 
-- `ollama`;
+- `ollama` (local);
 - `ollama_cloud`;
-- `openai-compatible`.
+- `openai-compatible`;
+- `gemini`;
+- `groq` (Groq Chat Completions).
 
 Default code worker menggunakan local Ollama dengan model default `qwen2.5:3b` bila tidak dikonfigurasi. Dokumentasi deployment menyebut Ollama Cloud dengan `gpt-oss:20b`.
 
@@ -378,10 +367,12 @@ Adapter ini dipakai oleh Assurance analysis dan Advisor. Provider juga dikontrol
 
 ### Structured output
 
-Request saat ini menggunakan:
+Request format saat ini per provider:
 
-- Ollama: `format: "json"`;
-- OpenAI-compatible: `response_format: { "type": "json_object" }`.
+- Local Ollama: no provider-enforced JSON mode; the prompt requests JSON.
+- Ollama Cloud: `format: "json"`.
+- OpenAI-compatible and Groq: `response_format: { "type": "json_object" }`.
+- Gemini: `generationConfig.responseMimeType: "application/json"`.
 
 Ini bukan strict JSON Schema enforcement. Validasi business schema tetap dilakukan aplikasi setelah response diterima.
 

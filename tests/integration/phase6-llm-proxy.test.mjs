@@ -23,3 +23,20 @@ test("the model proxy preserves OpenAI-compatible chat completions paths", () =>
     "https://ollama.com/v1/chat/completions?trace=1",
   );
 });
+
+test("the model proxy preserves Groq's OpenAI-compatible completion path", () => {
+  assert.equal(
+    modelTargetUrl("/openai/v1/chat/completions", "https://api.groq.com/openai/v1").href,
+    "https://api.groq.com/openai/v1/chat/completions",
+  );
+});
+
+test("the model proxy preserves Gemini's versioned generateContent path", () => {
+  assert.equal(
+    modelTargetUrl(
+      "/v1beta/models/gemini-3.8-flash:generateContent",
+      "https://generativelanguage.googleapis.com/v1beta",
+    ).href,
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+  );
+});

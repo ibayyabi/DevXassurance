@@ -7,7 +7,8 @@
     "lint": "eslint .",
     "test": "node --test tests/integration/*.test.mjs",
     "test:e2e": "node tests/e2e/run-fixture-e2e.mjs",
-    "test:e2e:live": "node tests/e2e/live-provider-smoke.mjs"
+    "test:e2e:live": "node tests/e2e/live-provider-smoke.mjs",
+    "test:db": "node tools/run-db-tests.mjs"
   },
   "dependencies": {
     "@radix-ui/react-checkbox": "^1.3.1",

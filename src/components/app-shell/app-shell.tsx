@@ -156,7 +156,16 @@ export function AppShell({
               })}
             </nav>
           </header>
-          <main className="flex-1 p-4 md:p-6">{children}</main>
+          <main className="relative flex-1 p-4 md:p-6">
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-0 top-0 z-0 h-72 overflow-hidden"
+            >
+              <div className="absolute -right-24 -top-32 h-96 w-[36rem] rotate-[-8deg] rounded-[100%] bg-gradient-to-bl from-brand-soft/70 via-brand-soft/25 to-transparent blur-2xl" />
+              <div className="absolute right-40 -top-24 h-64 w-96 rounded-[100%] bg-gradient-to-bl from-analysis-soft/50 to-transparent blur-2xl" />
+            </div>
+            <div className="relative z-10">{children}</div>
+          </main>
         </div>
       </div>
     </div>

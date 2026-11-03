@@ -837,6 +837,87 @@ test("Ollama Cloud and OpenAI-compatible requests use zero temperature", async (
   }
 });
 
+
+test("Gemini provider uses its configured model and JSON-mode request", async () => {
+  const envKeys = ["XASS_LLM_PROVIDER", "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_API_BASE_URL"];
+  const savedEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  const savedFetch = globalThis.fetch;
+  process.env.XASS_LLM_PROVIDER = "gemini";
+  process.env.GEMINI_API_KEY = "test-only-gemini-key";
+  process.env.GEMINI_MODEL = "test-gemini-model";
+  delete process.env.GEMINI_API_BASE_URL;
+  globalThis.fetch = async (url, init) => {
+    const target = new URL(url);
+    assert.equal(
+      target.href,
+      "https://generativelanguage.googleapis.com/v1beta/models/test-gemini-model:generateContent",
+    );
+    assert.equal(target.searchParams.has("key"), false);
+    assert.equal(init.headers["x-goog-api-key"], "test-only-gemini-key");
+    const request = JSON.parse(init.body);
+    assert.equal(
+      request.systemInstruction.parts[0].text,
+      "You are X-Assurance, an evidence-grounded project assurance analyst. Return only the requested JSON object.",
+    );
+    assert.equal(request.contents[0].role, "user");
+    assert.equal(request.generationConfig.temperature, 0);
+    assert.equal(request.generationConfig.responseMimeType, "application/json");
+    const prompt = request.contents[0].parts[0].text;
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: JSON.stringify(validModelOutput(prompt)) }] } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const result = await processDocumentJob(
+      job(sourceDocument("GEMINI")),
+      memoryGroupStore(),
+    );
+    assert.equal(result.status, "completed");
+  } finally {
+    globalThis.fetch = savedFetch;
+    for (const key of envKeys) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+  }
+});
+
+
+
+test("Groq provider uses its configured model and OpenAI-compatible JSON request", async () => {
+  const envKeys = ["XASS_LLM_PROVIDER", "GROQ_API_KEY", "GROQ_MODEL", "GROQ_API_BASE_URL"];
+  const savedEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  const savedFetch = globalThis.fetch;
+  process.env.XASS_LLM_PROVIDER = "groq";
+  process.env.GROQ_API_KEY = "test-only-groq-key";
+  process.env.GROQ_MODEL = "test-groq-model";
+  process.env.GROQ_API_BASE_URL = "http://groq.test/openai/v1";
+  globalThis.fetch = async (url, init) => {
+    assert.equal(new URL(url).href, "http://groq.test/openai/v1/chat/completions");
+    assert.equal(init.headers.Authorization, "Bearer test-only-groq-key");
+    const request = JSON.parse(init.body);
+    assert.equal(request.model, "test-groq-model");
+    assert.equal(request.temperature, 0);
+    assert.deepEqual(request.response_format, { type: "json_object" });
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(validModelOutput(request.messages[1].content)) } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const result = await processDocumentJob(
+      job(sourceDocument("GROQ")),
+      memoryGroupStore(),
+    );
+    assert.equal(result.status, "completed");
+  } finally {
+    globalThis.fetch = savedFetch;
+    for (const key of envKeys) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+  }
+});
+
 test("per-document extraction ceiling allows 32 groups and rejects 33 before model or cache work", async () => {
   const chunks = (count) => Array.from({ length: count }, (_, chunkIndex) => ({
     chunkIndex,

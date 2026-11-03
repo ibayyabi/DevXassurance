@@ -242,7 +242,7 @@ type ChunkGroup = {
   candidateInterpretation: string[];
 };
 type ModelProvider = {
-  provider: "ollama" | "ollama_cloud" | "openai-compatible";
+  provider: "ollama" | "ollama_cloud" | "openai-compatible" | "gemini" | "groq";
   model: string;
   url: string;
   headers: Record<string, string>;
@@ -1139,42 +1139,72 @@ function configuredModelProvider(): ModelProvider {
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
     };
   }
-  if (provider === "openai-compatible") {
-    const apiKey = process.env.XASS_CLOUD_LLM_API_KEY ?? process.env.OLLAMA_API_KEY;
-    if (!apiKey) throw new Error("The OpenAI-compatible provider requires an API key.");
-    const baseUrl = process.env.XASS_CLOUD_LLM_BASE_URL ?? "https://ollama.com/v1";
+  if (provider === "openai-compatible" || provider === "groq") {
+    const groq = provider === "groq";
+    const apiKey = groq
+      ? process.env.GROQ_API_KEY
+      : process.env.XASS_CLOUD_LLM_API_KEY ?? process.env.OLLAMA_API_KEY;
+    if (!apiKey) {
+      throw new Error(groq
+        ? "The Groq provider requires GROQ_API_KEY."
+        : "The OpenAI-compatible provider requires an API key.");
+    }
+    const model = groq
+      ? process.env.GROQ_MODEL
+      : process.env.XASS_CLOUD_LLM_MODEL ?? "gpt-oss:20b";
+    if (!model) throw new Error("The Groq provider requires GROQ_MODEL.");
+    const baseUrl = groq
+      ? process.env.GROQ_API_BASE_URL ?? "https://api.groq.com/openai/v1"
+      : process.env.XASS_CLOUD_LLM_BASE_URL ?? "https://ollama.com/v1";
     return {
       provider,
-      model: process.env.XASS_CLOUD_LLM_MODEL ?? "gpt-oss:20b",
+      model,
       url: `${baseUrl.replace(/\/$/, "")}/chat/completions`,
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
     };
   }
-  throw new Error("XASS_LLM_PROVIDER must be ollama, ollama_cloud, or openai-compatible.");
+  if (provider === "gemini") {
+    const apiKey = process.env.GEMINI_API_KEY;
+    const model = process.env.GEMINI_MODEL;
+    if (!apiKey) throw new Error("The Gemini provider requires GEMINI_API_KEY.");
+    if (!model) throw new Error("The Gemini provider requires GEMINI_MODEL.");
+    const baseUrl = process.env.GEMINI_API_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta";
+    return {
+      provider,
+      model,
+      url: `${baseUrl.replace(/\/$/, "")}/models/${encodeURIComponent(model)}:generateContent`,
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+    };
+  }
+  throw new Error("XASS_LLM_PROVIDER must be ollama, ollama_cloud, openai-compatible, gemini, or groq.");
 }
 
 async function requestModel(provider: ModelProvider, prompt: string) {
+  const system = "You are X-Assurance, an evidence-grounded project assurance analyst. Return only the requested JSON object.";
   const messages = [
-    {
-      role: "system",
-      content: "You are X-Assurance, an evidence-grounded project assurance analyst. Return only the requested JSON object.",
-    },
+    { role: "system", content: system },
     { role: "user", content: prompt },
   ];
-  const body = provider.provider === "openai-compatible"
+  const body = provider.provider === "gemini"
     ? {
-        model: provider.model,
-        temperature: 0,
-        response_format: { type: "json_object" },
-        messages,
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0, responseMimeType: "application/json" },
       }
-    : {
-        model: provider.model,
-        stream: false,
-        messages,
-        ...(provider.provider === "ollama_cloud" ? { format: "json" } : {}),
-        options: { temperature: 0 },
-      };
+    : provider.provider === "openai-compatible" || provider.provider === "groq"
+      ? {
+          model: provider.model,
+          temperature: 0,
+          response_format: { type: "json_object" },
+          messages,
+        }
+      : {
+          model: provider.model,
+          stream: false,
+          messages,
+          ...(provider.provider === "ollama_cloud" ? { format: "json" } : {}),
+          options: { temperature: 0 },
+        };
 
   let response: Response;
   try {
@@ -1205,9 +1235,11 @@ async function requestModel(provider: ModelProvider, prompt: string) {
     throw new Error("The configured AI provider returned an invalid response envelope.");
   }
   if (!isRecord(envelope)) throw new Error("The configured AI provider returned an invalid response envelope.");
-  const raw = provider.provider === "openai-compatible"
-    ? nestedString(envelope, ["choices", "0", "message", "content"])
-    : nestedString(envelope, ["message", "content"]) ?? stringField(envelope.response);
+  const raw = provider.provider === "gemini"
+    ? nestedString(envelope, ["candidates", "0", "content", "parts", "0", "text"])
+    : provider.provider === "openai-compatible" || provider.provider === "groq"
+      ? nestedString(envelope, ["choices", "0", "message", "content"])
+      : nestedString(envelope, ["message", "content"]) ?? stringField(envelope.response);
   if (!raw) throw new Error("The configured AI provider returned no structured content.");
   return raw;
 }

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 
 import {
@@ -15,7 +16,7 @@ import {
 } from "@/features/documents/lib/file-types";
 import { requireProjectMembership } from "@/features/projects/lib/queries";
 import { canManageProject } from "@/features/projects/lib/roles";
-import { activeDocumentStatus, needsParseJob } from "@/features/documents/lib/job-state";
+import { activeDocumentStatus } from "@/features/documents/lib/job-state";
 import { submissionMatchesProject } from "@/features/documents/lib/submission-scope";
 
 export async function POST(
@@ -96,6 +97,18 @@ export async function POST(
       { status: 409 },
     );
   }
+  const { data: storedBytes, error: storedBytesError } = await supabase.storage
+    .from("project-evidence")
+    .download(storagePath);
+  if (storedBytesError || !storedBytes) {
+    return NextResponse.json(
+      { ok: false, message: "The uploaded file could not be verified in Storage. Retry the upload." },
+      { status: 409 },
+    );
+  }
+  const contentHash = createHash("sha256")
+    .update(new Uint8Array(await storedBytes.arrayBuffer()))
+    .digest("hex");
 
   const documentTypeHint = parseDocumentTypeHint(body.documentTypeHint, documentTypes);
   const documentDate = parseOptionalDate(body.documentDate);
@@ -132,10 +145,19 @@ export async function POST(
     );
   }
   if (existing && existing.processing_status !== "uploaded") {
+    const { error: identityError } = await supabase
+      .from("documents")
+      .update({ content_hash: contentHash, file_size: fileSize })
+      .eq("id", existing.id)
+      .eq("project_id", projectId);
+    if (identityError) {
+      return NextResponse.json({ ok: false, message: "The uploaded file is stored, but its content identity could not be updated." }, { status: 500 });
+    }
     return NextResponse.json({ ok: true, documentId: existing.id, processingStatus: existing.processing_status });
   }
 
   const values = {
+    content_hash: contentHash,
     document_type: documentTypeHint ?? "unknown",
     document_type_hint: documentTypeHint,
     title,
@@ -186,45 +208,22 @@ export async function POST(
     return NextResponse.json({ ok: true, documentId, processingStatus: "needs_review" });
   }
 
-  const { data: existingJobs, error: existingJobError } = await supabase
-    .from("ai_jobs")
-    .select("id, status, created_at")
-    .eq("project_id", projectId)
-    .eq("document_id", documentId)
-    .eq("job_type", "parse_document")
-    .in("status", ["queued", "processing"])
-    .order("created_at", { ascending: false })
-    .limit(1);
-  if (existingJobError) {
-    return NextResponse.json({ ok: false, message: "Could not check processing status." }, { status: 500 });
+  const { data: queuedJob, error: queueError } = await supabase.rpc(
+    "queue_document_parse_job",
+    {
+      p_project_id: projectId,
+      p_document_id: documentId,
+      p_source: "upload",
+    },
+  );
+  if (queueError || !queuedJob) {
+    return NextResponse.json(
+      { ok: false, message: "The uploaded file is stored, but processing could not be queued. Retry completion." },
+      { status: 500 },
+    );
   }
-  const processingStatus = activeDocumentStatus(existingJobs ?? []);
-  if (needsParseJob(existingJobs ?? [])) {
-    const { error: jobError } = await supabase.from("ai_jobs").insert({
-      project_id: projectId,
-      document_id: documentId,
-      job_type: "parse_document",
-      status: "queued",
-      metadata: { source: "upload" },
-    });
-    if (jobError) {
-      await supabase
-        .from("documents")
-        .update({
-          processing_status: "needs_review",
-          processing_error: "Document uploaded but processing could not be queued.",
-        })
-        .eq("id", documentId)
-        .eq("project_id", projectId);
-      return NextResponse.json({ ok: true, documentId, processingStatus: "needs_review" });
-    }
-  }
-
-  await supabase
-    .from("documents")
-    .update({ processing_status: processingStatus, processing_error: null })
-    .eq("id", documentId)
-    .eq("project_id", projectId);
+  const queueRecord = Array.isArray(queuedJob) ? queuedJob[0] : queuedJob;
+  const processingStatus = queueRecord?.queued ? "queued" : activeDocumentStatus([{ status: "queued" }]);
   return NextResponse.json({ ok: true, documentId, processingStatus });
 }
 

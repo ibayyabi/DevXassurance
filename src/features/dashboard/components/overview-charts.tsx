@@ -1,6 +1,13 @@
 "use client";
 
 import {
+  CalendarDays,
+  CircleDollarSign,
+  ClipboardCheck,
+  Gauge,
+  ShieldAlert,
+} from "lucide-react";
+import {
   Area,
   AreaChart,
   Bar,
@@ -18,6 +25,9 @@ import {
   YAxis,
 } from "recharts";
 
+import { EmptyState } from "@/components/ui/empty-state";
+import { SectionCard } from "@/components/ui/section-card";
+import { StatusPill, type StatusTone } from "@/components/ui/status-pill";
 import type { ReviewCondition } from "@/features/assurance/lib/analysis";
 
 export type OverviewTrendPoint = {
@@ -32,12 +42,12 @@ export type OverviewTrendPoint = {
 };
 
 export type DomainStatusDatum = {
-  domain: "Budget" | "Schedule" | "Risk";
+  domain: "Anggaran" | "Jadwal" | "Risiko";
   condition: ReviewCondition;
 };
 
 export type ActionStatusDatum = {
-  status: "Open" | "In progress" | "Completed" | "Deferred";
+  status: "Buka" | "Sedang Berjalan" | "Selesai" | "Ditunda";
   value: number;
 };
 
@@ -71,17 +81,18 @@ export function BudgetTrendChart({
 
   return (
     <ChartCard
-      title="Budget forecast against plan"
-      description="Accepted baseline and reported estimate at completion from each assessment period."
+      icon={CircleDollarSign}
+      title="Prakiraan anggaran terhadap rencana"
+      description="Baseline disetujui dan EAC terlapor dari setiap periode asesmen."
       badge={<ConditionLabel condition={condition} />}
     >
       {chartPoints.length === 0 ? (
-        <ChartEmpty message="Comparable budget values were not found in the assessment evidence." />
+        <ChartEmpty message="Nilai anggaran yang sebanding tidak ditemukan dalam bukti asesmen." />
       ) : (
         <div
           className="h-72 min-h-0 min-w-0 w-full"
           role="img"
-          aria-label="Accepted baseline and reported estimate at completion by assessment period"
+          aria-label="Baseline disetujui dan EAC terlapor per periode asesmen"
         >
           <ResponsiveContainer
             width="100%"
@@ -123,13 +134,13 @@ export function BudgetTrendChart({
                 contentStyle={tooltipStyle}
                 formatter={(value, name) => [
                   formatMoney(Number(value), currency),
-                  name === "budgetPlan" ? "Accepted baseline" : "Reported EAC",
+                  name === "budgetPlan" ? "Baseline disetujui" : "EAC terlapor",
                 ]}
                 labelFormatter={(label) => String(label)}
               />
               <Legend
                 formatter={(value) =>
-                  value === "budgetPlan" ? "Accepted baseline" : "Reported EAC"
+                  value === "budgetPlan" ? "Baseline disetujui" : "EAC terlapor"
                 }
                 iconType="line"
                 wrapperStyle={{ color: "var(--text-muted)", fontSize: "0.75rem" }}
@@ -178,17 +189,18 @@ export function ScheduleTrendChart({
 
   return (
     <ChartCard
-      title="Schedule movement"
-      description="Forecast movement in calendar days against the approved baseline at 0 days."
+      icon={CalendarDays}
+      title="Pergerakan jadwal"
+      description="Pergerakan prakiraan dalam hari kalender terhadap baseline disetujui pada 0 hari."
       badge={<ConditionLabel condition={condition} />}
     >
       {chartPoints.length === 0 ? (
-        <ChartEmpty message="Comparable schedule dates were not found in the assessment evidence." />
+        <ChartEmpty message="Tanggal jadwal yang sebanding tidak ditemukan dalam bukti asesmen." />
       ) : (
         <div
           className="h-72 min-h-0 min-w-0 w-full"
           role="img"
-          aria-label="Approved schedule baseline and forecast delay by assessment period"
+          aria-label="Baseline jadwal disetujui dan keterlambatan prakiraan per periode asesmen"
         >
           <ResponsiveContainer
             width="100%"
@@ -216,7 +228,7 @@ export function ScheduleTrendChart({
               <YAxis
                 axisLine={false}
                 tick={axisTick}
-                tickFormatter={(value) => `${value}d`}
+                tickFormatter={(value) => `${value}h`}
                 tickLine={false}
                 width={42}
               />
@@ -230,7 +242,7 @@ export function ScheduleTrendChart({
               <Line
                 dataKey="scheduleBaseline"
                 dot={false}
-                name="Approved baseline"
+                name="Baseline disetujui"
                 stroke="var(--accent)"
                 strokeDasharray="6 5"
                 strokeWidth={2}
@@ -239,8 +251,8 @@ export function ScheduleTrendChart({
               <Tooltip
                 contentStyle={tooltipStyle}
                 formatter={(value, name) => [
-                  name === "Approved baseline"
-                    ? "0 days (approved plan)"
+                  name === "Baseline disetujui"
+                    ? "0 hari (rencana disetujui)"
                     : formatDelay(Number(value)),
                   String(name),
                 ]}
@@ -255,7 +267,7 @@ export function ScheduleTrendChart({
                   stroke: statusColor,
                   strokeWidth: 3,
                 }}
-                name="Current forecast"
+                name="Prakiraan terkini"
                 stroke={statusColor}
                 strokeWidth={3}
                 type="monotone"
@@ -283,14 +295,15 @@ export function DomainStatusChart({
 
   return (
     <ChartCard
-      title="Condition snapshot"
-      description="One segment for each assessed domain. No artificial health score."
+      icon={Gauge}
+      title="Ringkasan kondisi"
+      description="Satu segmen untuk setiap domain yang dinilai. Tanpa skor kesehatan buatan."
     >
       <div className="grid items-center gap-5 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] xl:grid-cols-1">
         <div
           className="relative mx-auto h-52 min-h-0 min-w-0 w-full max-w-64"
           role="img"
-          aria-label={`Overall condition ${overallLabel}. Budget, Schedule, and Risk status for ${period}.`}
+          aria-label={`Kondisi keseluruhan ${overallLabel}. Status Anggaran, Jadwal, dan Risiko untuk ${period}.`}
         >
           <ResponsiveContainer
             width="100%"
@@ -329,7 +342,7 @@ export function DomainStatusChart({
             </PieChart>
           </ResponsiveContainer>
           <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-10 text-center">
-            <span className="text-xs font-medium text-ink-muted">Overall</span>
+            <span className="text-xs font-medium text-ink-muted">Keseluruhan</span>
             <span className="mt-1 max-w-24 text-balance text-lg font-semibold leading-tight text-ink">
               {overallLabel}
             </span>
@@ -348,13 +361,13 @@ export function DomainStatusChart({
           ))}
           <dl className="mt-1 grid grid-cols-2 gap-3 rounded-xl bg-base p-4">
             <div>
-              <dt className="text-xs text-ink-muted">Period</dt>
+              <dt className="text-xs text-ink-muted">Periode</dt>
               <dd className="mt-1 text-sm font-semibold text-ink">{period}</dd>
             </div>
             <div>
-              <dt className="text-xs text-ink-muted">Evidence</dt>
+              <dt className="text-xs text-ink-muted">Bukti</dt>
               <dd className="mt-1 text-sm font-semibold text-ink">
-                {evidenceCount} files
+                {evidenceCount} berkas
               </dd>
             </div>
           </dl>
@@ -376,10 +389,10 @@ export function RiskBreakdownChart({
   condition: ReviewCondition;
 }) {
   const data = [
-    { name: "Critical", value: critical ?? 0, fill: "var(--status-critical)" },
-    { name: "High", value: high ?? 0, fill: "var(--status-warn)" },
+    { name: "Kritis", value: critical ?? 0, fill: "var(--status-critical)" },
+    { name: "Tinggi", value: high ?? 0, fill: "var(--status-warn)" },
     {
-      name: "Uncontrolled",
+      name: "Tidak terkendali",
       value: uncontrolled ?? 0,
       fill: "var(--status-crit-text)",
     },
@@ -389,17 +402,18 @@ export function RiskBreakdownChart({
 
   return (
     <ChartCard
-      title="Current risk exposure"
-      description="Explicit counts extracted from the latest risk evidence."
+      icon={ShieldAlert}
+      title="Paparan risiko terkini"
+      description="Jumlah eksplisit yang diekstrak dari bukti risiko terbaru."
       badge={<ConditionLabel condition={condition} />}
     >
       {!hasValues ? (
-        <ChartEmpty message="Risk counts were not found in the assessment evidence." />
+        <ChartEmpty message="Jumlah risiko tidak ditemukan dalam bukti asesmen." />
       ) : (
         <div
           className="h-64 min-h-0 min-w-0 w-full"
           role="img"
-          aria-label={`Critical risks ${critical ?? 0}, high risks ${high ?? 0}, uncontrolled risks ${uncontrolled ?? 0}`}
+          aria-label={`Risiko kritis ${critical ?? 0}, risiko tinggi ${high ?? 0}, risiko tidak terkendali ${uncontrolled ?? 0}`}
         >
           <ResponsiveContainer
             width="100%"
@@ -435,7 +449,7 @@ export function RiskBreakdownChart({
               />
               <Tooltip
                 contentStyle={tooltipStyle}
-                formatter={(value) => [Number(value), "Count"]}
+                formatter={(value) => [Number(value), "Jumlah"]}
               />
               <Bar dataKey="value" radius={[0, 5, 5, 0]}>
                 {data.map((item) => (
@@ -456,17 +470,18 @@ export function ActionStatusChart({ data }: { data: ActionStatusDatum[] }) {
 
   return (
     <ChartCard
-      title="Action readiness"
-      description="Current management actions grouped by workflow state."
+      icon={ClipboardCheck}
+      title="Kesiapan tindakan"
+      description="Tindakan manajemen terkini dikelompokkan berdasarkan status alur kerja."
     >
       {total === 0 ? (
-        <ChartEmpty message="No management actions were generated for this assessment." />
+        <ChartEmpty message="Belum ada tindakan manajemen yang dihasilkan untuk asesmen ini." />
       ) : (
         <div className="grid items-center gap-5 sm:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] xl:grid-cols-1">
           <div
             className="relative mx-auto h-48 min-h-0 min-w-0 w-full max-w-60"
             role="img"
-            aria-label={`${total} management actions grouped by status`}
+            aria-label={`${total} tindakan manajemen dikelompokkan berdasarkan status`}
           >
             <ResponsiveContainer
               width="100%"
@@ -501,7 +516,7 @@ export function ActionStatusChart({ data }: { data: ActionStatusDatum[] }) {
             </ResponsiveContainer>
             <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
               <span className="text-3xl font-semibold text-ink">{total}</span>
-              <span className="text-xs text-ink-muted">actions</span>
+              <span className="text-xs text-ink-muted">tindakan</span>
             </div>
           </div>
           <dl className="grid grid-cols-2 gap-3">
@@ -523,69 +538,60 @@ export function ActionStatusChart({ data }: { data: ActionStatusDatum[] }) {
 function ChartCard({
   title,
   description,
+  icon,
   badge,
   children,
 }: {
   title: string;
   description: string;
+  icon?: React.ComponentType<{ className?: string }>;
   badge?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
-    <section className="min-w-0 overflow-hidden rounded-2xl border border-ui-border bg-surface shadow-sm">
-      <header className="flex flex-col gap-3 border-b border-ui-border px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h2 className="text-base font-semibold text-ink">{title}</h2>
-          <p className="mt-1 max-w-2xl text-sm leading-5 text-ink-muted">
-            {description}
-          </p>
-        </div>
-        {badge}
-      </header>
-      <div className="min-w-0 p-5">{children}</div>
-    </section>
+    <SectionCard
+      icon={icon}
+      title={title}
+      subtitle={description}
+      aside={badge}
+      className="overflow-hidden"
+      bodyClassName="min-w-0"
+    >
+      {children}
+    </SectionCard>
   );
 }
 
 function ChartEmpty({ message }: { message: string }) {
   return (
-    <div className="flex min-h-64 items-center justify-center rounded-xl border border-dashed border-ui-border bg-base px-6 text-center">
-      <div>
-        <p className="text-sm font-semibold text-ink">Chart unavailable</p>
-        <p className="mt-2 max-w-sm text-sm leading-6 text-ink-muted">
-          {message}
-        </p>
-      </div>
-    </div>
+    <EmptyState
+      title="Grafik tidak tersedia"
+      description={message}
+      className="min-h-64"
+    />
   );
 }
 
 function ConditionLabel({ condition }: { condition: ReviewCondition }) {
   return (
-    <span
-      className={`w-fit shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${conditionTone(condition)}`}
-    >
+    <StatusPill tone={conditionTone(condition)} className="shrink-0">
       {conditionLabel(condition)}
-    </span>
+    </StatusPill>
   );
 }
 
 function conditionLabel(condition?: ReviewCondition) {
-  if (condition === "on_track") return "On track";
-  if (condition === "needs_attention") return "Needs attention";
-  if (condition === "critical") return "Critical";
-  return "More evidence needed";
+  if (condition === "on_track") return "Sesuai Rencana";
+  if (condition === "needs_attention") return "Perlu Perhatian";
+  if (condition === "critical") return "Kritis";
+  return "Perlu Bukti Tambahan";
 }
 
-function conditionTone(condition: ReviewCondition) {
-  if (condition === "on_track") return "bg-status-ok-bg text-status-ok-text";
-  if (condition === "needs_attention") {
-    return "bg-status-warn-bg text-status-warn-text";
-  }
-  if (condition === "critical") {
-    return "bg-status-critical-bg text-status-critical-text";
-  }
-  return "bg-plan-track text-ink-muted";
+function conditionTone(condition: ReviewCondition): StatusTone {
+  if (condition === "on_track") return "ok";
+  if (condition === "needs_attention") return "warn";
+  if (condition === "critical") return "critical";
+  return "neutral";
 }
 
 function conditionColor(condition: ReviewCondition) {
@@ -596,26 +602,28 @@ function conditionColor(condition: ReviewCondition) {
 }
 
 function actionStatusColor(status: ActionStatusDatum["status"]) {
-  if (status === "Completed") return "var(--status-ok)";
-  if (status === "Open") return "var(--status-warn)";
-  if (status === "Deferred") return "var(--analysis)";
+  if (status === "Selesai") return "var(--status-ok)";
+  if (status === "Buka") return "var(--status-warn)";
+  if (status === "Ditunda") return "var(--analysis)";
   return "var(--accent)";
 }
 
 function formatCompactNumber(value: number) {
-  return new Intl.NumberFormat("en", {
+  return new Intl.NumberFormat("id", {
     notation: "compact",
     maximumFractionDigits: 1,
   }).format(value);
 }
 
 function formatMoney(value: number, currency: string) {
-  return `${currency || "Amount"} ${new Intl.NumberFormat("en", {
+  return `${currency || "Jumlah"} ${new Intl.NumberFormat("id", {
     maximumFractionDigits: 0,
   }).format(value)}`;
 }
 
 function formatDelay(value: number) {
-  if (value === 0) return "On baseline";
-  return value > 0 ? `${value} days late` : `${Math.abs(value)} days early`;
+  if (value === 0) return "Sesuai baseline";
+  return value > 0
+    ? `terlambat ${value} hari`
+    : `${Math.abs(value)} hari lebih cepat`;
 }

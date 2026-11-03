@@ -13,6 +13,7 @@ import type {
 
 type WorkerRequest = {
   job_id?: string;
+  claim_token?: string;
   project_id?: string;
   document_id?: string;
 };
@@ -31,7 +32,6 @@ type StoredDocument = {
 };
 
 const CACHE_QUERY_BATCH_SIZE = 100;
-const JOB_LEASE_MS = 15 * 60 * 1000;
 const TRANSIENT_JOB_ERRORS: Record<string, true> = {
   cost_observation_persistence_failed: true,
   document_lookup_failed: true,
@@ -62,16 +62,35 @@ export async function POST(request: NextRequest) {
 
   const payload = (await request.json()) as WorkerRequest;
   const jobId = payload.job_id;
+  const claimToken = payload.claim_token;
   const projectId = payload.project_id;
   const documentId = payload.document_id;
-  if (!jobId || !projectId || !documentId) {
+  if (!jobId || !claimToken || !projectId || !documentId) {
     return NextResponse.json(
-      { ok: false, error: "job_id, project_id, and document_id are required." },
+      { ok: false, error: "job_id, claim_token, project_id, and document_id are required." },
       { status: 400 },
     );
   }
 
   const supabase = createServiceRoleClient();
+  const { data: claimedJob, error: claimError } = await supabase
+    .from("ai_jobs")
+    .select("id, project_id, document_id")
+    .eq("id", jobId)
+    .eq("claim_token", claimToken)
+    .eq("job_type", "parse_document")
+    .eq("status", "processing")
+    .maybeSingle();
+  if (claimError || !claimedJob) return notOwnedResponse();
+  if (claimedJob.project_id !== projectId || claimedJob.document_id !== documentId) {
+    return notOwnedResponse("document_project_mismatch");
+  }
+  const { error: initialLeaseError } = await supabase.rpc("extend_document_job_lease", {
+    p_job_id: jobId,
+    p_claim_token: claimToken,
+    p_minutes: 15,
+  });
+  if (initialLeaseError) return notOwnedResponse();
   const workerStarted = performance.now();
   let workerOutcome = "failed";
   try {
@@ -87,6 +106,7 @@ export async function POST(request: NextRequest) {
     if (error) {
       return retryableResponse(supabase, {
         jobId,
+        claimToken,
         projectId,
         documentId,
         errorCode: "document_lookup_failed",
@@ -97,6 +117,7 @@ export async function POST(request: NextRequest) {
     if (!data) {
       return terminalFailureResponse(supabase, {
         jobId,
+        claimToken,
         projectId,
         documentId,
         errorCode: "document_project_mismatch",
@@ -126,7 +147,7 @@ export async function POST(request: NextRequest) {
       );
       const transient = status === 408 || status === 429 || status >= 500;
       const errorCode = transient ? "storage_download_transient_failure" : "storage_download_failed";
-      const failure = { jobId, projectId, documentId, errorCode, errorMessage: message };
+      const failure = { jobId, claimToken, projectId, documentId, errorCode, errorMessage: message };
       return transient
         ? retryableResponse(supabase, failure)
         : terminalFailureResponse(supabase, failure, 502);
@@ -146,7 +167,7 @@ export async function POST(request: NextRequest) {
         workstreamHint: document.workstream_hint,
         fileBuffer: await file.arrayBuffer(),
       },
-      createExtractionGroupStore(supabase, jobId),
+      createExtractionGroupStore(supabase, jobId, claimToken),
     );
     console.info("Document worker stage completed", {
       stage: "processing",
@@ -158,8 +179,10 @@ export async function POST(request: NextRequest) {
     });
 
     if (result.status === "failed") {
+      if (result.errorCode === "extraction_group_checkpoint_rejected") return notOwnedResponse();
       const failure = {
         jobId,
+        claimToken,
         projectId,
         documentId,
         errorCode: result.errorCode,
@@ -171,22 +194,11 @@ export async function POST(request: NextRequest) {
     }
 
     const chunkWriteStarted = performance.now();
-    const chunkWrite = await retryDocumentWrite(async () =>
-      await supabase
-        .from("document_chunks")
-        .upsert(
-          result.chunks.map((chunk) => ({
-            project_id: projectId,
-            document_id: documentId,
-            chunk_index: chunk.chunk_index,
-            chunk_text: chunk.chunk_text,
-            page_number: chunk.page_number,
-            section_label: chunk.section_label,
-            parser_metadata: chunk.parser_metadata,
-          })),
-          { onConflict: "document_id,chunk_index" },
-        ),
-    );
+    const chunkWrite = await saveDocumentChunks(supabase, {
+      jobId,
+      claimToken,
+      chunks: result.chunks,
+    });
     console.info("Document worker stage completed", {
       stage: "chunk_upsert",
       jobId,
@@ -196,8 +208,9 @@ export async function POST(request: NextRequest) {
       outcome: chunkWrite.error ? "failed" : "success",
     });
     if (chunkWrite.error) {
+      if (isOwnershipRejection(chunkWrite.error)) return notOwnedResponse();
       const failure = {
-        jobId, projectId, documentId,
+        jobId, claimToken, projectId, documentId,
         errorCode: "document_chunk_checkpoint_failed",
         errorMessage: "Document chunks could not be persisted.",
       };
@@ -207,14 +220,16 @@ export async function POST(request: NextRequest) {
     }
     const costWrite = await persistCostObservations(
       supabase,
-      projectId,
-      documentId,
+      jobId,
+      claimToken,
       result.cost_observations,
       result.chunks,
     );
-    if (costWrite?.error) {
+    if (costWrite.error) {
+      if (isOwnershipRejection(costWrite.error)) return notOwnedResponse();
       const failure = {
         jobId,
+        claimToken,
         projectId,
         documentId,
         errorCode: "cost_observation_persistence_failed",
@@ -226,21 +241,18 @@ export async function POST(request: NextRequest) {
     }
 
     const suggestionWrite = await retryDocumentWrite(async () =>
-      await supabase
-        .from("documents")
-        .update({
-          ...documentSuggestionUpdateFields(result.document_suggestions),
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", documentId)
-        .eq("project_id", projectId)
-        .select("id")
-        .maybeSingle(),
+      await supabase.rpc("persist_document_suggestions", {
+        p_job_id: jobId,
+        p_claim_token: claimToken,
+        p_suggestions: documentSuggestionUpdateFields(result.document_suggestions),
+      }),
     );
 
     if (suggestionWrite.error) {
+      if (isOwnershipRejection(suggestionWrite.error)) return notOwnedResponse();
       const failure = {
         jobId,
+        claimToken,
         projectId,
         documentId,
         errorCode: "suggestion_persistence_failed",
@@ -249,15 +261,6 @@ export async function POST(request: NextRequest) {
       return suggestionWrite.transient
         ? retryableResponse(supabase, failure)
         : terminalFailureResponse(supabase, failure, 502);
-    }
-    if (!suggestionWrite.data) {
-      return terminalFailureResponse(supabase, {
-        jobId,
-        projectId,
-        documentId,
-        errorCode: "suggestion_persistence_target_missing",
-        errorMessage: "The document no longer exists for validated suggestion persistence.",
-      }, 409);
     }
 
 
@@ -280,9 +283,11 @@ export async function POST(request: NextRequest) {
       parser_metadata: result.parserMetadata,
     });
   } catch (error) {
+    if (isOwnershipRejection(error)) return notOwnedResponse();
     const transient = isTransientDocumentWriteFailure(error);
     const failure = {
       jobId,
+      claimToken,
       projectId,
       documentId,
       errorCode: transient ? "worker_transport_transient_failure" : "worker_unhandled_error",
@@ -313,8 +318,8 @@ export async function POST(request: NextRequest) {
  */
 async function persistCostObservations(
   supabase: SupabaseClient,
-  projectId: string,
-  documentId: string,
+  jobId: string,
+  claimToken: string,
   observations: ExtractedCostObservation[],
   chunks: {
     chunk_index: number;
@@ -323,62 +328,78 @@ async function persistCostObservations(
     parser_metadata: Record<string, unknown>;
   }[],
 ) {
-  const deleteWrite = await retryDocumentWrite(async () =>
-    await supabase
-      .from("cost_observations")
-      .delete()
-      .eq("project_id", projectId)
-      .eq("document_id", documentId),
-  );
-  if (deleteWrite.error) return deleteWrite;
-  if (!observations.length) return null;
-
   const chunksByIndex = new Map(chunks.map((chunk) => [chunk.chunk_index, chunk]));
-  const rows = observations.map((observation) => {
-    const chunk = chunksByIndex.get(observation.evidence_chunk_index);
-    const sourceLocation = chunk?.parser_metadata?.sourceLocation;
-    return {
-      project_id: projectId,
-      document_id: documentId,
-      measure: observation.measure,
-      source_value: observation.source_value,
-      normalized_amount: observation.normalized_amount,
-      currency: observation.currency,
-      scope_level: observation.scope_level,
-      scope_label: observation.scope_label,
-      wbs_code: observation.wbs_code,
-      wbs_parent_code: observation.wbs_parent_code,
-      wbs_name: observation.wbs_name,
-      scope_description: observation.scope_description,
-      period_label: observation.period_label,
-      as_of_date: observation.as_of_date,
-      status_label: observation.status_label,
-      evidence_chunk_index: observation.evidence_chunk_index,
-      excerpt: observation.excerpt,
-      page_number: chunk?.page_number ?? null,
-      section_label: chunk?.section_label ?? null,
-      source_location:
-        sourceLocation && typeof sourceLocation === "object" && !Array.isArray(sourceLocation)
-          ? sourceLocation
-          : null,
-    };
-  });
-
-  // This document's prior observations were just deleted, and aggregateGroups
-  // already deduped on the full scope-aware identity (measure, scope_level,
-  // scope_label, source_value, chunk), which is exactly the database's
-  // cost_observations_scope_identity_idx key. So no row in this batch collides,
-  // and a plain insert keeps every work package's evidence. An upsert cannot be
-  // used here anyway: that index is over coalesce(scope_label, ''), and
-  // PostgREST's onConflict can only name columns, not an expression.
   return await retryDocumentWrite(async () =>
-    await supabase.from("cost_observations").insert(rows),
+    await supabase.rpc("persist_cost_observations", {
+      p_job_id: jobId,
+      p_claim_token: claimToken,
+      p_observations: observations.map((observation) => {
+        const chunk = chunksByIndex.get(observation.evidence_chunk_index);
+        const sourceLocation = chunk?.parser_metadata?.sourceLocation;
+        return {
+          measure: observation.measure,
+          source_value: observation.source_value,
+          normalized_amount: observation.normalized_amount,
+          currency: observation.currency,
+          scope_level: observation.scope_level,
+          scope_label: observation.scope_label,
+          wbs_code: observation.wbs_code,
+          wbs_parent_code: observation.wbs_parent_code,
+          wbs_name: observation.wbs_name,
+          scope_description: observation.scope_description,
+          period_label: observation.period_label,
+          as_of_date: observation.as_of_date,
+          status_label: observation.status_label,
+          evidence_chunk_index: observation.evidence_chunk_index,
+          excerpt: observation.excerpt,
+          page_number: chunk?.page_number ?? null,
+          section_label: chunk?.section_label ?? null,
+          source_location:
+            sourceLocation && typeof sourceLocation === "object" && !Array.isArray(sourceLocation)
+              ? sourceLocation
+              : null,
+        };
+      }),
+    }),
   );
 }
 
+async function saveDocumentChunks(
+  supabase: SupabaseClient,
+  {
+    jobId,
+    claimToken,
+    chunks,
+  }: {
+    jobId: string;
+    claimToken: string;
+    chunks: {
+      chunk_index: number;
+      chunk_text: string;
+      page_number: number | null;
+      section_label: string | null;
+      parser_metadata: Record<string, unknown>;
+    }[];
+  },
+) {
+  return await retryDocumentWrite(async () =>
+    await supabase.rpc("save_document_chunks", {
+      p_job_id: jobId,
+      p_claim_token: claimToken,
+      p_chunks: chunks.map((chunk) => ({
+        chunk_index: chunk.chunk_index,
+        chunk_text: chunk.chunk_text,
+        page_number: chunk.page_number,
+        section_label: chunk.section_label,
+        parser_metadata: chunk.parser_metadata,
+      })),
+    }),
+  );
+}
 function createExtractionGroupStore(
   supabase: SupabaseClient,
   jobId: string,
+  claimToken: string,
 ): DocumentExtractionGroupStore {
   return {
     async loadGroups(projectId, documentId, groupKeys) {
@@ -415,74 +436,68 @@ function createExtractionGroupStore(
     },
 
     async saveGroup(group) {
-      const upsertStarted = performance.now();
+      const started = performance.now();
       const write = await retryDocumentWrite(async () =>
-        await supabase
-          .from("document_extraction_groups")
-          .upsert(
-            {
-              project_id: group.projectId,
-              document_id: group.documentId,
-              group_key: group.groupKey,
-              content_hash: group.contentHash,
-              parser_version: group.parserVersion,
-              schema_version: group.schemaVersion,
-              group_index: group.groupIndex,
-              chunk_start_index: group.chunkStartIndex,
-              chunk_end_index: group.chunkEndIndex,
-              status: group.status,
-              result: group.result,
-              attempt_count: group.attemptCount,
-              provider: group.provider,
-              model: group.model,
-              last_error: group.lastError,
-              updated_at: new Date().toISOString(),
-            },
-            { onConflict: "document_id,group_key" },
-          ),
+        await supabase.rpc("save_extraction_group", {
+          p_job_id: jobId,
+          p_claim_token: claimToken,
+          p_group: {
+            group_key: group.groupKey,
+            content_hash: group.contentHash,
+            parser_version: group.parserVersion,
+            schema_version: group.schemaVersion,
+            group_index: group.groupIndex,
+            chunk_start_index: group.chunkStartIndex,
+            chunk_end_index: group.chunkEndIndex,
+            status: group.status,
+            result: group.result,
+            attempt_count: group.attemptCount,
+            provider: group.provider,
+            model: group.model,
+            last_error: group.lastError,
+          },
+        }),
       );
       console.info("Document worker stage completed", {
-        stage: "group_upsert",
+        stage: "group_checkpoint",
         jobId,
         projectId: group.projectId,
         documentId: group.documentId,
         groupIndex: group.groupIndex,
-        durationMs: Math.round(performance.now() - upsertStarted),
+        durationMs: Math.round(performance.now() - started),
         outcome: write.error ? "failed" : "success",
       });
       if (write.error) {
         throw Object.assign(
-          new Error("The extraction-group cache could not be written."),
-          { retryable: write.transient },
+          new Error(write.error.message ?? "The extraction-group cache could not be written."),
+          { code: write.error.code, retryable: write.transient },
         );
-      }
-      const leaseStarted = performance.now();
-      const now = new Date().toISOString();
-      const { data: leasedJob, error: leaseError } = await supabase
-        .from("ai_jobs")
-        .update({
-          lease_expires_at: new Date(Date.now() + JOB_LEASE_MS).toISOString(),
-          updated_at: now,
-        })
-        .eq("id", jobId)
-        .eq("status", "processing")
-        .select("id")
-        .maybeSingle();
-      console.info("Document worker stage completed", {
-        stage: "lease_renewal",
-        jobId,
-        projectId: group.projectId,
-        documentId: group.documentId,
-        groupIndex: group.groupIndex,
-        durationMs: Math.round(performance.now() - leaseStarted),
-        outcome: leaseError || !leasedJob ? "failed" : "success",
-      });
-      if (leaseError || !leasedJob) {
-        throw new Error("The document-worker lease could not be renewed.");
       }
     },
   };
 }
+function isOwnershipRejection(error: unknown) {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      "message" in error &&
+      typeof error.message === "string" &&
+      error.message.includes("Ownership rejected"),
+  );
+}
+
+function notOwnedResponse(errorCode = "stale_claim_token") {
+  return NextResponse.json(
+    {
+      ok: false,
+      status: "not_owned",
+      errorCode,
+      errorMessage: "This attempt lost ownership of the job; no durable write was committed.",
+    },
+    { status: 409 },
+  );
+}
+
 
 function failedResponse(errorCode: string, errorMessage: string, status: number) {
   return NextResponse.json(
@@ -495,6 +510,7 @@ async function terminalFailureResponse(
   supabase: SupabaseClient,
   failure: {
     jobId: string;
+    claimToken: string;
     projectId: string;
     documentId: string;
     errorCode: string;
@@ -517,6 +533,7 @@ async function retryableResponse(
   supabase: SupabaseClient,
   failure: {
     jobId: string;
+    claimToken: string;
     projectId: string;
     documentId: string;
     errorCode: string;
@@ -553,12 +570,14 @@ async function markJobFailed(
   supabase: SupabaseClient,
   {
     jobId,
+    claimToken,
     projectId,
     documentId,
     errorCode,
     errorMessage,
   }: {
     jobId: string;
+    claimToken: string;
     projectId: string;
     documentId: string;
     errorCode: string;
@@ -567,6 +586,7 @@ async function markJobFailed(
 ) {
   try {
     const { data, error } = await supabase.rpc("fail_document_job_attempt", {
+      fail_claim_token: claimToken,
       fail_job_id: jobId,
       fail_project_id: projectId,
       fail_document_id: documentId,
@@ -583,12 +603,14 @@ async function markJobForRetry(
   supabase: SupabaseClient,
   {
     jobId,
+    claimToken,
     projectId,
     documentId,
     errorCode,
     errorMessage,
   }: {
     jobId: string;
+    claimToken: string;
     projectId: string;
     documentId: string;
     errorCode: string;
@@ -597,6 +619,7 @@ async function markJobForRetry(
 ) {
   try {
     const { data, error } = await supabase.rpc("retry_document_job_attempt", {
+      retry_claim_token: claimToken,
       retry_job_id: jobId,
       retry_project_id: projectId,
       retry_document_id: documentId,

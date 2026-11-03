@@ -146,10 +146,33 @@ OLLAMA_API_KEY=your-ollama-api-key
 OLLAMA_CLOUD_MODEL=gpt-oss:20b
 ```
 
-The app sends model requests server-side to `{OLLAMA_CLOUD_BASE_URL}/chat`. Keep
-the key in `.env.local`; never put it in a `NEXT_PUBLIC_*` variable, browser
-code, workflow JSON, or logs. A cloud provider may send evidence to the
-configured provider; use only approved development/test evidence.
+For Google Gemini, select it explicitly and set its key and model:
+
+```env
+XASS_LLM_PROVIDER=gemini
+GEMINI_API_KEY=your-gemini-api-key
+GEMINI_MODEL=gemini-3.8-flash
+```
+
+Choose a model available to your Google AI Studio project. Create or manage the key at
+https://aistudio.google.com/apikey.
+
+For Groq, select it explicitly and set the API key and model in `.env.local`:
+
+```env
+XASS_LLM_PROVIDER=groq
+GROQ_API_KEY=your-groq-api-key
+GROQ_MODEL=your-groq-model-id
+```
+
+Choose a model available to your Groq account. Model access, pricing, and rate
+limits depend on the current model and account.
+
+Ollama Cloud requests go to `{OLLAMA_CLOUD_BASE_URL}/chat`; Gemini requests go
+to Google's `generateContent` API; Groq uses the OpenAI-compatible
+`/chat/completions` API. Keep provider keys in `.env.local`; never put them in a
+`NEXT_PUBLIC_*` variable, browser code, workflow JSON, or logs.
+A hosted provider receives source text, so use only approved development/test evidence.
 
 Document extraction requests use temperature `0` and request JSON mode where the
 provider supports it. Provider formatting is not trusted: strict schema and
@@ -304,6 +327,7 @@ Run the integration behavior suite and persistent browser workflow:
 
 ```powershell
 npm test
+npm run test:db
 npx playwright install chromium
 npm run test:e2e
 npm run test:e2e:live
@@ -318,12 +342,17 @@ single-document extraction smoke that calls the configured real provider with
 generated synthetic evidence and reports strict success or a visible failure.
 Never print model keys or use private project evidence.
 
+`npm run test:db` runs the pgTAP suites only when `XASS_DB_CONTAINER` points to a
+disposable database container; with the variable unset it safely skips. The
+runner rolls each suite back. A non-disposable container is refused unless
+`XASS_DB_ALLOW_NON_DISPOSABLE=1` is deliberately set.
+
 ## Architecture Boundary
 
 The development flow is:
 
 ```text
-TUS multi-file/ZIP intake -> Supabase Storage + ai_jobs -> n8n queue/orchestrator -> Next.js worker -> configured LLM -> Supabase evidence rows -> UI
+TUS multi-file/ZIP intake -> Supabase Storage -> fenced job claim -> Next.js worker -> fenced checkpoints -> atomic Supabase publication -> UI
 Advisor -> scoped PostgreSQL full-text search -> fresh chunk IDs/locations -> citation validation -> conversation history
 ```
 

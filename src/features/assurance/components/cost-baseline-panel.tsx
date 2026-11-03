@@ -9,6 +9,14 @@ import {
 } from "@/features/assurance/lib/cost-evidence";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SectionCard } from "@/components/ui/section-card";
+
+const measureDisplayLabels: Record<string, string> = {
+  approved_baseline: "Baseline disetujui",
+  actual_to_date: "Aktual s.d. hari ini",
+  committed: "Biaya komitmen",
+  eac: "Estimasi penyelesaian (EAC)",
+};
 
 export function CostBaselinePanel({
   projectId,
@@ -30,22 +38,15 @@ export function CostBaselinePanel({
   );
 
   return (
-    <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
-      <p className="text-sm font-medium text-ink-muted">Cost baseline</p>
-      <h2 className="mt-1 text-lg font-semibold text-ink">
-        Accept the baseline the comparison may use
-      </h2>
-      <p className="mt-2 max-w-3xl text-sm leading-6 text-ink-muted">
-        A document that calls itself approved is evidence, not an accepted
-        baseline. Budget variance compares the accepted baseline with an
-        explicitly reported estimate at completion in the same currency, and
-        nothing else.
-      </p>
-
-      <div className="mt-4 rounded-xl border border-ui-border bg-base p-4">
+    <SectionCard
+      icon={CircleDollarSign}
+      title="Baseline biaya — setujui baseline yang boleh dipakai pembanding"
+      subtitle="Dokumen yang menyebut dirinya disetujui hanyalah bukti, bukan baseline yang sudah disetujui. Variansi anggaran membandingkan baseline yang disetujui dengan estimasi penyelesaian (EAC) yang dilaporkan secara eksplisit dalam mata uang yang sama, dan tidak lebih dari itu."
+    >
+      <div className="rounded-xl border border-ui-border bg-base p-4">
         <div className="flex items-center gap-2">
           <BadgeCheck className="h-4 w-4 text-ink-muted" />
-          <p className="text-sm font-semibold text-ink">Accepted project baseline</p>
+          <p className="text-sm font-semibold text-ink">Baseline proyek yang disetujui</p>
         </div>
         {accepted ? (
           <div className="mt-2 text-sm text-ink-muted">
@@ -53,7 +54,7 @@ export function CostBaselinePanel({
               {accepted.currency} {formatNumber(accepted.amount)}
             </p>
             <p className="mt-1">
-              Effective {accepted.effectiveDate} · accepted{" "}
+              Berlaku {accepted.effectiveDate} · disetujui{" "}
               {accepted.approvedAt.slice(0, 10)}
             </p>
             {accepted.approvalNote && <p className="mt-1">{accepted.approvalNote}</p>}
@@ -62,23 +63,23 @@ export function CostBaselinePanel({
                 className="mt-1 inline-block font-semibold text-brand underline"
                 href={`/app/projects/${projectId}/documents?document=${accepted.sourceDocumentId}#document-${accepted.sourceDocumentId}`}
               >
-                Open the source document
+                Buka dokumen sumber
               </a>
             )}
           </div>
         ) : (
           <p className="mt-2 text-sm text-ink-muted">
-            None accepted yet. Budget stays More Evidence Required until a
-            reviewer accepts one.
+            Belum ada yang disetujui. Kondisi Anggaran tetap Perlu Bukti
+            Tambahan sampai seorang peninjau menyetujuinya.
           </p>
         )}
       </div>
 
-      <h3 className="mt-5 text-sm font-semibold text-ink">Baseline candidates from evidence</h3>
+      <h3 className="mt-5 text-sm font-semibold text-ink">Kandidat baseline dari bukti</h3>
       {candidates.length === 0 ? (
         <p className="mt-2 rounded-xl border border-dashed border-ui-border p-4 text-sm text-ink-muted">
-          No approved-baseline cost value has been extracted from this project&apos;s
-          processed evidence yet.
+          Belum ada nilai biaya baseline disetujui yang terekstraksi dari bukti
+          proyek ini yang sudah diproses.
         </p>
       ) : (
         <ul className="mt-2 space-y-3">
@@ -88,33 +89,33 @@ export function CostBaselinePanel({
                 <p className="font-semibold text-ink">{candidate.sourceValue}</p>
                 <p className="text-xs text-ink-muted">
                   {candidate.normalizedAmount !== null && candidate.currency
-                    ? `Reads as ${candidate.currency} ${formatNumber(candidate.normalizedAmount)}`
-                    : "Amount or currency could not be read safely from this wording"}
+                    ? `Terbaca sebagai ${candidate.currency} ${formatNumber(candidate.normalizedAmount)}`
+                    : "Jumlah atau mata uang tidak dapat dibaca dengan aman dari redaksi ini"}
                 </p>
               </div>
               <p className="mt-1 text-xs text-ink-muted">
                 {[
                   candidate.statusLabel,
                   candidate.periodLabel,
-                  candidate.asOfDate ? `as of ${candidate.asOfDate}` : null,
+                  candidate.asOfDate ? `per ${candidate.asOfDate}` : null,
                 ]
                   .filter(Boolean)
-                  .join(" · ") || "No period or status stated in the source"}
+                  .join(" · ") || "Periode atau status tidak disebutkan di sumber"}
               </p>
               <details className="mt-2 text-xs">
-                <summary className="cursor-pointer font-semibold text-ink">View source</summary>
+                <summary className="cursor-pointer font-semibold text-ink">Lihat sumber</summary>
                 <p className="mt-2 text-ink-muted">
                   <a
                     className="font-semibold text-brand underline"
                     href={`/app/projects/${projectId}/documents?document=${candidate.documentId}#document-${candidate.documentId}`}
                   >
-                    {candidate.documentTitle ?? "Source document"}
+                    {candidate.documentTitle ?? "Dokumen sumber"}
                   </a>
                   {(candidate.pageNumber || candidate.sectionLabel) && (
                     <span>
                       {" · "}
                       {[
-                        candidate.pageNumber ? `page ${candidate.pageNumber}` : null,
+                        candidate.pageNumber ? `halaman ${candidate.pageNumber}` : null,
                         candidate.sectionLabel,
                       ]
                         .filter(Boolean)
@@ -133,7 +134,7 @@ export function CostBaselinePanel({
                   <input type="hidden" name="projectId" value={projectId} />
                   <input type="hidden" name="observationId" value={candidate.id} />
                   <label className="text-xs font-medium text-ink-muted">
-                    Effective date
+                    Tanggal berlaku
                     <Input
                       type="date"
                       name="effectiveDate"
@@ -143,10 +144,10 @@ export function CostBaselinePanel({
                     />
                   </label>
                   <label className="text-xs font-medium text-ink-muted">
-                    Approval note
+                    Catatan persetujuan
                     <Input
                       name="approvalNote"
-                      placeholder="What this acceptance covers"
+                      placeholder="Cakupan persetujuan ini"
                       className="mt-1"
                     />
                   </label>
@@ -156,12 +157,12 @@ export function CostBaselinePanel({
                     disabled={candidate.normalizedAmount === null || !candidate.currency}
                   >
                     <CircleDollarSign className="h-4 w-4" />
-                    Accept as baseline
+                    Setujui sebagai baseline
                   </Button>
                 </form>
               ) : (
                 <p className="mt-3 text-xs text-ink-muted">
-                  Your project role cannot accept a baseline.
+                  Peran proyek Anda tidak dapat menyetujui baseline.
                 </p>
               )}
             </li>
@@ -172,13 +173,13 @@ export function CostBaselinePanel({
       {separate.length > 0 && (
         <details className="mt-5 rounded-xl border border-ui-border p-4 text-sm">
           <summary className="cursor-pointer font-semibold text-ink">
-            Other cost evidence kept separate ({separate.length})
+            Bukti biaya lain yang dipisahkan ({separate.length})
           </summary>
           <ul className="mt-2 space-y-2 text-xs text-ink-muted">
             {separate.map((observation) => (
               <li key={observation.id}>
                 <span className="font-semibold text-ink">
-                  {costMeasureLabels[observation.measure]}:
+                  {measureDisplayLabels[observation.measure] ?? costMeasureLabels[observation.measure]}:
                 </span>{" "}
                 {observation.sourceValue}
                 {observation.periodLabel ? ` · ${observation.periodLabel}` : ""}
@@ -186,12 +187,12 @@ export function CostBaselinePanel({
             ))}
           </ul>
           <p className="mt-2 text-xs text-ink-muted">
-            Actual and committed costs are never compared against the baseline in
-            place of a reported estimate at completion.
+            Biaya aktual dan komitmen tidak pernah dibandingkan dengan baseline
+            sebagai pengganti estimasi penyelesaian yang dilaporkan.
           </p>
         </details>
       )}
-    </section>
+    </SectionCard>
   );
 }
 
