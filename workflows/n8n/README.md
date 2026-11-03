@@ -125,6 +125,18 @@ GROQ_MODEL=your-groq-model-id
 Choose a model available to your Groq account; access, pricing, and rate limits
 vary by model and account.
 
+To use a local 9router combo instead, configure the Next.js app:
+
+```env
+XASS_LLM_PROVIDER=openai-compatible
+XASS_CLOUD_LLM_BASE_URL=http://localhost:20128/v1
+XASS_CLOUD_LLM_API_KEY=your-9router-api-key
+XASS_CLOUD_LLM_MODEL=executor-free
+```
+
+The worker requests non-streaming JSON. Restart the Next.js app after changing
+environment variables; the n8n container does not call 9router directly.
+
 The LLM variables belong to the Next.js app because its worker calls the
 configured provider after parsing a document; n8n only calls the worker.
 

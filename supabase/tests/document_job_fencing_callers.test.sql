@@ -6,7 +6,7 @@
 --   psql -v ON_ERROR_STOP=1 -f supabase/tests/document_job_fencing_callers.test.sql
 
 begin;
-select plan(60);
+select plan(63);
 
 insert into auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, created_at, updated_at)
 values ('40000000-0000-4000-8000-000000000001', 'authenticated', 'authenticated', 'caller-fencing@example.invalid', '', now(), '{}'::jsonb, now(), now())
@@ -75,10 +75,31 @@ select lives_ok(
 select is(
   (select public.persist_cost_observations(
     (select id from public.ai_jobs where claim_token = 'bbbbbbbb-0000-4000-8000-0000000000bb'),
-    'bbbbbbbb-0000-4000-8000-0000000000bb',
+    'bbbbbbbb-0000-4000-8000-0000000000bb', repeat('a', 64), 'document-parser/6',
+    'pmo-assurance-observations/1',
     jsonb_build_array(jsonb_build_object('measure', 'eac', 'source_value', 'USD 100', 'scope_level', 'project',
       'evidence_chunk_index', 0, 'excerpt', 'Owner B chunk zero.', 'provider', 'fixture', 'model', 'fixture')))),
-  1, 'owner B persists cost observations through the fenced RPC'
+  1, 'owner B persists versioned cost observations through the fenced RPC'
+);
+select is(
+  (select public.persist_assurance_observations(
+    (select id from public.ai_jobs where claim_token = 'bbbbbbbb-0000-4000-8000-0000000000bb'),
+    'bbbbbbbb-0000-4000-8000-0000000000bb', repeat('a', 64), 'document-parser/6',
+    'pmo-assurance-observations/1',
+    jsonb_build_array(jsonb_build_object('domain', 'schedule', 'observation_type', 'milestone',
+      'observation', jsonb_build_object('label', 'Release', 'raw_date', '2026-06-30', 'date', '2026-06-30'),
+      'evidence_chunk_index', 0, 'excerpt', 'Release 2026-06-30.')),
+    jsonb_build_array(
+      jsonb_build_object('domain', 'budget', 'state', 'processed', 'total_groups', 1, 'processed_groups', 1),
+      jsonb_build_object('domain', 'schedule', 'state', 'processed', 'total_groups', 1, 'processed_groups', 1),
+      jsonb_build_object('domain', 'progress', 'state', 'absent', 'total_groups', 1, 'processed_groups', 1),
+      jsonb_build_object('domain', 'risk', 'state', 'absent', 'total_groups', 1, 'processed_groups', 1)))),
+  1, 'owner B persists typed observations and coverage through the fenced RPC'
+);
+select is(
+  (select assurance_observation_contract_version from public.documents
+    where id = '40000000-0000-4000-8000-000000000011'),
+  'pmo-assurance-observations/1', 'document current pointer follows persisted observations'
 );
 select lives_ok(
   format('select public.persist_document_suggestions(''%s'', ''bbbbbbbb-0000-4000-8000-0000000000bb'', ''%s''::jsonb)',
@@ -114,11 +135,18 @@ select throws_ok(
   'stale extraction group write is rejected'
 );
 select throws_ok(
-  format('select public.persist_cost_observations(''%s'', ''aaaaaaaa-0000-4000-8000-0000000000aa'', ''[]''::jsonb)',
-    (select id from public.ai_jobs where claim_token = 'bbbbbbbb-0000-4000-8000-0000000000bb')),
+  format('select public.persist_cost_observations(''%s'', ''aaaaaaaa-0000-4000-8000-0000000000aa'', ''%s'', ''document-parser/6'', ''pmo-assurance-observations/1'', ''[]''::jsonb)',
+    (select id from public.ai_jobs where claim_token = 'bbbbbbbb-0000-4000-8000-0000000000bb'), repeat('a', 64)),
   'P0001',
   'Ownership rejected: this attempt lost ownership of the job (stale claim token).',
   'stale cost observation write is rejected'
+);
+select throws_ok(
+  format('select public.persist_assurance_observations(''%s'', ''aaaaaaaa-0000-4000-8000-0000000000aa'', ''%s'', ''document-parser/6'', ''pmo-assurance-observations/1'', ''[]''::jsonb, ''[]''::jsonb)',
+    (select id from public.ai_jobs where claim_token = 'bbbbbbbb-0000-4000-8000-0000000000bb'), repeat('a', 64)),
+  'P0001',
+  'Ownership rejected: this attempt lost ownership of the job (stale claim token).',
+  'stale assurance observation write is rejected'
 );
 select throws_ok(
   format('select public.persist_document_suggestions(''%s'', ''aaaaaaaa-0000-4000-8000-0000000000aa'', ''{}''::jsonb)',

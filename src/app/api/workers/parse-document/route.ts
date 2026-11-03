@@ -9,6 +9,8 @@ import type {
   DocumentExtractionGroupCacheRow,
   DocumentExtractionGroupStore,
   ExtractedCostObservation,
+  ExtractedAssuranceObservationCoverage,
+  ExtractedAssuranceObservations,
 } from "../../../../../worker/src/services/document-extraction";
 
 type WorkerRequest = {
@@ -33,6 +35,7 @@ type StoredDocument = {
 
 const CACHE_QUERY_BATCH_SIZE = 100;
 const TRANSIENT_JOB_ERRORS: Record<string, true> = {
+  assurance_observation_persistence_failed: true,
   cost_observation_persistence_failed: true,
   document_lookup_failed: true,
   extraction_group_cache_unavailable: true,
@@ -224,6 +227,9 @@ export async function POST(request: NextRequest) {
       claimToken,
       result.cost_observations,
       result.chunks,
+      result.source_content_hash,
+      result.parser_version,
+      result.assurance_observation_contract_version,
     );
     if (costWrite.error) {
       if (isOwnershipRejection(costWrite.error)) return notOwnedResponse();
@@ -236,6 +242,32 @@ export async function POST(request: NextRequest) {
         errorMessage: "Validated cost evidence could not be persisted.",
       };
       return costWrite.transient
+        ? retryableResponse(supabase, failure)
+        : terminalFailureResponse(supabase, failure, 502);
+    }
+
+    const observationWrite = await persistAssuranceObservations(
+      supabase,
+      jobId,
+      claimToken,
+      result.source_content_hash,
+      result.parser_version,
+      result.assurance_observation_contract_version,
+      result.assurance_observations,
+      result.assurance_observation_coverage,
+      result.chunks,
+    );
+    if (observationWrite.error) {
+      if (isOwnershipRejection(observationWrite.error)) return notOwnedResponse();
+      const failure = {
+        jobId,
+        claimToken,
+        projectId,
+        documentId,
+        errorCode: "assurance_observation_persistence_failed",
+        errorMessage: "Validated assurance observations and coverage could not be persisted.",
+      };
+      return observationWrite.transient
         ? retryableResponse(supabase, failure)
         : terminalFailureResponse(supabase, failure, 502);
     }
@@ -278,6 +310,11 @@ export async function POST(request: NextRequest) {
       alerts: result.alerts,
       actions: result.actions,
       cost_observations: result.cost_observations,
+      source_content_hash: result.source_content_hash,
+      parser_version: result.parser_version,
+      assurance_observation_contract_version: result.assurance_observation_contract_version,
+      assurance_observations: result.assurance_observations,
+      assurance_observation_coverage: result.assurance_observation_coverage,
       document_suggestions: result.document_suggestions,
       anomalies: result.anomalies,
       parser_metadata: result.parserMetadata,
@@ -327,12 +364,18 @@ async function persistCostObservations(
     section_label: string | null;
     parser_metadata: Record<string, unknown>;
   }[],
+  sourceContentHash: string,
+  parserVersion: string,
+  contractVersion: string,
 ) {
   const chunksByIndex = new Map(chunks.map((chunk) => [chunk.chunk_index, chunk]));
   return await retryDocumentWrite(async () =>
     await supabase.rpc("persist_cost_observations", {
       p_job_id: jobId,
       p_claim_token: claimToken,
+      p_source_content_hash: sourceContentHash,
+      p_parser_version: parserVersion,
+      p_contract_version: contractVersion,
       p_observations: observations.map((observation) => {
         const chunk = chunksByIndex.get(observation.evidence_chunk_index);
         const sourceLocation = chunk?.parser_metadata?.sourceLocation;
@@ -360,6 +403,58 @@ async function persistCostObservations(
               : null,
         };
       }),
+    }),
+  );
+}
+
+async function persistAssuranceObservations(
+  supabase: SupabaseClient,
+  jobId: string,
+  claimToken: string,
+  sourceContentHash: string,
+  parserVersion: string,
+  contractVersion: string,
+  observations: ExtractedAssuranceObservations,
+  coverage: ExtractedAssuranceObservationCoverage[],
+  chunks: {
+    chunk_index: number;
+    page_number: number | null;
+    section_label: string | null;
+    parser_metadata: Record<string, unknown>;
+  }[],
+) {
+  const chunksByIndex = new Map(chunks.map((chunk) => [chunk.chunk_index, chunk]));
+  const rows = [
+    ...observations.milestones.map((observation) => ({ domain: "schedule", observation_type: "milestone", observation })),
+    ...observations.progress.map((observation) => ({ domain: "progress", observation_type: "progress", observation })),
+    ...observations.risk_snapshots.map((observation) => ({ domain: "risk", observation_type: "risk_snapshot", observation })),
+    ...observations.risk_register_statements.map((observation) => ({ domain: "risk", observation_type: "risk_register_statement", observation })),
+  ].map(({ domain, observation_type, observation }) => {
+    const chunk = chunksByIndex.get(observation.evidence_chunk_index);
+    const sourceLocation = chunk?.parser_metadata?.sourceLocation;
+    return {
+      domain,
+      observation_type,
+      observation,
+      evidence_chunk_index: observation.evidence_chunk_index,
+      excerpt: observation.excerpt,
+      page_number: chunk?.page_number ?? null,
+      section_label: chunk?.section_label ?? null,
+      source_location:
+        sourceLocation && typeof sourceLocation === "object" && !Array.isArray(sourceLocation)
+          ? sourceLocation
+          : null,
+    };
+  });
+  return await retryDocumentWrite(async () =>
+    await supabase.rpc("persist_assurance_observations", {
+      p_job_id: jobId,
+      p_claim_token: claimToken,
+      p_source_content_hash: sourceContentHash,
+      p_parser_version: parserVersion,
+      p_contract_version: contractVersion,
+      p_observations: rows,
+      p_coverage: coverage,
     }),
   );
 }

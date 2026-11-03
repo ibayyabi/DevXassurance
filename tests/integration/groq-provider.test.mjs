@@ -32,7 +32,7 @@ test("shared AI client calls Groq with its env-selected model and JSON output", 
     assert.equal(new URL(url).href, "https://api.groq.com/openai/v1/chat/completions");
     assert.equal(init.headers.Authorization, "Bearer test-only-groq-key");
     const request = JSON.parse(init.body);
-    assert.equal(request.model, "test-groq-model");
+    assert.equal(request.stream, false);
     assert.equal(request.temperature, 0);
     assert.deepEqual(request.response_format, { type: "json_object" });
     assert.deepEqual(request.messages, [

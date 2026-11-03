@@ -7,6 +7,7 @@ import {
 import { documentTypes } from "../../../src/features/documents/lib/constants";
 import type { ParsedChunk, ParsedSourceReference } from "./document-parser";
 import { isRecord } from "../types/guards";
+import { citedTextSupportsNumericValue, containsNumericValue } from "../../../src/features/documents/lib/source-value-validation";
 
 export type DocumentExtractionContext = {
   projectId: string;
@@ -108,6 +109,82 @@ export type ExtractedCostObservation = {
   excerpt: string;
 };
 
+export type AssuranceObservationDomain = "budget" | "schedule" | "progress" | "risk";
+export type AssuranceCoverageState = "processed" | "unprocessed" | "ambiguous_conflicting" | "absent";
+export const ASSURANCE_OBSERVATION_CONTRACT_VERSION = "pmo-assurance-observations/1";
+
+export type ExtractedMilestoneObservation = {
+  label: string;
+  raw_date: string | null;
+  date: string | null;
+  scope_level: "project" | "wbs" | "unknown";
+  scope_label: string | null;
+  period_label: string | null;
+  as_of_date: string | null;
+  evidence_chunk_index: number;
+  excerpt: string;
+};
+
+export type ExtractedProgressObservation = {
+  raw_value: string;
+  percent: number;
+  scope_level: "project" | "wbs" | "unknown";
+  scope_label: string | null;
+  period_label: string | null;
+  as_of_date: string | null;
+  evidence_chunk_index: number;
+  excerpt: string;
+};
+
+export type ExtractedRiskSnapshot = {
+  risk_id: string | null;
+  name: string | null;
+  description: string | null;
+  status: string | null;
+  rating_label: string | null;
+  rating_value: number | null;
+  scale_label: string | null;
+  owner: string | null;
+  mitigation: string | null;
+  mitigation_due_date: string | null;
+  raw_mitigation_due_date: string | null;
+  wbs: string | null;
+  period_label: string | null;
+  as_of_date: string | null;
+  raw_value: string;
+  evidence_chunk_index: number;
+  excerpt: string;
+};
+
+export type ExtractedRiskRegisterStatement = {
+  state: "no_open_high_or_critical" | "open_risk_reported";
+  raw_value: string;
+  period_label: string | null;
+  as_of_date: string | null;
+  evidence_chunk_index: number;
+  excerpt: string;
+};
+
+export type ExtractedAssuranceObservationCoverage = {
+  domain: AssuranceObservationDomain;
+  state: AssuranceCoverageState;
+  total_groups: number;
+  processed_groups: number;
+  reason: string | null;
+};
+
+type GroupAssuranceObservationCoverage = Pick<
+  ExtractedAssuranceObservationCoverage,
+  "domain" | "state" | "reason"
+>;
+
+export type ExtractedAssuranceObservations = {
+  milestones: ExtractedMilestoneObservation[];
+  progress: ExtractedProgressObservation[];
+  risk_snapshots: ExtractedRiskSnapshot[];
+  risk_register_statements: ExtractedRiskRegisterStatement[];
+};
+
 export type DocumentSuggestions = {
   suggested_document_type: string | null;
   suggested_document_date: string | null;
@@ -145,6 +222,8 @@ export type ExtractedHealthSnapshot = {
 export type DocumentExtraction = {
   provider: string;
   model: string;
+  source_content_hash: string;
+  parser_version: string;
   facts: ExtractedFact[];
   summary: {
     summary_text: string;
@@ -156,6 +235,9 @@ export type DocumentExtraction = {
   alerts: ExtractedAlert[];
   actions: ExtractedAction[];
   cost_observations: ExtractedCostObservation[];
+  assurance_observations: ExtractedAssuranceObservations;
+  assurance_observation_coverage: ExtractedAssuranceObservationCoverage[];
+  assurance_observation_contract_version: string;
   document_suggestions: DocumentSuggestions;
   sheet_interpretations: SheetInterpretation[];
   quality_warnings: string[];
@@ -229,6 +311,8 @@ type GroupExtraction = {
   alerts: ExtractedAlert[];
   actions: ExtractedAction[];
   cost_observations: ExtractedCostObservation[];
+  assurance_observations: ExtractedAssuranceObservations;
+  assurance_observation_coverage: GroupAssuranceObservationCoverage[];
   group_metadata_suggestions: GroupMetadataSuggestions;
   sheet_interpretation?: SheetInterpretation;
   quality_warnings: string[];
@@ -257,7 +341,7 @@ type GroupAttemptResult = {
 type GroupAttemptError = Error & { attempts: number; errorCode: string };
 class TransientProviderError extends Error {}
 
-const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/13";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/15";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -270,8 +354,46 @@ const MAX_FACTS_PER_GROUP = 50;
 const MAX_ALERTS_PER_GROUP = 20;
 const MAX_ACTIONS_PER_GROUP = 20;
 const MAX_COST_OBSERVATIONS_PER_GROUP = 40;
+const MAX_ASSURANCE_OBSERVATIONS_PER_GROUP = 40;
 const MAX_COST_EXCERPT_CONTEXT = 240;
 const COST_MEASURES = costMeasures;
+const COST_MEASURE_SOURCE_CUES: Record<ExtractedCostObservation["measure"], RegExp> = {
+  approved_baseline: /\b(?:approved|disetujui)\b[\s\S]{0,60}\b(?:baseline|budget|anggaran)\b|\b(?:baseline|budget|anggaran)\b[\s\S]{0,60}\b(?:approved|disetujui)\b/i,
+  actual_to_date: /\b(?:actual|aktual|realisasi)\b/i,
+  committed: /\b(?:committed|commitment|komitmen|terikat)\b/i,
+  eac: /\b(?:eac|estimate at completion|estimasi biaya penyelesaian|perkiraan biaya penyelesaian)\b/i,
+};
+function costMeasureMatchesCitation(
+  measure: ExtractedCostObservation["measure"],
+  sourceValue: string,
+  citedText: string,
+): boolean {
+  if (!sourceValue.trim()) return false;
+  const text = citedText.toLocaleLowerCase();
+  const value = sourceValue.toLocaleLowerCase();
+  const roles = new Set<string>();
+  let valueIndex = text.indexOf(value);
+  if (valueIndex < 0) return false;
+
+  while (valueIndex >= 0) {
+    const start = Math.max(0, valueIndex - MAX_COST_EXCERPT_CONTEXT);
+    const context = text.slice(start, valueIndex);
+    const nearby: Array<{ role: string; distance: number }> = [];
+    for (const [role, cue] of Object.entries(COST_MEASURE_SOURCE_CUES)) {
+      const expression = new RegExp(cue.source, `${cue.flags}g`);
+      for (const match of context.matchAll(expression)) {
+        nearby.push({ role, distance: Math.abs(start + match.index! + match[0].length - valueIndex) });
+      }
+    }
+    const nearestDistance = Math.min(...nearby.map((entry) => entry.distance));
+    const nearest = nearby.filter((entry) => entry.distance === nearestDistance);
+    if (!nearest.length || new Set(nearest.map((entry) => entry.role)).size !== 1) return false;
+    roles.add(nearest[0].role);
+    valueIndex = text.indexOf(value, valueIndex + value.length);
+  }
+
+  return roles.size === 1 && roles.has(measure);
+}
 const COST_SCOPE_LEVELS = ["project", "wbs"] as const;
 const MAX_MODEL_STRING_LENGTH = 5000;
 const MAX_DOCUMENT_GROUPS = 32;
@@ -502,7 +624,7 @@ export async function extractDocumentGroups(
   const completed = groupResults as NonNullable<(typeof groupResults)[number]>[];
   const providers = [...new Set(completed.map((group) => group.provider))];
   const models = [...new Set(completed.map((group) => group.model))];
-  const aggregation = aggregateGroups(completed, groups, providers, models, documentClassification);
+  const aggregation = aggregateGroups(completed, groups, providers, models, documentClassification, contentHash, parserVersion);
   const summary = await synthesizeExecutiveSummary(job, completed, aggregation.quality_warnings, chunks, provider);
   return {
     ok: true,
@@ -1080,9 +1202,14 @@ Rules:
 - A source-group health assessment is not a document comparison. Do not claim change or variance unless both values appear in these sources.
 - Formula expressions are not evaluated. Only cached values explicitly labeled as stored cache may be described. Missing, empty, or error cache yields formula_result_unavailable and must not generate numeric values, statuses, variances, progress, or facts. Do not recalculate, interpolate, or infer any formula result.
 - cost_observations collect project cost evidence found anywhere in these sources, whatever the artifact's primary type. Report one entry per stated cost value, copying source_value exactly as written in its cited source, including its currency wording and digit separators. Never convert, total, or restate a value.
-- Choose the cost measure from what the source says: approved_baseline (an approved or controlled budget reference), actual_to_date (cost already incurred), committed (contractually committed or ordered cost), eac (an explicitly reported total forecast or estimate at completion). Never record an actual or committed value as eac, and never record a value whose meaning the source does not state.
+- Choose the cost measure from what the source says: approved_baseline (an approved or controlled budget reference), actual_to_date (cost already incurred), committed (contractually committed or ordered cost), eac (an explicitly reported total forecast or estimate at completion). Never record an actual or committed value as eac, and never record a value whose meaning the source does not state. Return [] only after processing this complete group and finding no cost values.
+- assurance_observations collect every source-backed milestone date, explicitly reported progress value, and item-level risk snapshot in this group, whatever the artifact's primary type. Do not infer baseline/current role; reviewer selection assigns that role later. Keep source scope, period, raw wording, and exact excerpt. Return [] for each array only when this complete group contains no such observation.
+- Milestones: keep the source label and raw date text. Normalize date only when the source explicitly gives an ISO YYYY-MM-DD date; do not convert locale dates. Set scope_level to project, wbs, or unknown from the source; WBS requires its exact scope_label.
+- Progress: report one entry per stated percentage, preserving 0 and the stated project/WBS scope. raw_value must be exact source wording; percent is the same percentage-point value (0–100), never a fraction, sum, average, or forecast. Omit non-numeric or unclear values; use unknown only when the scope is unclear.
+- Risk: report each item separately with its source risk ID, status, source rating label/value/scale, owner, mitigation, mitigation due date, WBS, and period when stated. raw_value and excerpt must be verbatim source text. A register statement may say no_open_high_or_critical only when it explicitly states that no open high or critical risks exist; otherwise use open_risk_reported only for an explicit open-risk statement.
+- Never derive risk counts, conditions, changes, or dates. Do not turn no extracted rows into a claim that no risks exist. Unsupported values are omitted; the application validates the raw value and computes comparisons.
 - The application decides which cost values are comparable, normalizes amounts, and accepts baselines. Do not compare, calculate a variance, or claim that any value is approved for comparison.
-- Return exactly one complete top-level JSON object: no leading text, trailing text, second JSON value, markdown, or code fence; nothing may follow its final closing brace. Use at most 50 facts, 20 alerts, 20 actions, and ${MAX_COST_OBSERVATIONS_PER_GROUP} cost observations.
+- Return exactly one complete top-level JSON object: no leading text, trailing text, second JSON value, markdown, or code fence; nothing may follow its final closing brace. Use at most 50 facts, 20 alerts, 20 actions, ${MAX_COST_OBSERVATIONS_PER_GROUP} cost observations, and ${MAX_ASSURANCE_OBSERVATIONS_PER_GROUP} entries in each assurance observation array.
 
 Document context:
 - title: ${JSON.stringify(job.title ?? job.fileName)}
@@ -1103,6 +1230,12 @@ Required JSON schema:
   "alerts": [{"severity":"low|medium|high|critical","impacted_area":"...","explanation":"...","evidence_count":1,"recommended_action":"...","source_id":"..."}],
   "actions": [{"title":"...","owner_name":null,"priority":"low|medium|high","status":"open","source_id":"..."}],
   "cost_observations": [{"measure":"approved_baseline|actual_to_date|committed|eac","source_value":"exact source text of the amount","scope_level":"project|wbs","scope_label":null,"wbs_code":null,"wbs_parent_code":null,"wbs_name":null,"scope_description":null,"period_label":null,"as_of_date":null,"status_label":null,"source_id":"..."}],
+  "assurance_observations": {
+    "milestones": [{"label":"exact event label","raw_date":null,"date":null,"scope_level":"project|wbs|unknown","scope_label":null,"period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}],
+    "progress": [{"raw_value":"exact percentage wording","percent":0,"scope_level":"project|wbs|unknown","scope_label":null,"period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}],
+    "risk_snapshots": [{"risk_id":null,"name":null,"description":null,"status":null,"rating_label":null,"rating_value":null,"scale_label":null,"owner":null,"mitigation":null,"mitigation_due_date":null,"raw_mitigation_due_date":null,"wbs":null,"period_label":null,"as_of_date":null,"raw_value":"verbatim source text","excerpt":"verbatim source excerpt","source_id":"..."}],
+    "risk_register_statements": [{"state":"no_open_high_or_critical|open_risk_reported","raw_value":"verbatim source text","period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}]
+  },
   "group_metadata_suggestions": {"suggested_document_date":null,"detected_reporting_period":null,"suggested_workstream":null,"source_id":null},
   "sheet_interpretation": {"interpretation_status":"resolved|ambiguous|unknown","structure_type":"table|key_value|timeline_gantt|narrative|instructions_template|mixed|unknown","sheet_name":"...","source_ids":["..."],"header_candidates":[{"label":"exact source header text","source_ids":["..."]}],"column_roles":[{"column":"A","role":"...","source_ids":["..."]}],"candidate_observations":[{"raw_value":"exact source value","normalized_value":null,"value_type":null,"unit":null,"period":null,"source_ids":["..."]}],"warnings":["..."]}
 }
@@ -1111,7 +1244,8 @@ For health snapshots, return exactly one entry for every listed dimension. Use e
 Other statuses require a matching source_id and a score within green 80-100, amber 50-79, or red 0-49.
 Health status_text and source_summary fields must each be nonempty strings no longer than 500 characters.
 Group metadata suggestions are limited to document date, reporting period, and workstream. Every non-null suggestion requires a valid source_id.
-For cost observations, source_value must be text present in the cited source and scope_level "wbs" requires the work-package code or name in scope_label. For a WBS value, also capture the work package's stated identity from the source: wbs_code (its own code), wbs_parent_code (its parent's code), wbs_name (its name), and scope_description (its stated deliverable or scope). Leave any of these null when the source does not state it, and never invent a code or a canonical identity. For a project-total value leave all four null. Report as_of_date as YYYY-MM-DD and leave period_label as the source's own wording. Omit the array when these sources state no cost value.
+For cost observations, source_value must be text present in the cited source and scope_level "wbs" requires the work-package code or name in scope_label. For a WBS value, also capture the work package's stated identity from the source: wbs_code (its own code), wbs_parent_code (its parent's code), wbs_name (its name), and scope_description (its stated deliverable or scope). Leave any of these null when the source does not state it, and never invent a code or a canonical identity. For a project-total value leave all four null. Report as_of_date as YYYY-MM-DD and leave period_label as the source's own wording. Return [] when these sources state no cost value.
+- Every assurance observation requires an excerpt and citation source_id from this group. Each non-null raw value, label, status, rating, owner, mitigation, WBS, and normalized date/number must be supported by that excerpt. Use null rather than interpreting a formula without a stored cache. Return all four arrays even when empty.
 Report document dates as YYYY-MM-DD and reporting periods as their first day YYYY-MM-01.
 sheet_interpretation is candidate-only and may appear only for parser-flagged ambiguous XLSX groups. Never invent cells, sheets, headers, cached values, dates, owners, or formula results. Cite each header, column role, and observation with source_ids from this group. The worker resolves those IDs to parser-authored sheet/cell/range locators; never provide locators yourself. Each header label and observation raw_value must be exact text present in its cited source. Normalized values remain candidates and must not replace raw evidence. If the group is not flagged ambiguous, omit the field.${correction}`;
 }
@@ -1195,6 +1329,7 @@ async function requestModel(provider: ModelProvider, prompt: string) {
       ? {
           model: provider.model,
           temperature: 0,
+          stream: false,
           response_format: { type: "json_object" },
           messages,
         }
@@ -1345,6 +1480,22 @@ function validateGroupExtraction(
   const warnInvalidRow = (path: string, rowErrors: string[]) => {
     if (rowErrors.length) qualityWarnings.push(`${path} was excluded because ${[...new Set(rowErrors)].join("; ")}.`);
   };
+  const observationWarnings: Record<AssuranceObservationDomain, string[]> = {
+    budget: [],
+    schedule: [],
+    progress: [],
+    risk: [],
+  };
+  const warnObservationInvalidRow = (
+    domain: AssuranceObservationDomain,
+    path: string,
+    rowErrors: string[],
+  ) => {
+    if (!rowErrors.length) return;
+    const warning = `${path} was excluded because ${[...new Set(rowErrors)].join("; ")}.`;
+    qualityWarnings.push(warning);
+    observationWarnings[domain].push(warning);
+  };
   const allowedSources = allowedSourceCitations(group);
 
   const facts: ExtractedFact[] = [];
@@ -1365,6 +1516,17 @@ function validateGroupExtraction(
       const citation = requiredCitation(fact, allowedSources, path, rowErrors, fromCache);
       if (citation && citationHasUnavailableFormula(group, citation)) {
         rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support an extracted fact.`);
+      }
+      if (
+        citation &&
+        [originalValue, extractedText].some(
+          (value) => value !== null && !citedTextSupportsNumericValue(value, citation.excerpt),
+        )
+      ) {
+        // A material value that disagrees with the cited text is rejected even
+        // when the citation itself is valid: an 8% source must not validate an
+        // 80% claim, at any confidence.
+        rowErrors.push(`${path}.original_value does not numerically match the cited source and cannot be accepted from the excerpt alone.`);
       }
       if (!FACT_TYPES.includes(factType as (typeof FACT_TYPES)[number])) rowErrors.push(`${path}.fact_type is invalid`);
       if (rowErrors.length) {
@@ -1575,6 +1737,9 @@ function validateGroupExtraction(
   }
 
   const costObservations: ExtractedCostObservation[] = [];
+  if (value.cost_observations === undefined) {
+    errors.push("cost_observations must be an array; use [] when this group has no cost evidence");
+  }
   if (value.cost_observations !== undefined) {
     if (!Array.isArray(value.cost_observations) || value.cost_observations.length > MAX_COST_OBSERVATIONS_PER_GROUP) {
       errors.push(`cost_observations must be an array with at most ${MAX_COST_OBSERVATIONS_PER_GROUP} entries`);
@@ -1583,7 +1748,7 @@ function validateGroupExtraction(
         const path = `cost_observations[${index}]`;
         const rowErrors: string[] = [];
         if (!isRecord(observation)) {
-          warnInvalidRow(path, [`${path} must be an object`]);
+          warnObservationInvalidRow("budget", path, [`${path} must be an object`]);
           return;
         }
         const measure = stringField(observation.measure);
@@ -1598,6 +1763,15 @@ function validateGroupExtraction(
         const statusLabel = nullableBoundedString(observation.status_label, `${path}.status_label`, rowErrors, 200);
         const asOfDate = nullableIsoDate(observation.as_of_date ?? null, `${path}.as_of_date`, rowErrors);
         const citation = requiredCitation(observation, allowedSources, path, rowErrors, fromCache);
+        const measureCue = COST_MEASURE_SOURCE_CUES[measure as ExtractedCostObservation["measure"]];
+        if (
+          citation &&
+          sourceValue &&
+          measureCue &&
+          !costMeasureMatchesCitation(measure as ExtractedCostObservation["measure"], sourceValue, citation.excerpt)
+        ) {
+          rowErrors.push(`${path}.measure does not match its cited source`);
+        }
         if (!COST_MEASURES.includes(measure as (typeof COST_MEASURES)[number])) {
           rowErrors.push(`${path}.measure is invalid`);
         }
@@ -1607,14 +1781,29 @@ function validateGroupExtraction(
         if (scopeLevel === "wbs" && !scopeLabel) {
           rowErrors.push(`${path}.scope_label is required for a work-package cost value`);
         }
+        if (
+          citation &&
+          scopeLevel === "wbs" &&
+          scopeLabel &&
+          !citation.excerpt.toLocaleLowerCase().includes(scopeLabel.toLocaleLowerCase())
+        ) {
+          rowErrors.push(`${path}.scope_label is not present in the cited source`);
+        }
         if (citation && citationHasUnavailableFormula(group, citation)) {
           rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support a cost value`);
         }
-        if (citation && sourceValue && !citation.excerpt.includes(sourceValue)) {
-          rowErrors.push(`${path}.source_value is not present in the cited source`);
+        if (citation && sourceValue) {
+          // Exact wording still needs to agree numerically; substring matches
+          // such as "8" inside "80%" are not evidence of the same value.
+          const hasNumericValue = containsNumericValue(sourceValue);
+          const supported = citation.excerpt.includes(sourceValue) && (!hasNumericValue ||
+            citedTextSupportsNumericValue(sourceValue, citation.excerpt));
+          if (!supported) {
+            rowErrors.push(`${path}.source_value is not present in the cited source`);
+          }
         }
         if (rowErrors.length) {
-          warnInvalidRow(path, rowErrors);
+          warnObservationInvalidRow("budget", path, rowErrors);
           return;
         }
         costObservations.push({
@@ -1640,6 +1829,274 @@ function validateGroupExtraction(
       });
     }
   }
+  const assuranceObservations: ExtractedAssuranceObservations = {
+    milestones: [],
+    progress: [],
+    risk_snapshots: [],
+    risk_register_statements: [],
+  };
+  const assuranceValue = isRecord(value.assurance_observations)
+    ? value.assurance_observations
+    : null;
+  if (!assuranceValue) {
+    errors.push("assurance_observations must be an object with all four arrays");
+  }
+  const rowsFor = (key: keyof ExtractedAssuranceObservations) => {
+    const rows = assuranceValue?.[key];
+    if (!Array.isArray(rows) || rows.length > MAX_ASSURANCE_OBSERVATIONS_PER_GROUP) {
+      errors.push(`assurance_observations.${key} must be an array with at most ${MAX_ASSURANCE_OBSERVATIONS_PER_GROUP} entries`);
+      return [];
+    }
+    return rows;
+  };
+  const excerptFor = (
+    item: Record<string, unknown>,
+    citation: SourceCitation | null,
+    path: string,
+    rowErrors: string[],
+  ) => {
+    const excerpt = boundedString(item.excerpt, `${path}.excerpt`, rowErrors, 1200);
+    if (citation && excerpt && !citation.excerpt.includes(excerpt)) {
+      rowErrors.push(`${path}.excerpt is not present in the cited source`);
+    }
+    if (citation && excerpt && citationHasUnavailableFormula(group, citation)) {
+      rowErrors.push(`${path}.source cites formula_result_unavailable`);
+    }
+    return excerpt;
+  };
+  const textIsCited = (candidate: string | null, excerpt: string | null) =>
+    !candidate || Boolean(excerpt?.toLocaleLowerCase().includes(candidate.toLocaleLowerCase()));
+  const checkedDate = (
+    value: unknown,
+    excerpt: string | null,
+    path: string,
+    rowErrors: string[],
+  ) => {
+    const date = nullableIsoDate(value ?? null, path, rowErrors);
+    if (date && !excerpt?.includes(date)) rowErrors.push(`${path} is not present as an ISO date in the cited excerpt`);
+    return date;
+  };
+  const milestones = rowsFor("milestones");
+  milestones.forEach((item, index) => {
+    const path = `assurance_observations.milestones[${index}]`;
+    const rowErrors: string[] = [];
+    if (!isRecord(item)) {
+      warnObservationInvalidRow("schedule", path, [`${path} must be an object`]);
+      return;
+    }
+    const label = boundedString(item.label, `${path}.label`, rowErrors, 500);
+    const rawDate = nullableBoundedString(item.raw_date ?? null, `${path}.raw_date`, rowErrors, 100);
+    const scopeLevel = stringField(item.scope_level);
+    const scopeLabel = nullableBoundedString(item.scope_label ?? null, `${path}.scope_label`, rowErrors, 500);
+    const periodLabel = nullableBoundedString(item.period_label ?? null, `${path}.period_label`, rowErrors, 200);
+    const citation = requiredCitation(item, allowedSources, path, rowErrors, fromCache);
+    const excerpt = excerptFor(item, citation, path, rowErrors);
+    const date = checkedDate(item.date ?? null, excerpt, `${path}.date`, rowErrors);
+    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    if (!["project", "wbs", "unknown"].includes(scopeLevel)) rowErrors.push(`${path}.scope_level is invalid`);
+    if (scopeLevel === "wbs" && !scopeLabel) rowErrors.push(`${path}.scope_label is required for WBS scope`);
+    if (scopeLevel !== "wbs" && scopeLabel) rowErrors.push(`${path}.scope_label is only valid for WBS scope`);
+    if (rawDate && !excerpt?.includes(rawDate)) rowErrors.push(`${path}.raw_date is not present in the cited excerpt`);
+    if (date && rawDate !== date) rowErrors.push(`${path}.date can only normalize an exact ISO raw_date`);
+    if (!textIsCited(label, excerpt)) rowErrors.push(`${path}.label is not present in the cited excerpt`);
+    if (!textIsCited(scopeLabel, excerpt)) rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
+    if (!textIsCited(periodLabel, excerpt)) rowErrors.push(`${path}.period_label is not present in the cited excerpt`);
+    if (!rawDate && !date) rowErrors.push(`${path} must contain a source-reported date`);
+    if (rowErrors.length) {
+      warnObservationInvalidRow("schedule", path, rowErrors);
+      return;
+    }
+    assuranceObservations.milestones.push({
+      label: label!,
+      raw_date: rawDate!,
+      date: date ?? null,
+      scope_level: scopeLevel as ExtractedMilestoneObservation["scope_level"],
+      scope_label: scopeLabel!,
+      period_label: periodLabel!,
+      as_of_date: asOfDate ?? null,
+      evidence_chunk_index: citation!.evidence_chunk_index,
+      excerpt: excerpt!,
+    });
+  });
+
+  const progressRows = rowsFor("progress");
+  progressRows.forEach((item, index) => {
+    const path = `assurance_observations.progress[${index}]`;
+    const rowErrors: string[] = [];
+    if (!isRecord(item)) {
+      warnObservationInvalidRow("progress", path, [`${path} must be an object`]);
+      return;
+    }
+    const rawValue = boundedString(item.raw_value, `${path}.raw_value`, rowErrors, 500);
+    const scopeLevel = stringField(item.scope_level);
+    const scopeLabel = nullableBoundedString(item.scope_label ?? null, `${path}.scope_label`, rowErrors, 500);
+    const periodLabel = nullableBoundedString(item.period_label ?? null, `${path}.period_label`, rowErrors, 200);
+    const percentValue = item.percent === null ? null : boundedNumber(item.percent, 0, 100, `${path}.percent`, rowErrors);
+    const citation = requiredCitation(item, allowedSources, path, rowErrors, fromCache);
+    const excerpt = excerptFor(item, citation, path, rowErrors);
+    if (!["project", "wbs", "unknown"].includes(scopeLevel)) rowErrors.push(`${path}.scope_level is invalid`);
+    if (scopeLevel === "wbs" && !scopeLabel) rowErrors.push(`${path}.scope_label is required for WBS scope`);
+    if (scopeLevel !== "wbs" && scopeLabel) rowErrors.push(`${path}.scope_label is only valid for WBS scope`);
+    if (percentValue === null || percentValue === undefined) rowErrors.push(`${path}.percent must be a source-backed percentage`);
+    if (rawValue && !excerpt?.includes(rawValue)) rowErrors.push(`${path}.raw_value is not present in the cited excerpt`);
+    if (percentValue !== null && percentValue !== undefined && excerpt &&
+      !citedTextSupportsNumericValue(`${percentValue}%`, rawValue ?? "")) {
+      rowErrors.push(`${path}.percent does not match a percentage in the cited excerpt`);
+    }
+    if (!textIsCited(scopeLabel, excerpt)) rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
+    if (!textIsCited(periodLabel, excerpt)) rowErrors.push(`${path}.period_label is not present in the cited excerpt`);
+    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    if (rowErrors.length) {
+      warnObservationInvalidRow("progress", path, rowErrors);
+      return;
+    }
+    assuranceObservations.progress.push({
+      raw_value: rawValue!,
+      percent: percentValue as number,
+      scope_level: scopeLevel as ExtractedProgressObservation["scope_level"],
+      scope_label: scopeLabel!,
+      period_label: periodLabel!,
+      as_of_date: asOfDate ?? null,
+      evidence_chunk_index: citation!.evidence_chunk_index,
+      excerpt: excerpt!,
+    });
+  });
+
+  const riskSnapshots = rowsFor("risk_snapshots");
+  riskSnapshots.forEach((item, index) => {
+    const path = `assurance_observations.risk_snapshots[${index}]`;
+    const rowErrors: string[] = [];
+    if (!isRecord(item)) {
+      warnObservationInvalidRow("risk", path, [`${path} must be an object`]);
+      return;
+    }
+    const riskId = nullableBoundedString(item.risk_id ?? null, `${path}.risk_id`, rowErrors, 200);
+    const name = nullableBoundedString(item.name ?? null, `${path}.name`, rowErrors, 500);
+    const description = nullableBoundedString(item.description ?? null, `${path}.description`, rowErrors, 2000);
+    const status = nullableBoundedString(item.status ?? null, `${path}.status`, rowErrors, 200);
+    const ratingLabel = nullableBoundedString(item.rating_label ?? null, `${path}.rating_label`, rowErrors, 200);
+    const ratingValue = item.rating_value === null ? null : boundedNumber(item.rating_value, -1_000_000, 1_000_000, `${path}.rating_value`, rowErrors);
+    const scaleLabel = nullableBoundedString(item.scale_label ?? null, `${path}.scale_label`, rowErrors, 200);
+    const owner = nullableBoundedString(item.owner ?? null, `${path}.owner`, rowErrors, 500);
+    const mitigation = nullableBoundedString(item.mitigation ?? null, `${path}.mitigation`, rowErrors, 2000);
+    const rawMitigationDueDate = nullableBoundedString(item.raw_mitigation_due_date ?? null, `${path}.raw_mitigation_due_date`, rowErrors, 100);
+    const wbs = nullableBoundedString(item.wbs ?? null, `${path}.wbs`, rowErrors, 500);
+    const periodLabel = nullableBoundedString(item.period_label ?? null, `${path}.period_label`, rowErrors, 200);
+    const rawValue = boundedString(item.raw_value, `${path}.raw_value`, rowErrors, 1200);
+    const citation = requiredCitation(item, allowedSources, path, rowErrors, fromCache);
+    const excerpt = excerptFor(item, citation, path, rowErrors);
+    const mitigationDueDate = checkedDate(item.mitigation_due_date ?? null, excerpt, `${path}.mitigation_due_date`, rowErrors);
+    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    for (const [field, candidate] of [
+      ["risk_id", riskId], ["name", name], ["description", description], ["status", status],
+      ["rating_label", ratingLabel], ["scale_label", scaleLabel], ["owner", owner],
+      ["mitigation", mitigation], ["wbs", wbs], ["period_label", periodLabel],
+      ["raw_mitigation_due_date", rawMitigationDueDate], ["raw_value", rawValue],
+    ] as const) {
+      if (!textIsCited(candidate, excerpt)) rowErrors.push(`${path}.${field} is not present in the cited excerpt`);
+    }
+    if (mitigationDueDate && rawMitigationDueDate !== mitigationDueDate) {
+      rowErrors.push(`${path}.mitigation_due_date can only normalize an exact ISO raw_mitigation_due_date`);
+    }
+    if (ratingValue !== null && ratingValue !== undefined && excerpt &&
+      !citedTextSupportsNumericValue(String(ratingValue), excerpt)) {
+      rowErrors.push(`${path}.rating_value does not match its cited source`);
+    }
+    if (rowErrors.length) {
+      warnObservationInvalidRow("risk", path, rowErrors);
+      return;
+    }
+    assuranceObservations.risk_snapshots.push({
+      risk_id: riskId!,
+      name: name!,
+      description: description!,
+      status: status!,
+      rating_label: ratingLabel!,
+      rating_value: ratingValue ?? null,
+      scale_label: scaleLabel!,
+      owner: owner!,
+      mitigation: mitigation!,
+      mitigation_due_date: mitigationDueDate ?? null,
+      raw_mitigation_due_date: rawMitigationDueDate!,
+      wbs: wbs!,
+      period_label: periodLabel!,
+      as_of_date: asOfDate ?? null,
+      raw_value: rawValue!,
+      evidence_chunk_index: citation!.evidence_chunk_index,
+      excerpt: excerpt!,
+    });
+  });
+
+  const riskStatements = rowsFor("risk_register_statements");
+  riskStatements.forEach((item, index) => {
+    const path = `assurance_observations.risk_register_statements[${index}]`;
+    const rowErrors: string[] = [];
+    if (!isRecord(item)) {
+      warnObservationInvalidRow("risk", path, [`${path} must be an object`]);
+      return;
+    }
+    const state = stringField(item.state);
+    const rawValue = boundedString(item.raw_value, `${path}.raw_value`, rowErrors, 1200);
+    const periodLabel = nullableBoundedString(item.period_label ?? null, `${path}.period_label`, rowErrors, 200);
+    const citation = requiredCitation(item, allowedSources, path, rowErrors, fromCache);
+    const excerpt = excerptFor(item, citation, path, rowErrors);
+    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    if (!["no_open_high_or_critical", "open_risk_reported"].includes(state)) {
+      rowErrors.push(`${path}.state is invalid`);
+    } else if (!riskRegisterStatementMatches(state as ExtractedRiskRegisterStatement["state"], excerpt ?? "")) {
+      rowErrors.push(`${path}.state is not supported by its cited wording`);
+    }
+    if (rawValue && !excerpt?.includes(rawValue)) rowErrors.push(`${path}.raw_value is not present in the cited excerpt`);
+    if (!textIsCited(periodLabel, excerpt)) rowErrors.push(`${path}.period_label is not present in the cited excerpt`);
+    if (rowErrors.length) {
+      warnObservationInvalidRow("risk", path, rowErrors);
+      return;
+    }
+    assuranceObservations.risk_register_statements.push({
+      state: state as ExtractedRiskRegisterStatement["state"],
+      raw_value: rawValue!,
+      period_label: periodLabel!,
+      as_of_date: asOfDate ?? null,
+      evidence_chunk_index: citation!.evidence_chunk_index,
+      excerpt: excerpt!,
+    });
+  });
+
+  const groupConflicts = assuranceObservationConflictDomains(assuranceObservations, costObservations);
+  const unavailableFormula = group.chunks.some((chunk) =>
+    (chunk.formulaCells ?? []).some((cell) =>
+      ["missing_cache", "cached_empty", "cached_error", "unknown"].includes(cell.formulaCacheStatus),
+    ),
+  );
+  const hasCandidateAmbiguity = group.candidateInterpretation.length > 0;
+  const observationCounts: Record<AssuranceObservationDomain, number> = {
+    budget: costObservations.length,
+    schedule: assuranceObservations.milestones.length,
+    progress: assuranceObservations.progress.length,
+    risk: assuranceObservations.risk_snapshots.length + assuranceObservations.risk_register_statements.length,
+  };
+  const assuranceObservationCoverage: GroupAssuranceObservationCoverage[] =
+    (["budget", "schedule", "progress", "risk"] as const).map((domain) => {
+      const warnings = observationWarnings[domain];
+      const conflicts = groupConflicts[domain];
+      const state: AssuranceCoverageState = warnings.length || unavailableFormula
+        ? "unprocessed"
+        : conflicts.length || hasCandidateAmbiguity
+          ? "ambiguous_conflicting"
+          : observationCounts[domain] > 0
+            ? "processed"
+            : "absent";
+      const reason = warnings.length
+        ? warnings.join(" ").slice(0, 1000)
+        : unavailableFormula
+          ? "A formula result in this source group is unavailable; this group cannot prove that the domain has no value."
+          : conflicts.length
+            ? conflicts.join(" ").slice(0, 1000)
+            : hasCandidateAmbiguity
+              ? "This group contains a candidate-only ambiguous worksheet interpretation."
+              : null;
+      return { domain, state, reason };
+    });
 
   const suggestions = validateGroupMetadataSuggestions(
     value.group_metadata_suggestions,
@@ -1666,11 +2123,100 @@ function validateGroupExtraction(
       alerts,
       actions,
       cost_observations: costObservations,
+      assurance_observations: assuranceObservations,
+      assurance_observation_coverage: assuranceObservationCoverage,
       sheet_interpretation: sheetInterpretation,
       group_metadata_suggestions: suggestions,
       quality_warnings: [...new Set(qualityWarnings)],
     },
   };
+}
+function riskRegisterStatementMatches(
+  state: ExtractedRiskRegisterStatement["state"],
+  text: string,
+): boolean {
+  const noOpenRisk =
+    /\b(?:no|zero|without)\s+(?:open\s+)?(?:risks?|(?:high\s+(?:or|and)\s+critical|critical\s+(?:or|and)\s+high)\s+risks?)\b/iu.test(text) ||
+    /\b(?:tidak ada|nihil|nol)\s+risiko(?:\s+terbuka)?\b/iu.test(text);
+  if (state === "no_open_high_or_critical") return noOpenRisk;
+  return !noOpenRisk && (
+    /\b(?:open|active|ongoing)\b.{0,60}\brisks?\b|\brisks?\b.{0,60}\b(?:open|active|ongoing)\b/iu.test(text) ||
+    /\brisiko\b.{0,60}\b(?:terbuka|aktif)\b|\b(?:terbuka|aktif)\b.{0,60}\brisiko\b/iu.test(text)
+  );
+}
+
+function assuranceObservationConflictDomains(
+  observations: ExtractedAssuranceObservations,
+  costObservations: ExtractedCostObservation[] = [],
+): Record<AssuranceObservationDomain, string[]> {
+  const conflicts: Record<AssuranceObservationDomain, string[]> = {
+    budget: [],
+    schedule: [],
+    progress: [],
+    risk: [],
+  };
+  const normalize = (value: string | null) => value?.trim().toLocaleLowerCase().replace(/\s+/gu, " ") ?? "";
+  const periodKey = (period: string | null, asOfDate: string | null) =>
+    normalize(asOfDate ?? period);
+  const groupBy = <T>(items: T[], keyFor: (item: T) => string) => {
+    const grouped = new Map<string, T[]>();
+    for (const item of items) {
+      const key = keyFor(item);
+      if (!key) continue;
+      const group = grouped.get(key);
+      if (group) group.push(item);
+      else grouped.set(key, [item]);
+    }
+    return grouped;
+  };
+  for (const items of groupBy(
+    costObservations.filter((item) => item.measure === "approved_baseline" || item.measure === "eac"),
+    (item) => `${item.measure}\0${item.scope_level}\0${normalize(item.scope_label)}\0${periodKey(item.period_label, item.as_of_date)}`,
+  ).values()) {
+    const values = new Set(items.map((item) =>
+      item.normalized_amount !== null && item.currency
+        ? `${item.normalized_amount}\0${item.currency}`
+        : normalize(item.source_value),
+    ));
+    if (values.size > 1) {
+      conflicts.budget.push(`Conflicting ${items[0].measure === "eac" ? "EAC" : "baseline"} values were reported for the same scope and period.`);
+    }
+  }
+  for (const items of groupBy(
+    observations.milestones,
+    (item) => `${normalize(item.label)}\0${item.scope_level}\0${normalize(item.scope_label)}\0${periodKey(item.period_label, item.as_of_date)}`,
+  ).values()) {
+    const dates = new Set(items.map((item) => item.date ?? `raw:${normalize(item.raw_date)}`));
+    if (dates.size > 1) conflicts.schedule.push(`Conflicting dates were reported for ${items[0].label} in the same scope and period.`);
+  }
+  for (const items of groupBy(
+    observations.progress,
+    (item) => `${item.scope_level}\0${normalize(item.scope_label)}\0${periodKey(item.period_label, item.as_of_date)}`,
+  ).values()) {
+    if (new Set(items.map((item) => item.percent)).size > 1) {
+      conflicts.progress.push("Conflicting progress percentages were reported for the same scope and period.");
+    }
+  }
+  for (const items of groupBy(
+    observations.risk_snapshots,
+    (item) => {
+      const identity = normalize(item.risk_id) || normalize(item.name);
+      return identity ? `${identity}\0${normalize(item.wbs)}\0${periodKey(item.period_label, item.as_of_date)}` : "";
+    },
+  ).values()) {
+    if (new Set(items.map((item) => `${normalize(item.status)}\0${normalize(item.rating_label)}\0${item.rating_value}`)).size > 1) {
+      conflicts.risk.push(`Conflicting status or rating values were reported for risk ${items[0].risk_id ?? items[0].name}.`);
+    }
+  }
+  for (const items of groupBy(
+    observations.risk_register_statements,
+    (item) => periodKey(item.period_label, item.as_of_date),
+  ).values()) {
+    if (new Set(items.map((item) => item.state)).size > 1) {
+      conflicts.risk.push("The risk register contains contradictory open-risk statements for the same period.");
+    }
+  }
+  return conflicts;
 }
 
 // Candidate-only: the model describes structure but cannot create evidence or
@@ -1975,7 +2521,7 @@ function requiredCitation(
     for (const citation of allowedSources.values()) {
       if (
         citation.evidence_chunk_index === value.evidence_chunk_index &&
-        citation.excerpt === value.excerpt
+        typeof value.excerpt === "string" && value.excerpt.length > 0 && citation.excerpt.includes(value.excerpt)
       ) {
         return citation;
       }
@@ -2012,6 +2558,8 @@ function aggregateGroups(
   providers: string[],
   models: string[],
   classification: DocumentClassificationResult,
+  contentHash: string,
+  parserVersion: string,
 ): Omit<DocumentExtraction, "summary" | "summary_sources"> {
   const qualityWarnings = groups.flatMap((group, index) =>
     group.value.quality_warnings.map((warning) =>
@@ -2023,11 +2571,68 @@ function aggregateGroups(
     classification,
   );
   qualityWarnings.push(...suggestionAggregation.qualityWarnings);
+  const assuranceObservations: DocumentExtraction["assurance_observations"] = {
+    milestones: uniqueBy(
+      groups.flatMap((group) => group.value.assurance_observations.milestones),
+      (item) => `${item.evidence_chunk_index}\0${item.label}\0${item.raw_date}\0${item.scope_level}\0${item.scope_label ?? ""}`,
+    ),
+    progress: uniqueBy(
+      groups.flatMap((group) => group.value.assurance_observations.progress),
+      (item) => `${item.evidence_chunk_index}\0${item.raw_value}\0${item.scope_level}\0${item.scope_label ?? ""}`,
+    ),
+    risk_snapshots: uniqueBy(
+      groups.flatMap((group) => group.value.assurance_observations.risk_snapshots),
+      (item) => `${item.evidence_chunk_index}\0${item.risk_id ?? ""}\0${item.name ?? ""}\0${item.raw_value}`,
+    ),
+    risk_register_statements: uniqueBy(
+      groups.flatMap((group) => group.value.assurance_observations.risk_register_statements),
+      (item) => `${item.evidence_chunk_index}\0${item.state}\0${item.raw_value}`,
+    ),
+  };
+  const crossGroupConflicts = assuranceObservationConflictDomains(
+    assuranceObservations,
+    groups.flatMap((group) => group.value.cost_observations),
+  );
+  const assuranceObservationCoverage: ExtractedAssuranceObservationCoverage[] =
+    (["budget", "schedule", "progress", "risk"] as const).map((domain) => {
+      const domainCoverage = groups.map((group, index) => ({
+        ...group.value.assurance_observation_coverage.find((item) => item.domain === domain)!,
+        range: `${chunkGroups[index].chunkStartIndex}-${chunkGroups[index].chunkEndIndex}`,
+      }));
+      const states = domainCoverage.map((item) => item.state);
+      const conflictReason = crossGroupConflicts[domain].join(" ");
+      const state: AssuranceCoverageState = states.includes("unprocessed")
+        ? "unprocessed"
+        : conflictReason || states.includes("ambiguous_conflicting")
+          ? "ambiguous_conflicting"
+          : states.includes("processed")
+            ? "processed"
+            : "absent";
+      const reasons = uniqueText([
+        ...domainCoverage
+          .filter((item) => item.reason)
+          .map((item) => `Source chunks ${item.range}: ${item.reason}`),
+        conflictReason,
+      ]);
+      return {
+        domain,
+        state,
+        total_groups: chunkGroups.length,
+        processed_groups: domainCoverage.filter((item) => item.state !== "unprocessed").length,
+        reason: reasons.length ? reasons.join(" ").slice(0, 1500) : null,
+      };
+    });
+
 
   return {
+    source_content_hash: contentHash,
+    parser_version: parserVersion,
+    assurance_observation_contract_version: ASSURANCE_OBSERVATION_CONTRACT_VERSION,
     provider: providers.length === 1 ? providers[0] : "mixed",
     model: models.length === 1 ? models[0] : "mixed",
     facts: groups.flatMap((group) => group.value.facts),
+    assurance_observations: assuranceObservations,
+    assurance_observation_coverage: assuranceObservationCoverage,
     health_snapshots: aggregateHealthSnapshots(groups, chunkGroups),
     alerts: uniqueBy(groups.flatMap((group) => group.value.alerts), (alert) =>
       `${alert.severity}\0${alert.impacted_area}\0${alert.explanation}\0${alert.evidence_chunk_index}`,

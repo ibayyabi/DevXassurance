@@ -16,30 +16,34 @@ function load(path, dependencies) {
 }
 const parse = path => load(path, {});
 const analysis = parse('src/features/assurance/lib/analysis.ts');
-const source = parse('src/features/assurance/lib/source-evidence.ts');
-const prompt = parse('src/features/assurance/lib/review-prompt.ts');
+const costEvidence = parse('src/features/assurance/lib/cost-evidence.ts');
+const costQueries = parse('src/features/assurance/lib/cost-queries.ts');
+const wbsComparison = load('src/features/assurance/lib/wbs-comparison.ts', {'./cost-evidence':costEvidence});
+const scheduleComparison = load('src/features/assurance/lib/schedule-comparison.ts', {'./analysis':analysis,'./wbs-comparison':wbsComparison});
+const riskComparison = parse('src/features/assurance/lib/risk-comparison.ts');
 const role = parse('src/features/projects/lib/roles.ts');
-const extraction = {
-  budget: { baseline_amount: null, current_forecast: null, current_actual: null, currency: null,
-    baseline_excerpt: null, current_excerpt: null, confidence: 0.9 },
-  schedule: { milestones: [], confidence: 0.9 },
-  risk: { has_current_evidence: false, open_critical_count: 0, open_high_count: 0,
-    high_risks_missing_owner_or_mitigation: 0, increased_risk_count: 0, new_high_risk_count: 0,
-    max_mitigation_overdue_days: 0, baseline_excerpt: null, current_excerpt: null, confidence: 0.9 },
-};
 function fixture(options = {}) {
-  const calls = [], model = [], uploads = [], removals = [], renders = [];
+  const calls = [], uploads = [], removals = [], renders = [];
   const context = {
     attempt_id: 'attempt-1', evidence_count: 2,
     findings: ['budget','schedule','risk'].map(domain => ({ domain, condition: 'more_evidence_required',
       headline: 'Missing evidence', explanation: 'More evidence required', confirmation_state: 'ai_extracted' })), actions: [],
   };
+  const coverage = ['budget','schedule','progress','risk'].map(domain => ({
+    domain, state:'processed', total_groups:1, processed_groups:1, reason:null,
+  }));
+  const sources = ['base','current'].map((document_id,index) => ({
+    document_id, role:index===0?'baseline':'current', title:index===0?'Baseline':'Current',
+    source_version:{content_hash:index===0?'a'.repeat(64):'b'.repeat(64),parser_version:'parser/1',contract_version:'contract/1'},
+    cost_observations:[], assurance_observations:[], assurance_observation_coverage:coverage,
+  }));
   const supabase = {
     rpc: async (name, input) => {
       calls.push({name,input});
       if (options.rpc) { const override = options.rpc(name,input); if (override) return override; }
-      if (name === 'claim_assurance_analysis') return {data:{attempt_id:'attempt-1',baseline_ids:['base'],current_ids:['current'],
-        chunks:[{document_id:'base',chunk_text:'Fingerprint-bound source text',page_number:1,documents:{title:'Plan'}}]}};
+      if (name === 'claim_assurance_analysis') return {data:options.claim??{
+        attempt_id:'attempt-1',sources,progress_decisions:[],
+      }};
       if (input.p_operation === 'context') return {data:context};
       if (input.p_operation === 'export_check') return {data:{attempt_id:'attempt-1',report_fingerprint:'content-1',preview:{
         report_type:'assurance_report',reporting_period:'October 2026',original_sections:{project_health:'Saved content'},
@@ -47,10 +51,12 @@ function fixture(options = {}) {
       return {data:true,error:null};
     },
     from: table => {
-      const query = {select(){return this},eq(){return this},order(){return this},limit(){return this},
-        maybeSingle(){return Promise.resolve({data:{assurance_review_id:options.legacy ? null : 'review-1'},error:options.lookupError})},
-        then(resolve){return Promise.resolve({data:[{id:'review-1',reporting_period:'2026-10-01'}]}).then(resolve)}};
-      assert.ok(['assurance_reviews','report_previews'].includes(table),`Unexpected table access ${table}`);
+      const rows = options.rows?.[table] ?? [];
+      const query = {select(){return this},eq(){return this},in(){return this},order(){return this},limit(){return this},
+        maybeSingle(){return Promise.resolve({data:table==='assurance_reviews'?{reporting_period:'2026-10-01'}:table==='report_previews'?{assurance_review_id:options.legacy?null:'review-1'}:null,error:options.lookupError})},
+        then(resolve){const data=table==='assurance_reviews'?[{id:'review-1',reporting_period:'2026-10-01',title:'October',status:'findings_ready'}]:rows;
+          return Promise.resolve({data,error:options.queryError}).then(resolve)}};
+      assert.ok(['assurance_reviews','report_previews','cost_baselines','cost_observations','wbs_mappings','milestone_mappings','risk_identity_mappings','risk_scale_mappings'].includes(table),`Unexpected table access ${table}`);
       return query;
     },
     storage:{from:()=>({upload:async(path)=>{uploads.push(path);return {error:options.uploadError}},
@@ -61,17 +67,16 @@ function fixture(options = {}) {
     '@/features/projects/lib/queries':{requireProjectMembership:async()=>({supabase,user:{id:'user-1'},membership:{role:options.role??'admin',projectName:'Project'}})},
     '@/features/projects/lib/roles':role,
     '@/features/assurance/lib/analysis':analysis,
-    '@/features/assurance/lib/source-evidence':source,
-    '@/features/assurance/lib/review-prompt':prompt,
-    '@/lib/ai/ollama':{parseJsonObject:JSON.parse,runOllamaChat:async(input)=>{
-      model.push(input); if(options.modelThrow) throw new Error('Transport failed');
-      return options.modelResult ?? {ok:true,content:JSON.stringify(extraction),provider:'fixture',model:'fixture'};
-    }},
+    '@/features/assurance/lib/cost-evidence':costEvidence,
+    '@/features/assurance/lib/cost-queries':costQueries,
+    '@/features/assurance/lib/wbs-comparison':wbsComparison,
+    '@/features/assurance/lib/schedule-comparison':scheduleComparison,
+    '@/features/assurance/lib/risk-comparison':riskComparison,
     '@/features/reports/lib/render-report':{renderReportPdf:async(input)=>{renders.push(input);return Buffer.from('PDF')},
       renderReportDocx:async(input)=>{renders.push(input);return Buffer.from('DOCX')}},
   };
   return {assurance:load('src/features/assurance/actions/assurance-actions.ts',dependencies),
-    reports:load('src/features/reports/actions/report-actions.ts',dependencies),calls,model,uploads,removals,renders};
+    reports:load('src/features/reports/actions/report-actions.ts',dependencies),calls,uploads,removals,renders};
 }
 function form(extra={}) {
   const data=new FormData();
@@ -85,26 +90,93 @@ test('evidence action delegates no-op detection to the atomic RPC and propagates
   const broken=fixture({rpc:()=>({error:{message:'Selection transaction failed'}})});
   await assert.rejects(()=>broken.assurance.saveReviewEvidence(form({baselineDocumentIds:'base',currentDocumentIds:'current'})),/transaction failed/);
 });
-test('analysis uses claim-bound chunks and publishes all domains under its attempt identity',async()=>{
+test('analysis publishes deterministic findings from the claimed versioned sources atomically',async()=>{
   const f=fixture();await f.assurance.runAssuranceAnalysis(form());
-  assert.match(f.model[0].user,/Fingerprint-bound source text/);
-  assert.equal(f.calls.length,2);assert.equal(f.calls[1].name,'finish_assurance_analysis');
-  assert.equal(f.calls[1].input.p_attempt_id,'attempt-1');
-  assert.deepEqual(f.calls[1].input.p_findings.map(x=>x.domain).sort(),['budget','risk','schedule']);
+  const publication=f.calls.find(call=>call.name==='finish_assurance_analysis_with_results');
+  assert.equal(publication?.input.p_attempt_id,'attempt-1');
+  assert.deepEqual(publication?.input.p_findings.map(x=>x.domain).sort(),['budget','risk','schedule']);
+  assert.equal(publication?.input.p_metadata.source_versions.length,2);
+  assert.equal(publication?.input.p_metadata.source_versions[0].content_hash,'a'.repeat(64));
 });
-test('model failure and thrown errors record failure only with the owning attempt',async()=>{
-  for(const options of [{modelResult:{ok:false,warning:'Unavailable'}},{modelThrow:true}]){
-    const f=fixture(options);
-    if(options.modelThrow)await assert.rejects(()=>f.assurance.runAssuranceAnalysis(form()),/Transport failed/);
-    else await f.assurance.runAssuranceAnalysis(form());
-    assert.equal(f.calls[1].input.p_attempt_id,'attempt-1');assert.ok(f.calls[1].input.p_error);
-    assert.equal(f.calls[1].input.p_findings,undefined);
-  }
+test('analysis findings retain source-version citations from validated observations',async()=>{
+  const coverage = ['budget','schedule','progress','risk'].map(domain=>({
+    domain,state:'processed',total_groups:1,processed_groups:1,reason:null,
+  }));
+  const source = (document_id,role,title,hash,assurance_observations) => ({
+    document_id,role,title,
+    source_version:{content_hash:hash,parser_version:'parser/1',contract_version:'contract/1'},
+    cost_observations:[],assurance_observations,assurance_observation_coverage:coverage,
+  });
+  const observation = (id,domain,observation_type,value,page) => ({
+    id,domain,observation_type,observation:value,evidence_chunk_index:2,
+    excerpt:`Source excerpt ${id}`,page_number:page,section_label:'Evidence',
+    source_location:{sheet:'Schedule',row:page},
+  });
+  const sources = [
+    source('base','baseline','Approved baseline','a'.repeat(64),[
+      observation('milestone-base','schedule','milestone',{
+        label:'Go-live',date:'2026-03-01',scope_level:'project',scope_label:null,
+        period_label:'Baseline',as_of_date:'2025-12-31',
+      },4),
+    ]),
+    source('current','current','Current report','b'.repeat(64),[
+      observation('milestone-current','schedule','milestone',{
+        label:'Go-live',date:'2026-03-16',scope_level:'project',scope_label:null,
+        period_label:'March 2026',as_of_date:'2026-03-31',
+      },8),
+      observation('risk-current','risk','risk_snapshot',{
+        risk_id:'R-01',name:'Power interruption',status:'Open',rating_label:'Critical',
+        rating_value:null,scale_label:'Qualitative',owner:null,mitigation:null,
+      },10),
+    ]),
+  ];
+  const f=fixture({claim:{attempt_id:'attempt-1',sources}});
+  await f.assurance.runAssuranceAnalysis(form());
+  const findings=f.calls.find(call=>call.name==='finish_assurance_analysis_with_results').input.p_findings;
+  const schedule=findings.find(finding=>finding.domain==='schedule');
+  assert.equal(schedule.condition,'critical');
+  assert.deepEqual(schedule.sourceExcerpts.map(source=>source.documentId),['base','current']);
+  assert.equal(schedule.sourceExcerpts[0].sourceContentHash,'a'.repeat(64));
+  assert.equal(schedule.sourceExcerpts[1].pageNumber,8);
+  const risk=findings.find(finding=>finding.domain==='risk');
+  assert.equal(risk.condition,'critical');
+  assert.equal(risk.sourceExcerpts[0].documentId,'current');
+  assert.equal(risk.sourceExcerpts[0].pageNumber,10);
 });
-test('overlap claim errors prevent model calls and publication errors are not ignored',async()=>{
+test('analysis preserves unprocessed coverage in its atomic result',async()=>{
+  const coverage = ['budget','schedule','progress','risk'].map(domain=>({
+    domain,state:domain==='schedule'?'unprocessed':'processed',total_groups:1,
+    processed_groups:domain==='schedule'?0:1,
+    reason:domain==='schedule'?'Schedule groups remain unprocessed.':null,
+  }));
+  const sources = ['base','current'].map((document_id,index)=>({
+    document_id,role:index===0?'baseline':'current',title:index===0?'Approved baseline':'Current report',
+    source_version:{content_hash:index===0?'a'.repeat(64):'b'.repeat(64),parser_version:'parser/1',contract_version:'contract/1'},
+    cost_observations:[],assurance_observations:[],assurance_observation_coverage:coverage,
+  }));
+  const f=fixture({claim:{attempt_id:'attempt-1',sources,progress_decisions:[]}});
+  await f.assurance.runAssuranceAnalysis(form());
+  const publication=f.calls.find(call=>call.name==='finish_assurance_analysis_with_results');
+  assert.equal(publication?.input.p_metadata.observation_coverage.byRole.baseline.schedule.state,'unprocessed');
+  assert.equal(publication?.input.p_findings.find(finding=>finding.domain==='schedule').condition,'more_evidence_required');
+});
+test('analysis errors finish only the owning attempt with a failure reason',async()=>{
+  const f=fixture({queryError:{message:'Cost query failed'}});
+  await assert.rejects(()=>f.assurance.runAssuranceAnalysis(form()),/Cost query failed/);
+  const completion=f.calls.find(call=>call.name==='finish_assurance_analysis');
+  assert.equal(completion?.input.p_attempt_id,'attempt-1');
+  assert.match(completion?.input.p_error,/Cost query failed/);
+  assert.equal(completion?.input.p_findings,undefined);
+});
+test('overlap claim errors prevent publication and publication errors are not ignored',async()=>{
   const f=fixture({rpc:name=>name==='claim_assurance_analysis'?{error:{message:'Already running'}}:null});
-  await assert.rejects(()=>f.assurance.runAssuranceAnalysis(form()),/Already running/);assert.equal(f.model.length,0);
-  const broken=fixture({rpc:(name,input)=>name==='finish_assurance_analysis'&&!input.p_error?{error:{message:'Publication rollback'}}:null});
+  await assert.rejects(()=>f.assurance.runAssuranceAnalysis(form()),/Already running/);
+  assert.equal(f.calls.length,1);
+  const broken=fixture({rpc:(name,input)=>{
+    if(name==='finish_assurance_analysis_with_results')return {error:{message:'Publication rollback'}};
+    if(name==='finish_assurance_analysis'&&input.p_error)return {data:true};
+    return null;
+  }});
   await assert.rejects(()=>broken.assurance.runAssuranceAnalysis(form()),/Publication rollback/);
   assert.equal(broken.calls.at(-1).input.p_error,'Publication rollback');
 });

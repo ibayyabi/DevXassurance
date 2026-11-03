@@ -3,9 +3,13 @@
 import { revalidatePath } from "next/cache";
 
 import {
+  dateDifferenceDays,
   evaluateAssuranceReview,
-  parseReviewExtraction,
+  type AssuranceEvidenceReference,
+  type MilestoneObservation,
+  type ProgressObservation,
   type ReviewExtraction,
+  type RiskSnapshot,
 } from "@/features/assurance/lib/analysis";
 import {
   evaluateProjectBudget,
@@ -44,12 +48,49 @@ import {
   riskSourceIds,
   riskSourceScales,
 } from "@/features/assurance/lib/risk-comparison";
-import type { SourceChunk } from "@/features/assurance/lib/source-evidence";
 import { requireProjectMembership } from "@/features/projects/lib/queries";
 import { canApproveAssuranceBaseline, canManageProject } from "@/features/projects/lib/roles";
-import { parseJsonObject, runOllamaChat } from "@/lib/ai/ollama";
-import { reviewEvidenceFits } from "@/features/assurance/lib/review-prompt";
-import { verifySourceExcerpt, type VerifiedSource } from "@/features/assurance/lib/source-evidence";
+type ObservationCoverageDomain = "budget" | "schedule" | "progress" | "risk";
+type ObservationCoverageState = "processed" | "unprocessed" | "ambiguous_conflicting" | "absent";
+type AssuranceCoverageRow = {
+  domain: ObservationCoverageDomain;
+  state: ObservationCoverageState;
+  total_groups: number;
+  processed_groups: number;
+  reason: string | null;
+};
+type ObservationCoverageByRole = Record<
+  "baseline" | "current",
+  Record<ObservationCoverageDomain, AssuranceCoverageRow>
+>;
+type AssuranceObservationRow = {
+  id: string;
+  domain: "schedule" | "progress" | "risk";
+  observation_type: "milestone" | "progress" | "risk_snapshot" | "risk_register_statement";
+  observation: Record<string, unknown>;
+  evidence_chunk_index: number;
+  excerpt: string;
+  page_number: number | null;
+  section_label: string | null;
+  source_location: Record<string, unknown> | null;
+};
+type AssuranceSource = {
+  document_id: string;
+  role: "baseline" | "current";
+  title: string | null;
+  source_version: {
+    content_hash: string | null;
+    parser_version: string | null;
+    contract_version: string | null;
+  };
+  cost_observations: CostObservationRow[];
+  assurance_observations: AssuranceObservationRow[];
+  assurance_observation_coverage: AssuranceCoverageRow[];
+};
+type AssuranceAnalysisClaim = {
+  attempt_id: string;
+  sources: AssuranceSource[];
+};
 
 
 export async function createAssuranceReview(formData: FormData): Promise<void> {
@@ -125,204 +166,100 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
 
   const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanManage(membership.role);
-
-  const { data: claimed, error: claimError } = await supabase.rpc("claim_assurance_analysis", {
+  const { data, error } = await supabase.rpc("claim_assurance_analysis", {
     p_project_id: projectId, p_review_id: reviewId,
   });
-  if (claimError) throw new Error(claimError.message);
-  const claim = claimed as {
-    attempt_id: string; baseline_ids: string[]; current_ids: string[];
-    chunks: (SourceChunk & { documents: { title: string } })[];
-  };
-  const { attempt_id: attemptId, baseline_ids: baselineIds, current_ids: currentIds, chunks } = claim;
-
-  // The claim RPC already validated evidence roles, completion, and ownership;
-  // the reviewed month's last day still bounds which baselines may apply.
-  const { data: review, error: reviewLookupError } = await supabase
-    .from("assurance_reviews")
-    .select("reporting_period")
-    .eq("id", reviewId)
-    .eq("project_id", projectId)
-    .maybeSingle();
-  if (reviewLookupError) throw new Error(reviewLookupError.message);
-  if (!review) throw new Error("Assurance review is required.");
-  const reportingPeriod = reportingPeriodEnd(review.reporting_period);
+  if (error) throw new Error(error.message);
+  const claim = data as AssuranceAnalysisClaim | null;
+  if (!claim?.attempt_id || !Array.isArray(claim.sources)) {
+    throw new Error("Analysis claim did not return its versioned source snapshot.");
+  }
+  const { attempt_id: attemptId, sources } = claim;
 
   try {
-    if (!chunks.length) {
-      await setAnalysisFailure(
-        supabase,
-        projectId,
-        reviewId,
-        attemptId,
-        "Selected evidence has no processed text.",
-      );
-      return;
-    }
-
-    const baselineText = formatEvidence(chunks, new Set(baselineIds));
-    const currentText = formatEvidence(chunks, new Set(currentIds));
-    if (!reviewEvidenceFits(baselineText, currentText)) {
-      await setAnalysisFailure(
-        supabase,
-        projectId,
-        reviewId,
-        attemptId,
-        "Selected evidence exceeds the complete review request limit. Filter or select fewer documents and retry; no partial evidence was analyzed.",
-      );
-      return;
-    }
-    const response = await runOllamaChat({
-      format: "json",
-      temperature: 0,
-      system:
-        "You extract structured project assurance values. Use only supplied evidence. Never invent a number, date, risk, comparison, or source excerpt. Use null or zero only as instructed. Return valid JSON only.",
-      user: buildReviewPrompt(baselineText, currentText),
-    });
-
-    if (!response.ok) {
-      await setAnalysisFailure(
-        supabase,
-        projectId,
-        reviewId,
-        attemptId,
-        `AI analysis failed: ${response.warning}`,
-      );
-      return;
-    }
-
-    const parsed = parseJsonObject(response.content);
-    const extraction = parsed ? parseReviewExtraction(parsed) : null;
-
-    if (!extraction) {
-      await setAnalysisFailure(
-        supabase,
-        projectId,
-        reviewId,
-        attemptId,
-        "AI analysis returned an invalid structure. No finding was saved.",
-      );
-      return;
-    }
-    const baselineSet = new Set(baselineIds);
-    const currentSet = new Set(currentIds);
-    const excerptRequests: { role: "baseline" | "current"; excerpt: string | null; required: boolean }[] = [
-      { role: "baseline", excerpt: extraction.risk.baselineExcerpt, required: false },
-      { role: "current", excerpt: extraction.risk.currentExcerpt, required: extraction.risk.hasCurrentEvidence },
-      ...extraction.schedule.baselineMilestones.map((milestone) => ({
-        role: "baseline" as const, excerpt: milestone.excerpt, required: milestone.date !== null,
-      })),
-      ...extraction.schedule.currentMilestones.map((milestone) => ({
-        role: "current" as const, excerpt: milestone.excerpt, required: milestone.date !== null,
-      })),
-      ...extraction.progress.observations.map((observation) => ({
-        role: observation.role, excerpt: observation.excerpt, required: observation.percent !== null,
-      })),
-      ...extraction.riskItems.baselineSnapshots.map((snapshot) => ({
-        role: "baseline" as const, excerpt: snapshot.excerpt, required: false,
-      })),
-      ...extraction.riskItems.currentSnapshots.map((snapshot) => ({
-        role: "current" as const, excerpt: snapshot.excerpt, required: false,
-      })),
-    ];
-    const verifiedSources: VerifiedSource[] = [];
-    let unverifiable = false;
-    for (const request of excerptRequests) {
-      if (!request.excerpt) {
-        if (request.required) unverifiable = true;
-        continue;
-      }
-      const source = verifySourceExcerpt(request.role, request.excerpt, chunks, request.role === "baseline" ? baselineSet : currentSet);
-      if (!source) unverifiable = true;
-      else verifiedSources.push(source);
-    }
-    if (unverifiable) {
-      await setAnalysisFailure(supabase, projectId, reviewId, attemptId,
-        "More Evidence Required: one or more extracted values lack an exact excerpt in the selected baseline/current source documents.");
-      return;
-    }
-
-    const budgetFinding = await buildProjectBudgetFinding(
-      supabase,
-      projectId,
-      currentIds,
-      reportingPeriod,
-    );
-    const wbs = await buildWbsComparison(
-      supabase,
-      projectId,
-      baselineIds,
-      currentIds,
-      reportingPeriod,
-    );
-    const schedule = await buildScheduleComparison(supabase, projectId, extraction);
-    const risk = await buildRiskSnapshotComparison(supabase, projectId, extraction);
-    const findings = evaluateAssuranceReview(extraction, budgetFinding, schedule.finding).map((finding) => ({
-      ...finding,
-      sourceExcerpts: finding.sourceExcerpts.map((source) => ({
-        ...source,
-        ...verifiedSources.find((verified) => verified.role === source.role && verified.excerpt === source.excerpt),
-      })),
-    }));
-    const { data: published, error: publicationError } = await supabase.rpc("finish_assurance_analysis", {
-      p_project_id: projectId, p_review_id: reviewId, p_attempt_id: attemptId,
-      p_findings: findings, p_actions: buildActionRows(findings),
-      p_metadata: { provider: response.provider, model: response.model,
-        extraction_provider: response.provider, extraction_model: response.model,
-        // Provenance is stored per finding from this shared object; engines and
-        // thresholds differ by domain, so each carries its own entry.
-        comparison_engine: {
-          budget: "pmo_cost_contract_v1",
-          schedule: "pmo_schedule_contract_v1",
-          risk: "deterministic_phase_4_v1",
-        },
-        thresholds: {
-          budget: "pmo_budget_variance_v1",
-          schedule: "pmo_schedule_variance_v1",
-          risk: "phase_3_usable_mvp_defaults",
-        },
-        budget_evidence_source: "cost_observations_and_accepted_baseline" },
-    });
-    if (publicationError) throw new Error(publicationError.message);
-    if (!published) {
-      throw new Error("Analysis was not published: evidence or attempt ownership changed. Run analysis again.");
-    }
-
-    // Persist the deterministic comparison artifacts beside the published
-    // findings. The RPC already recorded attempt bookkeeping in
-    // analysis_metadata; read it back and merge rather than overwrite it.
-    const { data: savedReview, error: metadataLookupError } = await supabase
+    const { data: review, error: reviewLookupError } = await supabase
       .from("assurance_reviews")
-      .select("analysis_metadata")
+      .select("reporting_period")
       .eq("id", reviewId)
       .eq("project_id", projectId)
       .maybeSingle();
-    if (metadataLookupError) throw new Error(metadataLookupError.message);
-    const { error: reviewUpdateError } = await supabase
-      .from("assurance_reviews")
-      .update({
-        analysis_metadata: {
-          ...((savedReview?.analysis_metadata as Record<string, unknown> | null) ?? {}),
-          // WBS comparisons sit beside the single project-total Budget finding.
+    if (reviewLookupError) throw new Error(reviewLookupError.message);
+    if (!review) throw new Error("Assurance review is required.");
+    const reportingPeriod = reportingPeriodEnd(review.reporting_period);
+
+    if (!sources.length) {
+      await setAnalysisFailure(supabase, projectId, reviewId, attemptId,
+        "Selected evidence has no versioned source observations.");
+      return;
+    }
+
+    const coverage = summarizeObservationCoverage(sources);
+    const reviewData = buildReviewExtraction(sources);
+    const currentCostObservations = mapSelectedCostObservations(sources, "current");
+    const baselineCostObservations = mapSelectedCostObservations(sources, "baseline");
+    const budgetFinding = await buildProjectBudgetFinding(
+      supabase, projectId, reportingPeriod, currentCostObservations,
+    );
+    const wbs = await buildWbsComparison(
+      supabase, projectId, reportingPeriod, baselineCostObservations, currentCostObservations,
+    );
+    const schedule = await buildScheduleComparison(supabase, projectId, reviewData.extraction);
+    const risk = await buildRiskSnapshotComparison(supabase, projectId, reviewData.extraction);
+    reviewData.extraction.risk = buildRiskAssessment(
+      reviewData.extraction, risk.comparison, sources, coverage.byRole, reportingPeriodEnd(reportingPeriod),
+    );
+    const findings = applyCoverageGaps(
+      evaluateAssuranceReview(reviewData.extraction, budgetFinding, schedule.finding),
+      coverage.byRole,
+    );
+    const { data: published, error: publicationError } = await supabase.rpc(
+      "finish_assurance_analysis_with_results",
+      {
+        p_project_id: projectId,
+        p_review_id: reviewId,
+        p_attempt_id: attemptId,
+        p_findings: findings,
+        p_actions: buildActionRows(findings),
+        p_metadata: {
+          source_versions: sources.map((source) => ({
+            document_id: source.document_id,
+            role: source.role,
+            ...source.source_version,
+          })),
+          assurance_observation_contract_versions: [...new Set(
+            sources.map((source) => source.source_version.contract_version).filter(Boolean),
+          )],
+          observation_coverage: coverage,
+          comparison_engine: {
+            budget: "pmo_cost_contract_v1",
+            schedule: "pmo_schedule_observations_v1",
+            risk: "pmo_risk_observations_v1",
+          },
+          thresholds: {
+            budget: "pmo_budget_variance_v1",
+            schedule: "pmo_schedule_variance_v1",
+            risk: "phase_3_usable_mvp_defaults",
+          },
+          budget_evidence_source: "versioned_cost_observations_and_accepted_baseline",
+        },
+        p_result_metadata: {
           wbs_budget_findings: wbs.findings,
           wbs_scope_candidates: wbs.scopeCandidates,
-          // Per-milestone schedule comparisons and reported progress sit beside
-          // the single Schedule finding; progress is preserved, never scored.
           schedule_milestone_comparisons: schedule.comparisons,
           schedule_milestone_labels: schedule.milestoneLabels,
           progress_observations: schedule.progress,
-          // Item-level risk findings sit beside the Risk domain condition; no
-          // project Risk score or composite is produced.
+          progress_source_observations: reviewData.progressSourceObservations,
           risk_item_findings: risk.comparison.items,
           risk_unidentified_items: risk.comparison.unidentified,
           risk_source_ids: risk.sourceIds,
           risk_source_scales: risk.sourceScales,
         },
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", reviewId)
-      .eq("project_id", projectId);
-    if (reviewUpdateError) throw new Error(reviewUpdateError.message);
+      },
+    );
+    if (publicationError) throw new Error(publicationError.message);
+    if (!published) {
+      throw new Error("Analysis was not published: evidence or attempt ownership changed. Run analysis again.");
+    }
   } catch (error) {
     await setAnalysisFailure(supabase, projectId, reviewId, attemptId,
       error instanceof Error ? error.message : "Assurance analysis failed.");
@@ -790,52 +727,41 @@ export async function updateAssuranceAction(formData: FormData): Promise<void> {
 async function buildProjectBudgetFinding(
   supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
   projectId: string,
-  currentDocumentIds: string[],
   asOf: string,
+  currentObservationRows: CostObservationRow[],
 ) {
-  const [baselineResult, observationResult] = await Promise.all([
-    supabase
-      .from("cost_baselines")
-      .select(costBaselineColumns)
-      .eq("project_id", projectId)
-      .eq("state", "accepted"),
-    currentDocumentIds.length
-      ? supabase
-          .from("cost_observations")
-          .select(costObservationColumns)
-          .eq("project_id", projectId)
-          .in("document_id", currentDocumentIds)
-      : Promise.resolve({ data: [], error: null }),
-  ]);
-  if (baselineResult.error) throw new Error(baselineResult.error.message);
-  if (observationResult.error) throw new Error(observationResult.error.message);
+  const { data, error } = await supabase
+    .from("cost_baselines")
+    .select(costBaselineColumns)
+    .eq("project_id", projectId)
+    .in("state", ["accepted", "superseded"]);
+  if (error) throw new Error(error.message);
 
-  const baselines = ((baselineResult.data ?? []) as CostBaselineRow[]).map(mapCostBaselineRow);
-  const observations = ((observationResult.data ?? []) as CostObservationRow[]).map(
-    mapCostObservationRow,
-  );
+  const baselines = ((data ?? []) as CostBaselineRow[]).map(mapCostBaselineRow);
+  const observations = currentObservationRows.map(mapCostObservationRow);
   const baseline = selectAcceptedCostBaseline(baselines, { scopeLevel: "project", asOf });
 
   let baselineObservation = null;
   if (baseline?.observationId) {
-    const { data, error } = await supabase
+    const { data: observation, error: observationError } = await supabase
       .from("cost_observations")
       .select(costObservationColumns)
       .eq("project_id", projectId)
       .eq("id", baseline.observationId)
       .maybeSingle();
-    if (error) throw new Error(error.message);
-    baselineObservation = data ? mapCostObservationRow(data as CostObservationRow) : null;
+    if (observationError) throw new Error(observationError.message);
+    baselineObservation = observation
+      ? mapCostObservationRow(observation as CostObservationRow)
+      : null;
   }
 
   return evaluateProjectBudget({
     baseline,
     baselineObservation,
     eac: selectReportedEac(observations, { scopeLevel: "project" }),
-    separateMeasures: observations.filter(
-      (observation) =>
-        observation.scopeLevel === "project" &&
-        (observation.measure === "actual_to_date" || observation.measure === "committed"),
+    separateMeasures: observations.filter((observation) =>
+      observation.scopeLevel === "project" &&
+      (observation.measure === "actual_to_date" || observation.measure === "committed"),
     ),
   });
 }
@@ -850,50 +776,33 @@ async function buildProjectBudgetFinding(
 async function buildWbsComparison(
   supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
   projectId: string,
-  baselineDocumentIds: string[],
-  currentDocumentIds: string[],
   asOf: string,
+  baselineObservationRows: CostObservationRow[],
+  currentObservationRows: CostObservationRow[],
 ) {
-  const reviewDocumentIds = [...new Set([...baselineDocumentIds, ...currentDocumentIds])];
-  if (reviewDocumentIds.length === 0) {
-    return { findings: [], scopeCandidates: [] };
-  }
-
-  const [observationResult, baselineResult, mappingResult] = await Promise.all([
-    supabase
-      .from("cost_observations")
-      .select(costObservationColumns)
-      .eq("project_id", projectId)
-      .eq("scope_level", "wbs")
-      .in("document_id", reviewDocumentIds),
+  const [baselineResult, mappingResult] = await Promise.all([
     supabase
       .from("cost_baselines")
       .select(costBaselineColumns)
       .eq("project_id", projectId)
       .eq("scope_level", "wbs")
-      .eq("state", "accepted"),
+      .in("state", ["accepted", "superseded"]),
     supabase
       .from("wbs_mappings")
       .select(wbsMappingColumns)
       .eq("project_id", projectId)
       .eq("state", "accepted"),
   ]);
-  if (observationResult.error) throw new Error(observationResult.error.message);
   if (baselineResult.error) throw new Error(baselineResult.error.message);
   if (mappingResult.error) throw new Error(mappingResult.error.message);
 
-  const observations = ((observationResult.data ?? []) as CostObservationRow[]).map(mapCostObservationRow);
+  const baselineObservations = baselineObservationRows.map(mapCostObservationRow);
+  const currentObservations = currentObservationRows.map(mapCostObservationRow);
   const baselines = ((baselineResult.data ?? []) as CostBaselineRow[]).map(mapCostBaselineRow);
   const mappings = ((mappingResult.data ?? []) as WbsMappingRow[]).map(mapWbsMappingRow);
-
-  const baselineSet = new Set(baselineDocumentIds);
-  const currentSet = new Set(currentDocumentIds);
-  const currentObservations = observations.filter((observation) => currentSet.has(observation.documentId));
-  const baselineObservations = observations.filter((observation) => baselineSet.has(observation.documentId));
-
   const findings = buildWbsBudgetFindings({
     observations: currentObservations,
-    baselineObservations: observations,
+    baselineObservations: [...baselineObservations, ...currentObservations],
     baselines,
     mappings,
     asOf,
@@ -943,6 +852,7 @@ async function buildScheduleComparison(
     baselineMilestones: extraction.schedule.baselineMilestones,
     currentMilestones: extraction.schedule.currentMilestones,
     mappings: milestoneMappings,
+    wbsMappings,
   });
   const finding = buildScheduleFinding(comparisons, extraction.schedule.confidence);
   const progress = buildProgressComparison({
@@ -1006,122 +916,320 @@ function reportingPeriodEnd(reportingPeriod: string) {
     .slice(0, 10);
 }
 
-function buildReviewPrompt(baseline: string, current: string) {
-  return `Extract comparable Schedule, Progress, and Risk values from the two evidence groups.
+function mapSelectedCostObservations(
+  sources: AssuranceSource[],
+  role: "baseline" | "current",
+): CostObservationRow[] {
+  return sources
+    .filter((source) => source.role === role)
+    .flatMap((source) => source.cost_observations.map((observation) => ({
+      ...observation,
+      source_content_hash: source.source_version.content_hash,
+      parser_version: source.source_version.parser_version,
+      contract_version: source.source_version.contract_version,
+      documents: source.title
+        ? {
+            title: source.title,
+            content_hash: source.source_version.content_hash,
+            assurance_observation_parser_version: source.source_version.parser_version,
+            assurance_observation_contract_version: source.source_version.contract_version,
+          }
+        : null,
+    })));
+}
 
-Rules:
-- Never calculate a condition, score, variance, delay, or health label. The application calculates those deterministically.
-- Never pair, match, or rename milestones across the two groups. List each milestone under the label its own evidence uses; the application matches milestones by label.
-- A baseline value must come from BASELINE EVIDENCE. A current value must come from CURRENT EVIDENCE.
-- Use null when a value or date is not explicit. Copy each date as YYYY-MM-DD only when the source states it; never infer a date from a percentage or a status.
-- Report each progress percentage exactly as stated, at the level it is stated (project or WBS). Never sum or average WBS percentages into a project figure.
-- has_current_evidence is true only when current evidence contains identifiable risk information.
-- Counts must represent explicit open risks. Do not treat an absent statement as zero unless the evidence explicitly indicates none.
-- For risk_items, list each risk item under the ID and scale its own evidence uses. Never match risks across groups, rename them, or align rating scales; the application matches by exact ID or a reviewer-accepted mapping. Set rating_value only when the source states a number for the rating; otherwise null. Do not label an item new or increased.
-- Copy short source excerpts verbatim enough for a reviewer to locate the evidence. Record each source's own period or as-of date when it states one.
-
-Do not extract cost or budget values here; project cost evidence is collected separately.
-
-Return exactly:
-{
-  "schedule": {
-    "baseline_milestones": [
-      {
-        "label": "Milestone name as baseline evidence states it",
-        "date": "YYYY-MM-DD or null",
-        "period_label": "source period or null",
-        "as_of_date": "YYYY-MM-DD or null",
-        "excerpt": "verbatim source text or null"
-      }
-    ],
-    "current_milestones": [
-      {
-        "label": "Milestone name as current evidence states it",
-        "date": "YYYY-MM-DD or null",
-        "period_label": "source period or null",
-        "as_of_date": "YYYY-MM-DD or null",
-        "excerpt": "verbatim source text or null"
-      }
-    ],
-    "confidence": 0.0
-  },
-  "progress": {
-    "observations": [
-      {
-        "role": "baseline or current",
-        "scope_level": "project or wbs",
-        "scope_label": "WBS label, or null for project",
-        "percent": 0,
-        "period_label": "source period or null",
-        "as_of_date": "YYYY-MM-DD or null",
-        "excerpt": "verbatim source text or null"
-      }
-    ],
-    "confidence": 0.0
-  },
-  "risk_items": {
-    "baseline_snapshots": [
-      {
-        "source_id": "risk ID as stated, or null",
-        "name": "short risk name or null",
-        "description": "risk description or null",
-        "status": "status as stated or null",
-        "rating_label": "rating as stated (e.g. High) or null",
-        "rating_value": null,
-        "scale_label": "rating scale as stated (e.g. 1-5, Low/Med/High) or null",
-        "owner": "owner as stated or null",
-        "mitigation": "mitigation as stated or null",
-        "due_date": "YYYY-MM-DD or null",
-        "wbs": "WBS label or null",
-        "period_label": "source period or null",
-        "as_of_date": "YYYY-MM-DD or null",
-        "excerpt": "verbatim source text or null"
-      }
-    ],
-    "current_snapshots": [],
-    "confidence": 0.0
-  },
-  "risk": {
-    "has_current_evidence": false,
-    "open_critical_count": 0,
-    "open_high_count": 0,
-    "high_risks_missing_owner_or_mitigation": 0,
-    "increased_risk_count": 0,
-    "new_high_risk_count": 0,
-    "max_mitigation_overdue_days": 0,
-    "baseline_excerpt": null,
-    "current_excerpt": null,
-    "confidence": 0.0
+function summarizeObservationCoverage(sources: AssuranceSource[]) {
+  const byRole: ObservationCoverageByRole = {
+    baseline: {} as Record<ObservationCoverageDomain, AssuranceCoverageRow>,
+    current: {} as Record<ObservationCoverageDomain, AssuranceCoverageRow>,
+  };
+  for (const role of ["baseline", "current"] as const) {
+    const roleSources = sources.filter((source) => source.role === role);
+    for (const domain of ["budget", "schedule", "progress", "risk"] as const) {
+      const rows = roleSources.flatMap((source) => {
+        const row = source.assurance_observation_coverage.find((item) => item.domain === domain);
+        return row ? [{ row, title: source.title ?? source.document_id }] : [];
+      });
+      const missingCoverage = rows.length !== roleSources.length;
+      const states = rows.map(({ row }) => row.state);
+      const state: ObservationCoverageState = missingCoverage || states.includes("unprocessed")
+        ? "unprocessed"
+        : states.includes("ambiguous_conflicting")
+          ? "ambiguous_conflicting"
+          : states.includes("processed")
+            ? "processed"
+            : "absent";
+      const reasons = [...new Set([
+        ...rows.flatMap(({ row, title }) => row.reason ? [`${title}: ${row.reason}`] : []),
+        ...(missingCoverage ? ["A selected source has no coverage record for this domain."] : []),
+      ])];
+      byRole[role][domain] = {
+        domain,
+        state,
+        total_groups: rows.reduce((total, { row }) => total + row.total_groups, 0),
+        processed_groups: rows.reduce((total, { row }) => total + row.processed_groups, 0),
+        reason: reasons.length ? reasons.join(" ").slice(0, 1500) : null,
+      };
+    }
   }
+  return { byRole };
 }
 
-BASELINE EVIDENCE:
-${baseline}
+function buildReviewExtraction(sources: AssuranceSource[]): {
+  extraction: ReviewExtraction;
+  progressSourceObservations: Record<string, unknown>[];
+} {
+  const rowsFor = (
+    role: "baseline" | "current",
+    domain: AssuranceObservationRow["domain"],
+    observationType: AssuranceObservationRow["observation_type"],
+  ) => sources
+    .filter((source) => source.role === role)
+    .flatMap((source) => source.assurance_observations
+      .filter((row) => row.domain === domain && row.observation_type === observationType)
+      .map((row) => ({ source, row })));
 
-CURRENT EVIDENCE:
-${current}`;
+  const mapMilestones = (role: "baseline" | "current"): MilestoneObservation[] =>
+    rowsFor(role, "schedule", "milestone").map(({ source, row }) => {
+      const observation = row.observation;
+      const scopeLevel = observation.scope_level;
+      return {
+        label: snapshotText(observation.label) ?? "",
+        date: snapshotText(observation.date),
+        periodLabel: snapshotText(observation.period_label),
+        asOfDate: snapshotText(observation.as_of_date),
+        scopeLevel: scopeLevel === "project" || scopeLevel === "wbs" ? scopeLevel : "unknown",
+        scopeLabel: snapshotText(observation.scope_label),
+        excerpt: row.excerpt,
+        sourceRef: assuranceEvidenceReference(source, row),
+      };
+    });
+  const progressRows = (["baseline", "current"] as const).flatMap((role) =>
+    rowsFor(role, "progress", "progress"),
+  );
+  const progressObservations: ProgressObservation[] = progressRows.flatMap(({ source, row }) => {
+    const observation = row.observation;
+    const scopeLevel = observation.scope_level;
+    if (scopeLevel !== "project" && scopeLevel !== "wbs" && scopeLevel !== "unknown") return [];
+    return [{
+      role: source.role,
+      scopeLevel,
+      scopeLabel: snapshotText(observation.scope_label),
+      percent: typeof observation.percent === "number" ? observation.percent : null,
+      periodLabel: snapshotText(observation.period_label),
+      asOfDate: snapshotText(observation.as_of_date),
+      excerpt: row.excerpt,
+      sourceRef: assuranceEvidenceReference(source, row),
+    }];
+  });
+  const riskSnapshots = (role: "baseline" | "current"): RiskSnapshot[] =>
+    rowsFor(role, "risk", "risk_snapshot").map(({ source, row }) => {
+      const observation = row.observation;
+      return {
+        sourceId: snapshotText(observation.risk_id),
+        name: snapshotText(observation.name),
+        description: snapshotText(observation.description),
+        status: snapshotText(observation.status),
+        ratingLabel: snapshotText(observation.rating_label),
+        ratingValue: typeof observation.rating_value === "number" ? observation.rating_value : null,
+        scaleLabel: snapshotText(observation.scale_label),
+        owner: snapshotText(observation.owner),
+        mitigation: snapshotText(observation.mitigation),
+        dueDate: snapshotText(observation.mitigation_due_date),
+        wbs: snapshotText(observation.wbs),
+        periodLabel: snapshotText(observation.period_label),
+        asOfDate: snapshotText(observation.as_of_date),
+        excerpt: row.excerpt,
+        sourceRef: assuranceEvidenceReference(source, row),
+      };
+    });
+  const progressSourceObservations = progressRows.map(({ source, row }) => ({
+    role: source.role,
+    document_id: source.document_id,
+    document_title: source.title,
+    source_version: source.source_version,
+    observation_id: row.id,
+    ...row.observation,
+    evidence_chunk_index: row.evidence_chunk_index,
+    excerpt: row.excerpt,
+    page_number: row.page_number,
+    section_label: row.section_label,
+    source_location: sourceLocationRecord(row.source_location),
+  }));
+
+  return {
+    extraction: {
+      schedule: {
+        baselineMilestones: mapMilestones("baseline"),
+        currentMilestones: mapMilestones("current"),
+        confidence: null,
+      },
+      progress: { observations: progressObservations, confidence: null },
+      riskItems: {
+        baselineSnapshots: riskSnapshots("baseline"),
+        currentSnapshots: riskSnapshots("current"),
+        confidence: null,
+      },
+      risk: {
+        hasCurrentEvidence: false,
+        openCriticalCount: 0,
+        openHighCount: 0,
+        highRisksMissingControl: 0,
+        increasedRiskCount: 0,
+        newHighRiskCount: 0,
+        maxMitigationOverdueDays: 0,
+        currentSource: null,
+        baselineSource: null,
+        currentExcerpt: null,
+        baselineExcerpt: null,
+        confidence: null,
+      },
+    },
+    progressSourceObservations,
+  };
 }
 
-function formatEvidence(
-  chunks: {
-    document_id: string;
-    chunk_text: string;
-    page_number: number | null;
-    documents: { title: string } | { title: string }[] | null;
-  }[],
-  documentIds: Set<string>,
+function buildRiskAssessment(
+  extraction: ReviewExtraction,
+  comparison: ReturnType<typeof buildRiskComparison>,
+  sources: AssuranceSource[],
+  coverage: ObservationCoverageByRole,
+  reportingPeriodEndDate: string,
+): ReviewExtraction["risk"] {
+  const currentSnapshots = extraction.riskItems.currentSnapshots;
+  const currentStatements = sources
+    .filter((source) => source.role === "current")
+    .flatMap((source) => source.assurance_observations
+      .filter((row) => row.domain === "risk" && row.observation_type === "risk_register_statement")
+      .map((row) => ({ source, row })));
+  const baselineStatements = sources
+    .filter((source) => source.role === "baseline")
+    .flatMap((source) => source.assurance_observations
+      .filter((row) => row.domain === "risk" && row.observation_type === "risk_register_statement")
+      .map((row) => ({ source, row })));
+  const explicitlyNoOpenHighRisk = currentStatements.some(
+    ({ row }) => row.observation.state === "no_open_high_or_critical",
+  );
+  const openRiskSnapshots = currentSnapshots.filter((snapshot) => riskStatusIsOpen(snapshot.status) === true);
+  const openCritical = openRiskSnapshots.filter((snapshot) => riskRatingClass(snapshot.ratingLabel) === "critical");
+  const openHigh = openRiskSnapshots.filter((snapshot) => riskRatingClass(snapshot.ratingLabel) === "high");
+  const contradictions = explicitlyNoOpenHighRisk && openCritical.length + openHigh.length > 0;
+  const snapshotsComplete = currentSnapshots.length > 0 && currentSnapshots.every((snapshot) => {
+    const open = riskStatusIsOpen(snapshot.status);
+    return open !== null && (!open || riskRatingClass(snapshot.ratingLabel) !== "unknown");
+  });
+  const hasCurrentEvidence = coverage.current.risk.state === "processed" &&
+    !contradictions && (explicitlyNoOpenHighRisk || snapshotsComplete);
+  let maxMitigationOverdueDays = 0;
+  for (const snapshot of openRiskSnapshots) {
+    const overdueDays = dateDifferenceDays(snapshot.dueDate, reportingPeriodEndDate);
+    if (overdueDays !== null) maxMitigationOverdueDays = Math.max(maxMitigationOverdueDays, overdueDays);
+  }
+  return {
+    hasCurrentEvidence,
+    openCriticalCount: openCritical.length,
+    openHighCount: openHigh.length,
+    highRisksMissingControl: [...openCritical, ...openHigh].filter(
+      (snapshot) => !snapshot.owner || !snapshot.mitigation,
+    ).length,
+    increasedRiskCount: comparison.items.filter((item) => item.changeType === "increased").length,
+    newHighRiskCount: comparison.items.filter((item) =>
+      item.changeType === "new" &&
+      item.current !== null &&
+      riskStatusIsOpen(item.current.status) === true &&
+      ["high", "critical"].includes(riskRatingClass(item.current.ratingLabel)),
+    ).length,
+    maxMitigationOverdueDays,
+    currentSource: currentStatements[0]
+      ? assuranceEvidenceReference(currentStatements[0].source, currentStatements[0].row)
+      : currentSnapshots[0]?.sourceRef ?? null,
+    baselineSource: baselineStatements[0]
+      ? assuranceEvidenceReference(baselineStatements[0].source, baselineStatements[0].row)
+      : extraction.riskItems.baselineSnapshots[0]?.sourceRef ?? null,
+    currentExcerpt: null,
+    baselineExcerpt: null,
+    confidence: null,
+  };
+}
+
+function applyCoverageGaps(
+  findings: ReturnType<typeof evaluateAssuranceReview>,
+  coverage: ObservationCoverageByRole,
 ) {
-  return chunks
-    .filter((chunk) => documentIds.has(chunk.document_id))
-    .map((chunk) => {
-      const related = Array.isArray(chunk.documents)
-        ? chunk.documents[0]
-        : chunk.documents;
-      return `[${related?.title ?? "Document"}${chunk.page_number ? `, page ${chunk.page_number}` : ""}]\n${chunk.chunk_text}`;
-    })
-    .join("\n\n");
+  return findings.map((finding) => {
+    const gaps = (["baseline", "current"] as const)
+      .map((role) => ({ role, ...coverage[role][finding.domain] }))
+      .filter((row) => row.state !== "processed");
+    if (!gaps.length) return finding;
+    const explanation = gaps.map((row) => row.reason ??
+      (row.state === "absent"
+        ? `No ${row.domain} observations were found after processing all ${row.total_groups} ${row.role} group(s).`
+        : `${row.role} ${row.domain} coverage is ${row.state}.`)).join(" ");
+    const findingIsActionable = finding.condition === "critical" || finding.condition === "needs_attention";
+    return {
+      ...finding,
+      condition: findingIsActionable ? finding.condition : "more_evidence_required" as const,
+      severity: findingIsActionable ? finding.severity : "information" as const,
+      headline: findingIsActionable ? finding.headline : `${finding.headline}: coverage gap`,
+      explanation: `${finding.explanation} Coverage gap: ${explanation}`,
+      requiredEvidence: [...new Set([
+        ...finding.requiredEvidence,
+        ...gaps.map((row) => `Complete ${row.role} ${row.domain} observation coverage`),
+      ])],
+      confidence: findingIsActionable ? finding.confidence : null,
+    };
+  });
 }
 
+function snapshotText(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function sourceLocationRecord(value: Record<string, unknown> | null): Record<string, string | number> | null {
+  if (!value) return null;
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, string | number] =>
+      typeof entry[1] === "string" || typeof entry[1] === "number",
+  );
+  return entries.length ? Object.fromEntries(entries) : null;
+}
+
+function assuranceEvidenceReference(
+  source: AssuranceSource,
+  row: AssuranceObservationRow,
+): AssuranceEvidenceReference {
+  return {
+    observationId: row.id,
+    documentId: source.document_id,
+    documentTitle: source.title,
+    sourceContentHash: source.source_version.content_hash,
+    parserVersion: source.source_version.parser_version,
+    contractVersion: source.source_version.contract_version,
+    evidenceChunkIndex: row.evidence_chunk_index,
+    pageNumber: row.page_number,
+    sectionLabel: row.section_label,
+    sourceLocation: sourceLocationRecord(row.source_location),
+    excerpt: row.excerpt,
+  };
+}
+
+function riskStatusIsOpen(status: string | null): boolean | null {
+  if (!status) return null;
+  const normalized = status.toLocaleLowerCase();
+  const closed = /\b(?:not|no longer|never)\s+open\b|\b(?:closed|resolved|mitigated|complete|completed|cancelled|inactive|ditutup|selesai|teratasi)\b/iu.test(normalized);
+  const open = /\b(?:open|active|ongoing|unmitigated|terbuka|aktif|berjalan)\b/iu.test(normalized);
+  return closed === open ? null : open;
+}
+
+function riskRatingClass(label: string | null): "critical" | "high" | "other" | "unknown" {
+  if (!label) return "unknown";
+  const normalized = label.toLocaleLowerCase();
+  if (/\b(?:not|non|below)\s+(?:high|critical)\b/iu.test(normalized)) return "other";
+  if (/\b(?:critical|extreme|very high|kritis|sangat tinggi)\b/iu.test(normalized)) return "critical";
+  if (/\b(?:high|tinggi)\b/iu.test(normalized)) return "high";
+  if (/\b(?:medium|moderate|low|sedang|rendah)\b/iu.test(normalized)) return "other";
+  return "unknown";
+}
 function buildActionRows(findings: ReturnType<typeof evaluateAssuranceReview>) {
   const titles = {
     budget:

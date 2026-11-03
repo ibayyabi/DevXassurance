@@ -1,6 +1,6 @@
 # PMO Assurance Pipeline — Handoff
 
-This README orients the next agent to the approved PMO assurance design, four active domain tickets, and archived cutover ticket 05. It describes the current repo and intended change; the new domain-contract pipeline is not implemented yet. The glossary and ADRs linked below are the source of truth if this summary conflicts with them.
+This README orients the next agent to the approved PMO assurance design, four active domain tickets, and archived cutover ticket 05. The worker persists source-versioned observations; the Assurance action now consumes the claimed versioned snapshot and atomically publishes deterministic findings. This targeted integration does not complete or reopen the archived cutover ticket.
 
 ## Current situation
 
@@ -8,7 +8,7 @@ The product is a Next.js/Supabase project-assurance app. Evidence upload creates
 
 The root README lists PDF, TXT, CSV, DOCX, XLSX, PPTX, and common raster images as supported; legacy `.ppt` may be retained but is not automatically parsed. It documents local Tesseract/Ghostscript OCR and an Ollama Cloud development example. Treat these as documented setup, not proof of the live runtime configuration.
 
-The current assurance path also reads evidence and evaluates Budget, Schedule, and Risk. The classifier currently assigns one primary document type/role, while extraction is not expressed as the PMO domain contracts in this plan. The existing Budget evaluator currently uses `currentForecast ?? currentActual`; see [`evaluateBudget`](../../src/features/assurance/lib/analysis.ts#L161-L164). That means actual cost can be compared when forecast is absent. Ticket 01 must change that behavior: missing EAC is an evidence gap, never a substitute comparison against actual cost.
+The Assurance action reads the claim RPC's versioned observations, derives Budget, Schedule, and Risk deterministically, preserves incomplete coverage as evidence gaps, and atomically publishes findings with result metadata. Completed documents remain selectable; when every extracted fact for a document has a terminal reviewer decision (`user_confirmed`, `user_edited`, or `user_rejected`), its status advances to `completed` while its original processing warning remains visible. Documents still in `needs_review` require current coverage for the exact file/parser/contract version. Baseline and current evidence still require distinct documents.
 
 The existing upload/parser/chunk/source-location path is intentionally reused. This work replaces the assurance-specific extraction and results, not the whole ingestion stack. It does not create a permanent parallel parser or Assurance pipeline.
 

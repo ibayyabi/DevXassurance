@@ -275,6 +275,7 @@ async function runOpenAiCompatibleRequest({
         body: JSON.stringify({
           model,
           temperature,
+          stream: false,
           messages: [
             { role: "system", content: system },
             { role: "user", content: user },

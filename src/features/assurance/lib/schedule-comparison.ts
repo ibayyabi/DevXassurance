@@ -48,6 +48,8 @@ export type MilestoneGapReason = "forecast_not_reported" | "baseline_not_reporte
 
 export type MilestoneComparison = {
   canonicalLabel: string;
+  scopeLevel: "project" | "wbs" | "unknown";
+  scopeLabel: string | null;
   condition: ReviewCondition;
   delayDays: number | null;
   baseline: MilestoneObservation | null;
@@ -58,16 +60,22 @@ export type MilestoneComparison = {
 function groupByCanonical(
   milestones: readonly MilestoneObservation[],
   mappings: readonly MilestoneMapping[],
+  wbsMappings: readonly WbsMapping[],
+  role: "baseline" | "current",
 ): Map<string, MilestoneObservation> {
   const grouped = new Map<string, MilestoneObservation>();
-  for (const milestone of milestones) {
+  milestones.forEach((milestone, index) => {
     const canonical = canonicalMilestoneLabel(milestone.label, mappings) as string;
-    const existing = grouped.get(canonical);
-    // Prefer the first observation that carries a date, so a dated statement
-    // wins over a milestone named without one for the same label.
-    if (existing && !(milestone.date !== null && existing.date === null)) continue;
-    grouped.set(canonical, milestone);
-  }
+    const canonicalScope = milestone.scopeLevel === "wbs"
+      ? canonicalWbsLabel(milestone.scopeLabel, wbsMappings)
+      : milestone.scopeLevel === "project" ? "project" : null;
+    const key = canonicalScope
+      ? `${milestone.scopeLevel}\0${canonicalScope}\0${canonical}`
+      : `unscoped\0${role}\0${milestone.sourceRef?.observationId ?? index}`;
+    const existing = grouped.get(key);
+    if (existing && !(milestone.date !== null && existing.date === null)) return;
+    grouped.set(key, milestone);
+  });
   return grouped;
 }
 
@@ -84,16 +92,26 @@ export function buildMilestoneComparisons(input: {
   baselineMilestones: readonly MilestoneObservation[];
   currentMilestones: readonly MilestoneObservation[];
   mappings: readonly MilestoneMapping[];
+  wbsMappings?: readonly WbsMapping[];
 }): MilestoneComparison[] {
-  const baseline = groupByCanonical(input.baselineMilestones, input.mappings);
-  const current = groupByCanonical(input.currentMilestones, input.mappings);
-
+  const wbsMappings = input.wbsMappings ?? [];
+  const baseline = groupByCanonical(input.baselineMilestones, input.mappings, wbsMappings, "baseline");
+  const current = groupByCanonical(input.currentMilestones, input.mappings, wbsMappings, "current");
   const canonicals = new Set([...baseline.keys(), ...current.keys()]);
   return [...canonicals]
     .sort((first, second) => first.localeCompare(second))
-    .map((canonical) => {
-      const baselineObservation = baseline.get(canonical) ?? null;
-      const currentObservation = current.get(canonical) ?? null;
+    .map((key) => {
+      const baselineObservation = baseline.get(key) ?? null;
+      const currentObservation = current.get(key) ?? null;
+      const canonicalLabel = canonicalMilestoneLabel(
+        baselineObservation?.label ?? currentObservation?.label ?? null,
+        input.mappings,
+      ) ?? "";
+      const scopeLevel = baselineObservation?.scopeLevel ?? currentObservation?.scopeLevel ?? "unknown";
+      const sourceScopeLabel = baselineObservation?.scopeLabel ?? currentObservation?.scopeLabel ?? null;
+      const scopeLabel = scopeLevel === "wbs"
+        ? canonicalWbsLabel(sourceScopeLabel, wbsMappings)
+        : null;
       const delayDays = dateDifferenceDays(
         baselineObservation?.date ?? null,
         currentObservation?.date ?? null,
@@ -101,7 +119,9 @@ export function buildMilestoneComparisons(input: {
 
       if (delayDays === null) {
         return {
-          canonicalLabel: canonical,
+          canonicalLabel,
+          scopeLevel,
+          scopeLabel,
           condition: "more_evidence_required" as const,
           delayDays: null,
           baseline: baselineObservation,
@@ -115,7 +135,9 @@ export function buildMilestoneComparisons(input: {
       const condition: ReviewCondition =
         delayDays > 14 ? "critical" : delayDays > 0 ? "needs_attention" : "on_track";
       return {
-        canonicalLabel: canonical,
+        canonicalLabel,
+        scopeLevel,
+        scopeLabel,
         condition,
         delayDays,
         baseline: baselineObservation,
@@ -132,7 +154,7 @@ export function buildMilestoneComparisons(input: {
  */
 export function buildScheduleFinding(
   comparisons: readonly MilestoneComparison[],
-  scheduleConfidence: number,
+  scheduleConfidence: number | null,
 ): EvaluatedFinding {
   const comparable = comparisons.filter(
     (comparison): comparison is MilestoneComparison & { delayDays: number } =>
@@ -140,9 +162,13 @@ export function buildScheduleFinding(
   );
 
   if (comparable.length === 0) {
-    const gapLabels = comparisons.map((comparison) => comparison.canonicalLabel);
+    const gapLabels = comparisons.map((comparison) =>
+      comparison.scopeLabel
+        ? `${comparison.canonicalLabel} (WBS ${comparison.scopeLabel})`
+        : comparison.canonicalLabel,
+    );
     const explanation = gapLabels.length
-      ? `No milestone has both an approved baseline date and a reported forecast date. Awaiting comparable dates for: ${gapLabels.join(", ")}.`
+      ? `No milestone has both an approved baseline date and a reported forecast date in the same scope. Awaiting comparable dates for: ${gapLabels.join(", ")}.`
       : "At least one milestone needs both an approved baseline date and a reported forecast date.";
     return missingFinding(
       "schedule",
@@ -167,15 +193,19 @@ export function buildScheduleFinding(
       condition === "on_track"
         ? "Compared milestones are on or ahead of baseline"
         : `${worst.canonicalLabel} is forecast ${worst.delayDays} day${worst.delayDays === 1 ? "" : "s"} late`,
-    explanation: `${comparable.length} milestone${comparable.length === 1 ? " was" : "s were"} compared by matching label. The largest forecast delay is ${worst.delayDays} calendar day${worst.delayDays === 1 ? "" : "s"} on ${worst.canonicalLabel}.`,
+    explanation: `${comparable.length} milestone${comparable.length === 1 ? " was" : "s were"} compared by matching label and scope. The largest forecast delay is ${worst.delayDays} calendar day${worst.delayDays === 1 ? "" : "s"} on ${worst.canonicalLabel}.`,
     baselineValue: {
       milestone: worst.canonicalLabel,
+      scope_level: worst.scopeLevel,
+      scope_label: worst.scopeLabel,
       date: worst.baseline?.date ?? null,
       period_label: worst.baseline?.periodLabel ?? null,
       as_of_date: worst.baseline?.asOfDate ?? null,
     },
     currentValue: {
       milestone: worst.canonicalLabel,
+      scope_level: worst.scopeLevel,
+      scope_label: worst.scopeLabel,
       date: worst.current?.date ?? null,
       period_label: worst.current?.periodLabel ?? null,
       as_of_date: worst.current?.asOfDate ?? null,
@@ -184,10 +214,10 @@ export function buildScheduleFinding(
     requiredEvidence: [],
     sourceExcerpts: [
       ...(worst.baseline?.excerpt
-        ? [{ role: "baseline" as const, excerpt: worst.baseline.excerpt.slice(0, 500) }]
+        ? [{ ...(worst.baseline.sourceRef ?? {}), role: "baseline" as const, excerpt: worst.baseline.excerpt.slice(0, 500) }]
         : []),
       ...(worst.current?.excerpt
-        ? [{ role: "current" as const, excerpt: worst.current.excerpt.slice(0, 500) }]
+        ? [{ ...(worst.current.sourceRef ?? {}), role: "current" as const, excerpt: worst.current.excerpt.slice(0, 500) }]
         : []),
     ],
     confidence: scheduleConfidence,
@@ -207,18 +237,31 @@ export function milestoneSourceLabels(input: {
 }
 
 export type ProgressScopeResult = {
-  scopeLevel: "project" | "wbs";
+  scopeLevel: "project" | "wbs" | "unknown";
   scopeLabel: string | null;
   current: ProgressObservation | null;
   prior: ProgressObservation | null;
   deltaPercentPoints: number | null;
 };
 
-function progressScopeKey(observation: ProgressObservation, wbsMappings: readonly WbsMapping[]) {
+function progressScopeKey(
+  observation: ProgressObservation,
+  wbsMappings: readonly WbsMapping[],
+  index: number,
+) {
   if (observation.scopeLevel === "project") return { key: "project", label: null as string | null };
+  if (observation.scopeLevel === "unknown") {
+    return {
+      key: `unknown::${observation.role}::${observation.sourceRef?.observationId ?? index}`,
+      label: null,
+    };
+  }
   const canonical = canonicalWbsLabel(observation.scopeLabel, wbsMappings);
-  return { key: `wbs::${canonical ?? ""}`, label: canonical };
+  return canonical
+    ? { key: `wbs::${canonical}`, label: canonical }
+    : { key: "unmapped-wbs", label: null };
 }
+
 
 /**
  * Reported progress preserved as stated, at project or WBS level. A reported
@@ -234,11 +277,11 @@ export function buildProgressComparison(input: {
 }): ProgressScopeResult[] {
   const scopes = new Map<
     string,
-    { scopeLevel: "project" | "wbs"; scopeLabel: string | null; current: ProgressObservation | null; prior: ProgressObservation | null }
+    { scopeLevel: "project" | "wbs" | "unknown"; scopeLabel: string | null; current: ProgressObservation | null; prior: ProgressObservation | null }
   >();
 
-  for (const observation of input.observations) {
-    const { key, label } = progressScopeKey(observation, input.wbsMappings);
+  input.observations.forEach((observation, index) => {
+    const { key, label } = progressScopeKey(observation, input.wbsMappings, index);
     const entry =
       scopes.get(key) ??
       { scopeLevel: observation.scopeLevel, scopeLabel: label, current: null, prior: null };
@@ -248,17 +291,17 @@ export function buildProgressComparison(input: {
       entry.prior = observation;
     }
     scopes.set(key, entry);
-  }
+  });
 
   return [...scopes.values()]
     .sort((first, second) => {
-      if (first.scopeLevel !== second.scopeLevel) return first.scopeLevel === "project" ? -1 : 1;
-      return (first.scopeLabel ?? "").localeCompare(second.scopeLabel ?? "");
+      const order = { project: 0, wbs: 1, unknown: 2 };
+      return order[first.scopeLevel] - order[second.scopeLevel] ||
+        (first.scopeLabel ?? "").localeCompare(second.scopeLabel ?? "");
     })
     .map((entry) => {
-      // Comparable scope: project, or a WBS scope with a resolved label. A
-      // labelless WBS value is preserved but never compared across periods.
-      const comparableScope = entry.scopeLevel === "project" || entry.scopeLabel !== null;
+      const comparableScope = entry.scopeLevel === "project" ||
+        (entry.scopeLevel === "wbs" && entry.scopeLabel !== null);
       const deltaPercentPoints =
         comparableScope &&
         entry.current?.percent !== null &&

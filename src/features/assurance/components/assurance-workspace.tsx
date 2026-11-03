@@ -39,6 +39,7 @@ import type {
   AssuranceFinding,
   AssuranceReview,
 } from "@/features/assurance/lib/queries";
+import { isReviewEvidenceSelectable } from "@/features/assurance/lib/evidence-readiness";
 import { Button } from "@/components/ui/button";
 import { ReviewEvidenceFilters } from "@/features/assurance/components/review-evidence-filters";
 import { Input } from "@/components/ui/input";
@@ -141,7 +142,15 @@ export function AssuranceWorkspace({
   const failedCount = documents.filter((document) => document.processingStatus === "failed").length;
   const selectedIds = new Set([...baselineIds, ...currentIds]);
   const unavailableSelectedCount = [...selectedIds].filter(
-    (id) => !documents.some((document) => document.id === id && document.processingStatus === "completed"),
+    (id) => !documents.some((document) =>
+      document.id === id && isReviewEvidenceSelectable(
+        document.processingStatus,
+        document.hasCurrentAssuranceCoverage,
+      ),
+    ),
+  ).length;
+  const selectedNeedsReviewCount = documents.filter((document) =>
+    selectedIds.has(document.id) && document.processingStatus === "needs_review",
   ).length;
   const missingBaseline = baselineIds.size === 0;
   const missingCurrent = currentIds.size === 0;
@@ -155,8 +164,8 @@ export function AssuranceWorkspace({
         <section className="rounded-xl border border-status-warn bg-status-warn-bg p-4 text-status-warn-text" role="status">
           <h2 className="font-semibold">Lengkapi bukti tinjauan</h2>
           <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">
-            {missingBaseline && <li>Pilih minimal satu dokumen Baseline Disetujui yang sudah selesai diproses.</li>}
-            {missingCurrent && <li>Pilih minimal satu dokumen Periode Berjalan yang sudah selesai diproses.</li>}
+            {missingBaseline && <li>Pilih minimal satu dokumen Baseline Disetujui yang siap ditinjau.</li>}
+            {missingCurrent && <li>Pilih minimal satu dokumen Periode Berjalan yang siap ditinjau.</li>}
           </ul>
           <Link href={`/app/projects/${projectId}/documents`} className="mt-3 inline-flex items-center gap-1 text-sm font-semibold underline underline-offset-4">
             Buka Pustaka Bukti <ArrowRight className="h-4 w-4" />
@@ -168,9 +177,14 @@ export function AssuranceWorkspace({
           {unavailableSelectedCount} dokumen terpilih tidak tersedia. Coba lagi atau ganti di Pustaka Bukti.
         </p>
       )}
+      {selectedNeedsReviewCount > 0 && (
+        <p className="rounded-lg bg-status-warn-bg p-3 text-sm text-status-warn-text" role="status">
+          {selectedNeedsReviewCount} dokumen terpilih masih berstatus Perlu diperiksa. Analisis menggunakan observasi tervalidasi saja; domain yang belum diproses tetap menjadi kesenjangan bukti.
+        </p>
+      )}
       {(failedCount > 0 || activeProcessing) && (
         <p className="rounded-lg bg-status-warn-bg p-3 text-sm text-status-warn-text" role="status">
-          {failedCount > 0 ? `${failedCount} file lainnya gagal diproses` : "Beberapa file masih diproses"}; bukti baseline/periode berjalan yang sudah selesai tetap dapat ditinjau.
+          {failedCount > 0 ? `${failedCount} file lainnya gagal diproses` : "Beberapa file masih diproses"}; bukti yang sudah siap ditinjau tetap dapat dianalisis.
         </p>
       )}
 
@@ -296,7 +310,7 @@ function EvidenceStep({
   currentIds: Set<string>;
 }) {
   return (
-    <SectionCard icon={UploadCloud} title="Langkah 1, Bukti — pilih bukti baseline dan periode berjalan" subtitle="Baseline berarti rencana yang disetujui. Periode berjalan berarti bukti untuk bulan pelaporan ini. Hanya dokumen yang selesai diproses yang dapat dipilih.">
+    <SectionCard icon={UploadCloud} title="Langkah 1, Bukti — pilih bukti baseline dan periode berjalan" subtitle="Dokumen selesai dapat dipilih. Dokumen berstatus Perlu diperiksa hanya dapat dipilih jika observasi assurance untuk versi file saat ini tersedia; warning pemrosesan dan kesenjangan domain tetap ditampilkan.">
       {documents.length === 0 ? (
         <Link
           href={`/app/projects/${projectId}/documents`}
