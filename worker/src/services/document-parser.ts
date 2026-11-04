@@ -360,7 +360,7 @@ type ZipTextReader = {
 
 // Bump whenever parsed chunk/source-reference output changes: cached extraction
 // groups are keyed by this version, so older rows are never reused.
-const PARSER_VERSION = "document-parser/11";
+const PARSER_VERSION = "document-parser/12";
 const MAX_CHUNK_LENGTH = 4000;
 // Growth ceiling per chunk: retained row references always fit, then cell
 // references are added row by row. Cells left uncovered stay citable through
@@ -639,8 +639,13 @@ async function parseXlsxDocument(
     // Workbook-declared subject labels and each sheet's own title block: the
     // worker's fallback proof for a component scope when the cited row has no
     // scope column and the workbook declares exactly one subject.
-    const workbookSubjects = new Set<string>();
-    const sheetTitles: Record<string, string> = {};
+    const workbookSubjects: Array<{
+      value: string;
+      key: string;
+      sheetName: string;
+      valueCell: string;
+    }> = [];
+    const sheetTitles: Record<string, { text: string; cell: string }> = {};
 
     for (const sheet of sheets) {
       const xml = await zip.file(sheet.path)?.async("text");
@@ -730,7 +735,9 @@ async function parseXlsxDocument(
           .join(" | ");
         // The first table header of a sheet is its title block, which names the
         // sheet's own subject.
-        if (!(sheet.name in sheetTitles)) sheetTitles[sheet.name] = headerText;
+        if (!(sheet.name in sheetTitles)) {
+          sheetTitles[sheet.name] = { text: headerText, cell: headerCells[0].reference };
+        }
         blocks.push({
           text: headerText,
           kind: "table-header",
@@ -822,7 +829,20 @@ async function parseXlsxDocument(
           const keyCell = row.cells[0];
           if (keyCell?.textual && SUBJECT_KEY_CUE.test(keyCell.value)) {
             const subjectCell = row.cells.slice(1).find((cell) => cell.value.trim());
-            if (subjectCell) workbookSubjects.add(subjectCell.value.trim());
+            const value = subjectCell?.value.trim();
+            if (
+              value &&
+              !workbookSubjects.some(
+                (subject) => subject.value === value && subject.sheetName === sheet.name,
+              )
+            ) {
+              workbookSubjects.push({
+                value,
+                key: keyCell.value.trim(),
+                sheetName: sheet.name,
+                valueCell: subjectCell.reference,
+              });
+            }
           }
           if (row.cells.some((cell) => cell.dateFormat)) {
             warnings.push(`Sheet "${sheet.name}" contains date-formatted raw values; recognized dates are normalized and invalid or unavailable values need review.`);
@@ -879,7 +899,7 @@ async function parseXlsxDocument(
         sheetNames: sheets.map((sheet) => sheet.name),
         textLength: chunks.reduce((length, chunk) => length + chunk.chunkText.length, 0),
         warnings: [...new Set(warnings)],
-        subjects: [...workbookSubjects],
+        subjects: workbookSubjects,
         sheetTitles,
       },
     };

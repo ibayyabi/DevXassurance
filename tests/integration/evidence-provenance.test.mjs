@@ -30,6 +30,9 @@ const WEEKLY = "Weekly Report";
 const SUBJECT = "Alarm Kebencanaan";
 const DIMENSIONS = ["overall", "schedule", "cost", "risk", "governance", "audit_readiness"];
 
+// The milestone source is a plan/due date column of the workplan sheet, found by
+// its own text rather than by a fixed cell.
+const MILESTONE_TEXT = /Baseline Start:\s*\d{4}-\d{2}-\d{2}/;
 const CASES = [
   { session: "2026-10-09_w4", actualCell: "D7", actualRow: 7, cutOffCell: "B7", percent: 12.5, week: "W4", cutOff: "2026-10-09", unresolvedCell: "F8", unresolvedRow: 8 },
   { session: "2026-10-16_w5", actualCell: "D8", actualRow: 8, cutOffCell: "B8", percent: 20.4, week: "W5", cutOff: "2026-10-16", unresolvedCell: "F9", unresolvedRow: 9 },
@@ -251,22 +254,25 @@ function alarmGroupResponse(prompt, spec) {
       },
     ];
   }
-  const cutOffSource = references.find(
+  // A milestone date is legitimately a plan/due date column, which the row
+  // metadata proves without treating it as a record date.
+  const milestoneSource = references.find(
     (reference) =>
-      reference.source_location?.sheetName === WEEKLY &&
-      reference.source_location?.cellRangeStart === spec.cutOffCell,
+      MILESTONE_TEXT.test(reference.text) &&
+      reference.source_location?.cellRangeStart === reference.source_location?.cellRangeEnd,
   );
-  if (cutOffSource) {
+  const milestoneDate = /(\d{4}-\d{2}-\d{2})/.exec(milestoneSource?.text ?? "")?.[1] ?? null;
+  if (milestoneSource && milestoneDate) {
     output.assurance_observations.milestones.push({
-      label: cutOffSource.text.split(":")[0],
-      raw_date: spec.cutOff,
-      date: spec.cutOff,
+      label: milestoneSource.text.split(":")[0].trim(),
+      raw_date: milestoneDate,
+      date: milestoneDate,
       scope_level: "unknown",
       scope_label: null,
       period_label: null,
       as_of_date: null,
-      excerpt: cutOffSource.text,
-      source_id: cutOffSource.source_id,
+      excerpt: milestoneSource.text,
+      source_id: milestoneSource.source_id,
     });
   }
   for (const [cell, text] of [
@@ -319,10 +325,35 @@ test("the real W4/W5 workbooks link a dated actual to its row, column, and subje
         );
       }
     }
-    // The workbook declares exactly one subject, and the Weekly Report sheet
-    // states it in its own title block.
-    assert.deepEqual(parsed.parserMetadata.subjects, [SUBJECT]);
-    assert.match(parsed.parserMetadata.sheetTitles[WEEKLY], new RegExp(SUBJECT, "i"));
+    // The workbook declares exactly one subject (twice, with an exact locator),
+    // and the Weekly Report sheet states it in its own title block.
+    assert.deepEqual(
+      [...new Set(parsed.parserMetadata.subjects.map((subject) => subject.value))],
+      [SUBJECT],
+    );
+    assert.ok(
+      parsed.parserMetadata.subjects.every(
+        (subject) =>
+          typeof subject.key === "string" &&
+          typeof subject.sheetName === "string" &&
+          /^[A-Z]+\d+$/.test(subject.valueCell),
+      ),
+    );
+    assert.match(parsed.parserMetadata.sheetTitles[WEEKLY].text, new RegExp(SUBJECT, "i"));
+    assert.match(parsed.parserMetadata.sheetTitles[WEEKLY].cell, /^[A-Z]+\d+$/);
+    // The milestone date comes from a plan/due date column, not a record date.
+    const milestoneReference = parsed.chunks
+      .flatMap((chunk) => chunk.sourceReferences ?? [])
+      .find(
+        (reference) =>
+          MILESTONE_TEXT.test(reference.text) &&
+          reference.sourceLocation?.cellRangeStart === reference.sourceLocation?.cellRangeEnd,
+      );
+    assert.ok(milestoneReference, `${spec.session} keeps the plan date cell locator`);
+    const milestoneDate = /(\d{4}-\d{2}-\d{2})/.exec(milestoneReference.text)?.[1] ?? null;
+    const milestoneCell = milestoneReference.sourceLocation?.cellRangeStart;
+    assert.ok(milestoneDate);
+    assert.equal(typeof milestoneCell, "string");
 
     const mock = alarmFetchMock(spec);
     const jobResult = await withLocalOllama(mock, async () =>
@@ -330,7 +361,7 @@ test("the real W4/W5 workbooks link a dated actual to its row, column, and subje
     );
     assert.equal(jobResult.status, "completed", jobResult.processing_error);
     assert.equal(jobResult.processing_status, "needs_review");
-    assert.equal(jobResult.parser_version, "document-parser/11");
+    assert.equal(jobResult.parser_version, "document-parser/12");
     assert.match(jobResult.processing_error ?? "", /Formula results are unavailable/);
 
     const extraction = await withLocalOllama(mock, async () =>
@@ -342,10 +373,16 @@ test("the real W4/W5 workbooks link a dated actual to its row, column, and subje
       ),
     );
     assert.equal(extraction.ok, true, extraction.ok ? undefined : extraction.errorMessage);
-    outcomes.push({ spec, jobResult, extraction: extraction.extraction });
+    outcomes.push({
+      spec,
+      jobResult,
+      extraction: extraction.extraction,
+      milestoneDate,
+      milestoneCell,
+    });
   }
 
-  for (const { spec, jobResult, extraction } of outcomes) {
+  for (const { spec, jobResult, extraction, milestoneDate, milestoneCell } of outcomes) {
     const warnings = extraction.quality_warnings.join(" ");
 
     // One dated actual survives, linked to the cited row.
@@ -363,6 +400,16 @@ test("the real W4/W5 workbooks link a dated actual to its row, column, and subje
     assert.ok(actual.excerpt.includes(`${spec.percent}%`));
     assert.ok(actual.excerpt.includes(spec.cutOff));
     assert.ok(jobResult.chunks[actual.evidence_chunk_index].chunk_text.includes(actual.excerpt));
+    // The proven scope is traced to exact locations, not to an uncited string.
+    assert.deepEqual(
+      actual.scope_provenance.map((entry) => entry.kind),
+      ["declared_subject", "sheet_title"],
+    );
+    assert.equal(actual.scope_provenance[0].excerpt, SUBJECT);
+    assert.match(actual.scope_provenance[0].cell_reference, /^[A-Z]+\d+$/);
+    assert.equal(actual.scope_provenance[1].sheet_name, WEEKLY);
+    assert.match(actual.scope_provenance[1].cell_reference, /^[A-Z]+\d+$/);
+    assert.match(actual.scope_provenance[1].excerpt, new RegExp(SUBJECT, "i"));
 
     // The due date and the unknown scope are excluded with a precise reason.
     assert.match(
@@ -382,11 +429,12 @@ test("the real W4/W5 workbooks link a dated actual to its row, column, and subje
     assert.match(warnings, /formula_result_unavailable/);
     assert.equal(extraction.assurance_observations.progress.some((item) => item.percent === 0), false);
 
-    // The single cut-off cell keeps its own dated observation.
+    // A milestone keeps its own plan/due date from the cited cell.
     assert.equal(extraction.assurance_observations.milestones.length, 1, warnings);
-    const cutOff = extraction.assurance_observations.milestones[0];
-    assert.equal(cutOff.date, spec.cutOff);
-    assert.equal(cutOff.source_location.cellRangeStart, spec.cutOffCell);
+    const milestone = extraction.assurance_observations.milestones[0];
+    assert.equal(milestone.date, milestoneDate);
+    assert.equal(milestone.source_location.cellRangeStart, milestoneCell);
+    assert.equal(milestone.source_location.cellRangeEnd, milestoneCell);
 
     // An unresolved formula still keeps every evidence domain open.
     assert.deepEqual(
@@ -481,7 +529,7 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
           },
           rowCells: row.cells,
         })),
-        // One cell whose own label is a due date.
+        // Single cells labelled as a due date and as a cut-off date.
         {
           sourceId: "cell-due",
           chunkIndex: 0,
@@ -497,6 +545,22 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
             cellRangeEnd: "A9",
           },
           cell: cell(9, "A", "Due Date", "2026-10-30", "46325", "2026-10-30"),
+        },
+        {
+          sourceId: "cell-cutoff",
+          chunkIndex: 0,
+          text: "Cut-off Date: 2026-10-16",
+          modelText: "Cut-off Date: 2026-10-16",
+          sourceLocation: {
+            kind: "xlsx",
+            sheetName: WEEKLY,
+            tableNumber: 0,
+            rowStart: 8,
+            rowEnd: 8,
+            cellRangeStart: "A8",
+            cellRangeEnd: "A8",
+          },
+          cell: cell(8, "A", "Cut-off Date", "2026-10-16", "46311", "2026-10-16"),
         },
       ],
     },
@@ -531,8 +595,23 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
       // The row's own cut-off column, which the structure proves.
       progress("20.4%", 20.4, "2026-10-16", "row-8"),
     ];
+    const milestone = (date, sourceId) => ({
+      label: date === "2026-10-23" ? "Due Date" : "Cut-off Date",
+      raw_date: date,
+      date,
+      scope_level: "unknown",
+      scope_label: null,
+      period_label: null,
+      as_of_date: null,
+      excerpt: rows.find((row) => row.sourceId === sourceId).text,
+      source_id: sourceId,
+    });
     output.assurance_observations.milestones = [
-      // Even a single cited cell cannot present a due date as a record date.
+      // A due/target column is the legitimate source for a milestone date.
+      milestone("2026-10-23", "row-8"),
+      // The report cut-off must not stand in for a milestone date.
+      milestone("2026-10-16", "row-8"),
+      // A single due-date cell is a legitimate milestone date too.
       {
         label: "Due Date",
         raw_date: "2026-10-30",
@@ -544,13 +623,50 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
         excerpt: "Due Date: 2026-10-30",
         source_id: "cell-due",
       },
+      // A single cut-off cell must not stand in for a milestone date.
+      {
+        label: "Cut-off Date",
+        raw_date: "2026-10-16",
+        date: "2026-10-16",
+        scope_level: "unknown",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: "Cut-off Date: 2026-10-16",
+        source_id: "cell-cutoff",
+      },
+    ];
+    const risk = (mitigationDueDate) => ({
+      risk_id: null,
+      name: null,
+      description: null,
+      status: null,
+      rating_label: null,
+      rating_value: null,
+      scale_label: null,
+      owner: null,
+      mitigation: null,
+      mitigation_due_date: mitigationDueDate,
+      raw_mitigation_due_date: null,
+      wbs: null,
+      period_label: null,
+      as_of_date: null,
+      raw_value: "20.4%",
+      excerpt: rows.find((row) => row.sourceId === "row-8").text,
+      source_id: "row-8",
+    });
+    output.assurance_observations.risk_snapshots = [
+      // A mitigation due date is legitimately a due/target column date.
+      risk("2026-10-23"),
+      // The report cut-off must not stand in for a mitigation due date.
+      risk("2026-10-16"),
     ];
     return modelResponse(output);
   }, async () => {
     const result = await extractDocumentGroups(
       job("weekly.txt"),
       chunks,
-      { parserVersion: "document-parser/11" },
+      { parserVersion: "document-parser/12" },
       memoryGroupStore(),
     );
     assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
@@ -558,7 +674,13 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
     assert.equal(accepted.length, 1);
     assert.equal(accepted[0].as_of_date, "2026-10-16");
     assert.equal(accepted[0].source_location.rowStart, 8);
-    assert.equal(result.extraction.assurance_observations.milestones.length, 0);
+    const milestones = result.extraction.assurance_observations.milestones;
+    assert.deepEqual(milestones.map((item) => [item.label, item.date]), [
+      ["Due Date", "2026-10-23"],
+      ["Due Date", "2026-10-30"],
+    ]);
+    const risks = result.extraction.assurance_observations.risk_snapshots;
+    assert.deepEqual(risks.map((item) => item.mitigation_due_date), ["2026-10-23"]);
     const warnings = result.extraction.quality_warnings.join(" ");
     assert.match(
       warnings,
@@ -574,7 +696,15 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
     );
     assert.match(
       warnings,
-      /milestones\[0\]\.date is the value of the cited source's "Due Date" column, not a cut-off or period date/,
+      /milestones\[1\]\.date is the cited row's "Cut-off Date" value, not a due or event date/,
+    );
+    assert.match(
+      warnings,
+      /milestones\[3\]\.date is the cited source's "Cut-off Date" value, not a due or event date/,
+    );
+    assert.match(
+      warnings,
+      /risk_snapshots\[1\]\.mitigation_due_date is the cited row's "Cut-off Date" value, not a due or event date/,
     );
   });
 });
@@ -647,7 +777,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
       ),
     );
 
-  const cold = await runOnce("document-parser/11");
+  const cold = await runOnce("document-parser/12");
   assert.equal(cold.ok, true, cold.ok ? undefined : cold.errorMessage);
   assert.equal(calls, 1);
   assert.equal(cold.extraction.assurance_observations.progress[0].percent, 42);
@@ -659,8 +789,8 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // Every completed row records the parser and validation versions that produced
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
-  assert.equal(cached.parserVersion, "document-parser/11");
-  assert.equal(cached.schemaVersion, "phase6-document-extraction/18");
+  assert.equal(cached.parserVersion, "document-parser/12");
+  assert.equal(cached.schemaVersion, "phase6-document-extraction/19");
 
   // A cache hit re-derives the location from the live chunk instead of trusting
   // a stored payload that dropped it.
@@ -668,7 +798,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   delete withoutLocation.assurance_observations.progress[0].source_location;
   store.rows.set(cached.groupKey, { ...cached, result: withoutLocation });
   calls = 0;
-  const warm = await runOnce("document-parser/11");
+  const warm = await runOnce("document-parser/12");
   assert.equal(warm.ok, true, warm.ok ? undefined : warm.errorMessage);
   assert.equal(calls, 0, "the completed group is reused without a model call");
   assert.deepEqual(
@@ -680,7 +810,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // the stale payload is neither selected nor trusted.
   calls = 0;
   marker = "Progress: 42%";
-  const stale = await runOnce("document-parser/10");
+  const stale = await runOnce("document-parser/11");
   assert.equal(stale.ok, true, stale.ok ? undefined : stale.errorMessage);
   assert.equal(calls, 1, "the stale cached group is re-extracted");
   assert.equal(stale.extraction.facts[0].extracted_text, "Progress: 42%");

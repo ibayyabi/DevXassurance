@@ -16,27 +16,32 @@ Baca [rencana dan kontrak bersama](../plan.md), khususnya constraint model dan k
 
 ## Comments
 
-**Handoff 4 (worktree `../DevXassurance-pmo-health-01`, branch `ticket/pmo-health-01`, baseline `db96485`).**
+**Handoff 5 (worktree `../DevXassurance-pmo-health-01`, branch `ticket/pmo-health-01`, baseline `db96485`).**
 
-Larangan menyeluruh “tanggal hanya dari satu sel” dibatalkan. Diganti dengan **linking struktural** dari metadata baris/kolom/header yang dihasilkan parser:
+Dua bug semantik dari review 992299f diperbaiki.
 
-- Parser (`document-parser.ts`) menambahkan metadata terstruktur per sel: `ParsedSourceCell { sheetName, row, column, cell, label, value, rawValue, dateIso }`. Referensi per-sel membawa `cell`, referensi baris membawa `rowCells` (hanya untuk baris yang tidak dipecah karena batas panjang; baris tanpa metadata itu kembali ke aturan excerpt). Parser juga mengekspor `parserMetadata.subjects` (nilai dari baris key-value yang key-nya menyebut subjek, mis. `Subsystem`, hanya dari baris data — bukan header) dan `parserMetadata.sheetTitles` (blok header pertama tiap sheet). Tidak ada nama file atau layout fixture yang di-hardcode.
-- Validasi (`document-extraction.ts`) menilai klaim tanggal lewat kolom yang terbukti: baris dengan **tepat satu** kolom cut-off/periode menerima tanggal hanya bila nilainya sama dengan nilai sel kolom itu; kolom due/target/start/mitigation tidak pernah dianggap tanggal laporan; baris dengan **lebih dari satu** kolom cut-off/periode ditolak sebagai ambigu. Sel tunggal pun diperiksa: label sel yang berupa kolom due/target membuat klaim tanggalnya ditolak. Bila metadata tidak ada (payload lama / dokumen non-spreadsheet) aturan excerpt yang berlaku tetap dipertahankan.
-- Scope komponen: diterima bila baris yang dikutip punya kolom scope berlabel (activity/work package/task/wbs/component/dll) yang berisi label tersebut, **atau** bila workbook mendeklarasikan tepat satu subjek dan judul sheet yang dikutip menyebut subjek itu. Selain itu tetap gap.
-- `PARSER_VERSION` → `document-parser/11`, `EXTRACTION_SCHEMA_VERSION` → `phase6-document-extraction/18`; keduanya bagian group key, jadi baris cache dari versi lama tidak bisa dipakai ulang. `phase6-document-parser.test.mjs` hanya diperbarui pada dua literal versi.
+1. **Satu aturan tanggal tidak boleh dipakai untuk semua field.** Sekarang semantik per field:
+   - `as_of_date` (milestone/progress/risk/risk statement/cost) = tanggal laporan baris → hanya kolom cut-off/periode yang sah; kolom due/target/start/mitigation tidak pernah menjadi record date; lebih dari satu kolom cut-off = ambigu dan ditolak.
+   - milestone `date` dan `mitigation_due_date` = justru **sah** berasal dari kolom due/target/plan/baseline/actual, sehingga tidak pernah ditolak karena "due"; ditolak hanya bila nilainya terbukti berasal dari kolom record (cut-off/periode) dan tidak ada kolom due yang menyatakan tanggal itu.
+   Helper terpisah `asOfDateError` / `dueDateError`; `checkDate(..., "record" | "due")` dipasang sesuai field.
+2. **Provenance scope harus tertelusur.** `scope_provenance` (array `{ kind, sheet_name, cell_reference, excerpt }`) kini ikut pada observation untuk setiap scope yang dibuktikan: `cited_row_column` bila kolom scope pada baris yang dikutip, atau `declared_subject` + `sheet_title` (lokasi sel deklarasi dan sel judul sheet) untuk subjek workbook. Field ini tersimpan di jsonb `assurance_observations.observation` lewat jalur persistensi yang ada (tanpa migrasi). `parserMetadata.subjects`/`sheetTitles` sekarang membawa lokasi sel (`valueCell`, `cell`), bukan string tanpa sitasi; kelayakan subjek tetap dihitung dari nilai unik, bukan jumlah entri.
 
-Bukti test (`tests/integration/evidence-provenance.test.mjs`, respons model dibangun hanya dari `SOURCE_REFERENCES_JSON`):
-- **Valid W4/W5**: actual per baris diterima dengan `as_of_date` = cut-off baris (2026-10-09 / 2026-10-16), `period_label` W4/W5, `scope_level: "wbs"`, `scope_label: "Alarm Kebencanaan"` (subjek unik workbook + judul sheet), lokasi = referensi baris; milestone dari sel cut-off tetap ada; fact sel literal D7/D8 menyimpan lokasi sel tepat.
-- **Due date palsu**: klaim `as_of_date` = nilai kolom Due Date di baris yang sama ditolak walau tanggalnya ada di excerpt (pesan menyebut kolom Cut-off Date dan nilainya); baris yang hanya punya kolom Due Date ditolak dengan pesan kolom due; baris dengan dua kolom cut-off/periode (Report Date + Cut-off Date) ditolak sebagai ambigu; sel tunggal berlabel Due Date ditolak untuk milestone.
-- **Negatif lain**: scope yang tidak dideklarasikan/dibuktikan baris ditolak, source ID palsu ditolak, kutipan sel/baris formula ditolak `formula_result_unavailable`, coverage empat domain `unprocessed` (tanpa nol/hijau). Cache: versi parser lama tidak dipakai ulang; cache hit tidak memanggil model dan lokasi diturunkan ulang dari chunk hidup. Cost: periode/cut-off tak bersumber ditolak.
+Parser: `PARSER_VERSION` → `document-parser/12` (metadata sel + subjects/sheetTitles berlokasi). Validasi: `EXTRACTION_SCHEMA_VERSION` → `phase6-document-extraction/19`. Keduanya bagian group key.
 
-Verifikasi: **tidak menjalankan test/build/lint** (instruksi integrator). Hanya `node --check` pada dua `.mjs` dan transpile sintaks TS pada dua file worker. Integrator wajib menjalankan: `node --test tests/integration/evidence-provenance.test.mjs tests/integration/phase6-document-parser.test.mjs tests/integration/phase6-document-extraction.test.mjs`. Catatan: test extraction/summary memakai chunk sintetis (tanpa `rowCells`/`cell`), jadi perilakunya tidak berubah; hanya `phase6-document-parser.test.mjs` yang membangun XLSX.
+Bukti test (`tests/integration/evidence-provenance.test.mjs`, respons hanya dari `SOURCE_REFERENCES_JSON`):
+- **Valid W4/W5**: actual per baris diterima dengan `as_of_date` 2026-10-09/2026-10-16, `period_label` W4/W5, `scope_level: "wbs"` + `scope_label: "Alarm Kebencanaan"` + `scope_provenance` = [declared_subject(B5/B4), sheet_title(Weekly Report)]; milestone dari sel kolom plan `Baseline Start` (Workplan & Gantt) diterima dengan `date` 2026-09-18 dan lokasi sel tunggal; fact sel literal D7/D8 menyimpan lokasi sel tepat.
+- **Due date**: klaim `as_of_date` dari kolom Due Date ditolak walau tanggalnya ada di excerpt; baris ber-`Due Date` saja ditolak sebagai record date; baris `Report Date` + `Cut-off Date` ditolak ambigu.
+- **Regresi field due**: milestone dari kolom Due Date (baris maupun sel tunggal) **diterima**; milestone dari cut-off ditolak ("not a due or event date"); `mitigation_due_date` dari kolom Due Date diterima, dari cut-off ditolak.
+- Negatif lain: scope tak terbukti, source ID palsu, kutipan formula, coverage `unprocessed`, cache hit/versi lama.
+
+Verifikasi: **tidak menjalankan test/build/lint** (instruksi integrator). Hanya `node --check` pada dua `.mjs` dan transpile sintaks TS pada dua file worker. Integrator wajib menjalankan: `node --test tests/integration/evidence-provenance.test.mjs tests/integration/phase6-document-parser.test.mjs tests/integration/phase6-document-extraction.test.mjs`.
 
 Batas yang tersisa:
-1. Kosakata label: `cut-off|as-of|report(ing) date|report(ing) period|period|cue` untuk kolom periode dan `due|target|start|finish|planned|actual|baseline|mitigation|submission|delivery|approval` untuk kolom non-periode, plus `subsystem|component|work package|discipline|package|scope|activity|task|wbs` untuk kolom scope. Template dengan istilah lain akan menghasilkan gap (aman), bukan salah terima.
-2. Scope subjek dokumen hanya dipakai bila workbook mendeklarasikan tepat satu subjek dan judul sheet mengutipnya; workbook multi-subjek atau tanpa deklarasi tetap gap.
-3. `period_label` tidak dilink ke kolomnya (hanya wajib ada di excerpt); relasi periode lintas cut-off tetap tiket 04.
-4. `percent` harus dilaporkan sebagai persentase tampilan; `raw_value` pecahan murni tanpa dukungan unit tetap gap.
-5. Tidak ada panggilan provider live; kelayakan quoting model nyata tidak dibuktikan, hanya kontrak teks yang diuji.
-6. Mapping route→RPC persistensi tidak berubah dan tidak diuji ulang.
-7. Worktree memakai symlink `node_modules` (gitignored).
+1. Kosakata label kolom (record: `cut-off|as-of|report(ing|ed) date|reporting period|period|periode`; due: `due|target|start|finish|milestone|planned|actual|baseline|mitigation|submission|delivery|approval`; scope: `subsystem|component|work package|discipline|package|scope|activity|task|wbs`). Istilah lain → gap (aman), bukan salah terima. Tidak ada nama file atau layout fixture.
+2. Scope subjek dokumen hanya bila nilai subjek unik dan judul sheet yang dikutip menyatakannya; selain itu gap.
+3. `scope_provenance` dipersist di jsonb observation; read model/UI review belum membacanya (tiket 03).
+4. `period_label` tetap hanya diuji keberadaannya di excerpt (bukan link kolom); relasi periode lintas cut-off tiket 04.
+5. `percent` harus persentase tampilan; `raw_value` pecahan murni tetap gap.
+6. Tidak ada panggilan provider live.
+7. Mapping route→RPC persistensi tidak berubah dan tidak diuji ulang.
+8. Worktree memakai symlink `node_modules` (gitignored).
