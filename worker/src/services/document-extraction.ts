@@ -393,7 +393,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/29";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/30";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -421,7 +421,10 @@ function costMeasureMatchesCitation(
   citedText: string,
 ): boolean {
   if (!sourceValue.trim()) return false;
-  const text = citedText.toLocaleLowerCase();
+  // Parser-authored raw-value annotations repeat values already present in
+  // the visible cell text; they must not create a second, differently
+  // associated measure claim for row citations.
+  const text = citedText.replace(/\s+\[raw value:[^\]]*\]/giu, "").toLocaleLowerCase();
   const value = sourceValue.toLocaleLowerCase();
   const roles = new Set<string>();
   let valueIndex = text.indexOf(value);
@@ -2229,7 +2232,7 @@ function validateGroupExtraction(
       /^\s*[,，]\s*[\p{L}\p{N}_][\p{L}\p{N}_\s().%/_-]{0,79}\s*[:=]\s*$/u;
     const narrativeFieldBoundary =
       /^\s*[,，]?\s*(?:actual\b(?:\s*%|\s+percent(?:age)?|\s+progress|\s+to\s+date)?|progress\b|realisasi\b|kemajuan\b|completed\b|completion\b|forecast\b|ramalan\b|estimate(?:\s+at\s+completion)?\b|estimasi\b|eac\b|baseline\b|approved\b|disetujui\b|budget\b|anggaran\b|cost\b|biaya\b|currency\b|mata\s+uang\b|amount\b|nilai\b|report(?:ed|ing)?\s+(?:date|period)\b|as[\s-]?of\b|cut[\s-]?off(?:\s+date)?\b|due(?:\s+date)?\b|target(?:\s+date)?\b|week\b|minggu\b|month\b|bulan\b|period(?:e)?\b)\s*[:#=-]?\s*$/iu;
-    const separatorBoundary = /^\s*[,;|:–—-]?\s*$/u;
+    const grammaticalValueBoundary = /^\s+is\s*$/iu;
     const scopeCuePattern =
       /\b(?:wbs|work[\s-]?package|sub[\s-]?system|component|discipline|package|scope)\b\s*(?:name|code)?\s*[:#-]?\s*/giu;
     const anchor = evidenceAnchor.trim().toLocaleLowerCase();
@@ -2250,7 +2253,8 @@ function validateGroupExtraction(
         if (
           labelledFieldBoundary.test(afterScope) ||
           narrativeFieldBoundary.test(afterScope) ||
-          separatorBoundary.test(afterScope)
+          separatorBoundary.test(afterScope) ||
+          grammaticalValueBoundary.test(afterScope)
         ) {
           return true;
         }
