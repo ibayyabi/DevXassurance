@@ -15,3 +15,7 @@ Baca [rencana dan kontrak bersama](../plan.md), termasuk baseline, source versio
 - [ ] Tidak ada penerimaan massal otomatis atau promosi status yang menyembunyikan warning; verifikasi antarmuka, role, dan source version pada lingkungan test terisolasi.
 
 ## Comments
+
+- Persiapan read-only terhadap baseline: `extracted_facts` dan `assurance_observations` adalah dua jalur berbeda; review fakta yang ada tidak otomatis mengoreksi observasi assurance. Pertahankan nilai observasi asli, versi sumber, provenance, alasan dan atribusi reviewer.
+- UI membatasi dokumen `needs_review` pada coverage versi terkini; `save_assurance_evidence` pada baseline belum menerapkan syarat coverage yang sama di RPC. Periksa dan tegakkan invariant pada boundary server, bukan hanya UI.
+- Gunakan pola keputusan assurance yang sudah ada sebagai rujukan, termasuk otorisasi, invalidasi hasil/fingerprint, dan konflik versi. Evaluasi ulang setelah kontrak tiket 01 terintegrasi; `scope_provenance` harus bisa diperiksa reviewer.
