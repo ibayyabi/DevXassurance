@@ -48,6 +48,10 @@ import {
   riskSourceIds,
   riskSourceScales,
 } from "@/features/assurance/lib/risk-comparison";
+import {
+  formatReportingPeriod,
+  reportingPeriodEnd,
+} from "@/features/assurance/lib/review-period";
 import { requireProjectMembership } from "@/features/projects/lib/queries";
 import { canApproveAssuranceBaseline, canManageProject } from "@/features/projects/lib/roles";
 type ObservationCoverageDomain = "budget" | "schedule" | "progress" | "risk";
@@ -95,17 +99,17 @@ type AssuranceAnalysisClaim = {
 
 export async function createAssuranceReview(formData: FormData): Promise<void> {
   const projectId = String(formData.get("projectId") ?? "");
-  const reportingMonth = String(formData.get("reportingMonth") ?? "");
+  const reportingDate = String(formData.get("reportingDate") ?? "");
 
-  if (!projectId || !/^\d{4}-\d{2}$/.test(reportingMonth)) {
-    throw new Error("Choose a valid reporting month.");
+  if (!projectId || !/^\d{4}-\d{2}-\d{2}$/.test(reportingDate)) {
+    throw new Error("Choose a valid reporting date.");
   }
 
   const { supabase, user, membership } =
     await requireProjectMembership(projectId);
   assertCanManage(membership.role);
 
-  const reportingPeriod = `${reportingMonth}-01`;
+  const reportingPeriod = reportingDate;
   const title = `${formatReportingPeriod(reportingPeriod)} Assurance Review`;
   const { data: existing } = await supabase
     .from("assurance_reviews")
@@ -118,6 +122,7 @@ export async function createAssuranceReview(formData: FormData): Promise<void> {
     const { error } = await supabase.from("assurance_reviews").insert({
       project_id: projectId,
       reporting_period: reportingPeriod,
+      cutoff_precision: "date",
       title,
       created_by: user.id,
     });
@@ -179,13 +184,18 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
   try {
     const { data: review, error: reviewLookupError } = await supabase
       .from("assurance_reviews")
-      .select("reporting_period")
+      .select("reporting_period, cutoff_precision")
       .eq("id", reviewId)
       .eq("project_id", projectId)
       .maybeSingle();
     if (reviewLookupError) throw new Error(reviewLookupError.message);
     if (!review) throw new Error("Assurance review is required.");
-    const reportingPeriod = reportingPeriodEnd(review.reporting_period);
+    // The review's cut-off date, or the legacy month's last day for month-scoped
+    // reviews: baselines effective after it do not apply.
+    const reportingPeriod = reportingPeriodEnd(
+      review.reporting_period,
+      review.cutoff_precision,
+    );
 
     if (!sources.length) {
       await setAnalysisFailure(supabase, projectId, reviewId, attemptId,
@@ -206,7 +216,7 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
     const schedule = await buildScheduleComparison(supabase, projectId, reviewData.extraction);
     const risk = await buildRiskSnapshotComparison(supabase, projectId, reviewData.extraction);
     reviewData.extraction.risk = buildRiskAssessment(
-      reviewData.extraction, risk.comparison, sources, coverage.byRole, reportingPeriodEnd(reportingPeriod),
+      reviewData.extraction, risk.comparison, sources, coverage.byRole, reportingPeriod,
     );
     const findings = applyCoverageGaps(
       evaluateAssuranceReview(reviewData.extraction, budgetFinding, schedule.finding),
@@ -907,15 +917,6 @@ async function buildRiskSnapshotComparison(
   return { comparison, sourceIds, sourceScales };
 }
 
-// The reviewed month's last day: a baseline accepted later does not apply.
-function reportingPeriodEnd(reportingPeriod: string) {
-  const start = new Date(`${reportingPeriod.slice(0, 10)}T00:00:00Z`);
-  if (Number.isNaN(start.getTime())) return reportingPeriod.slice(0, 10);
-  return new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0))
-    .toISOString()
-    .slice(0, 10);
-}
-
 function mapSelectedCostObservations(
   sources: AssuranceSource[],
   role: "baseline" | "current",
@@ -1281,14 +1282,6 @@ function assertCanApproveBaseline(role: Parameters<typeof canApproveAssuranceBas
   if (!canApproveAssuranceBaseline(role)) {
     throw new Error("Your project role cannot accept a baseline or correct an assessed value.");
   }
-}
-
-function formatReportingPeriod(value: string) {
-  return new Intl.DateTimeFormat("en", {
-    month: "long",
-    timeZone: "UTC",
-    year: "numeric",
-  }).format(new Date(`${value}T00:00:00Z`));
 }
 
 function revalidateAssurance(projectId: string) {

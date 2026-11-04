@@ -102,7 +102,7 @@ test("TXT extraction keeps headings and source-linked bounded chunks across long
   for (let index = 1; index <= 24; index += 1) {
     assert.ok(result.chunks.some((chunk) => chunk.chunkText.includes(`PARAGRAPH-${index} `)));
   }
-  assert.equal(result.parserMetadata.parserVersion, "document-parser/6");
+  assert.equal(result.parserMetadata.parserVersion, "document-parser/9");
 });
 test("a single long paragraph is bounded without losing its boundary markers", async () => {
   const paragraph =
@@ -300,6 +300,73 @@ test("XLSX normalizes recognized dates using workbook epoch and flags invalid or
   assert.equal(modern.ok, true);
   if (!modern.ok) return;
   assert.match(modern.chunks.map((chunk) => chunk.chunkText).join("\n"), /1.*1904-01-02/);
+});
+
+test("XLSX cell references locate literals exactly and never claim an unresolved formula as a value", async () => {
+  const result = await parseDocumentBuffer(
+    "cost-cells.xlsx",
+    await makeZip({
+      "xl/workbook.xml": `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Cost" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+      "xl/_rels/workbook.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/cost.xml"/></Relationships>`,
+      "xl/worksheets/cost.xml": `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Item</t></is></c><c r="B1" t="inlineStr"><is><t>Quantity</t></is></c><c r="C1" t="inlineStr"><is><t>Amount</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Cable</t></is></c><c r="B2"><v>10</v></c><c r="C2"><f>B2*5</f></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Crane</t></is></c><c r="B3"><v>2</v></c><c r="C3"><v>1500</v></c></row></sheetData></worksheet>`,
+    }),
+  );
+
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  if (!result.ok) return;
+  assert.equal(result.parserMetadata.parserVersion, "document-parser/9");
+
+  const chunk = result.chunks[0];
+  const references = chunk.sourceReferences ?? [];
+  const cellReference = (cell) =>
+    references.find(
+      (source) =>
+        source.sourceLocation?.cellRangeStart === cell &&
+        source.sourceLocation?.cellRangeEnd === cell,
+    );
+
+  // A literal cell carries its own label context and an exact single-cell locator.
+  const cable = cellReference("A2");
+  assert.ok(cable);
+  assert.equal(cable.sourceLocation?.rowStart, 2);
+  assert.equal(cable.sourceLocation?.rowEnd, 2);
+  assert.equal(cable.sourceLocation?.sheetName, "Cost");
+  assert.equal(cable.modelText, "Item: Cable");
+  assert.ok(chunk.chunkText.includes(cable.text));
+
+  // Same-row literal: it shares row 2 with the unresolved formula, but its own
+  // reference stays a literal and never contains that formula.
+  const quantity = cellReference("B2");
+  assert.ok(quantity);
+  assert.equal(quantity.modelText, "Quantity: 10");
+  assert.doesNotMatch(quantity.text, /B2\*5|no cached value/);
+  assert.equal(cellReference("C3")?.modelText, "Amount: 1500");
+
+  // The formula cell keeps its own reference, and it states the missing cache
+  // instead of presenting a computed literal.
+  const amount = cellReference("C2");
+  assert.ok(amount);
+  assert.match(amount.text, /B2\*5/);
+  assert.match(amount.text, /no cached value/);
+  assert.match(amount.text, /formula cache: missing_cache/);
+  assert.doesNotMatch(amount.modelText, /Amount: \d/);
+
+  // Row references are retained first and still span the whole row.
+  const rowReference = references.find(
+    (source) =>
+      source.sourceLocation?.rowStart === 2 &&
+      source.sourceLocation?.cellRangeStart === "A2" &&
+      source.sourceLocation?.cellRangeEnd === "C2",
+  );
+  assert.ok(rowReference);
+  assert.ok(references.indexOf(rowReference) < references.indexOf(cable));
+
+
+  const unresolved = chunk.formulaCells.filter((cell) => cell.formulaCacheStatus !== "not_formula");
+  assert.deepEqual(
+    unresolved.map((cell) => [cell.cellReference, cell.rowStart, cell.rowEnd, cell.formulaCacheStatus]),
+    [["C2", 2, 2, "missing_cache"]],
+  );
 });
 
 test("PPTX extraction preserves slide order, table rows, and graphic-frame text", async () => {

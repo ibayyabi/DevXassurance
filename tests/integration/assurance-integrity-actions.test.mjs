@@ -21,9 +21,10 @@ const costQueries = parse('src/features/assurance/lib/cost-queries.ts');
 const wbsComparison = load('src/features/assurance/lib/wbs-comparison.ts', {'./cost-evidence':costEvidence});
 const scheduleComparison = load('src/features/assurance/lib/schedule-comparison.ts', {'./analysis':analysis,'./wbs-comparison':wbsComparison});
 const riskComparison = parse('src/features/assurance/lib/risk-comparison.ts');
+const reviewPeriod = parse('src/features/assurance/lib/review-period.ts');
 const role = parse('src/features/projects/lib/roles.ts');
 function fixture(options = {}) {
-  const calls = [], uploads = [], removals = [], renders = [];
+  const calls = [], uploads = [], removals = [], renders = [], inserts = [];
   const context = {
     attempt_id: 'attempt-1', evidence_count: 2,
     findings: ['budget','schedule','risk'].map(domain => ({ domain, condition: 'more_evidence_required',
@@ -53,7 +54,10 @@ function fixture(options = {}) {
     from: table => {
       const rows = options.rows?.[table] ?? [];
       const query = {select(){return this},eq(){return this},in(){return this},order(){return this},limit(){return this},
-        maybeSingle(){return Promise.resolve({data:table==='assurance_reviews'?{reporting_period:'2026-10-01'}:table==='report_previews'?{assurance_review_id:options.legacy?null:'review-1'}:null,error:options.lookupError})},
+        maybeSingle(){return Promise.resolve({data:table==='assurance_reviews'
+          ? (options.existingReview === false ? null : {reporting_period:'2026-10-01',cutoff_precision:'month'})
+          : table==='report_previews' ? {assurance_review_id:options.legacy?null:'review-1'} : null,error:options.lookupError})},
+        insert(row){inserts.push({table,row});return Promise.resolve({data:null,error:options.insertError})},
         then(resolve){const data=table==='assurance_reviews'?[{id:'review-1',reporting_period:'2026-10-01',title:'October',status:'findings_ready'}]:rows;
           return Promise.resolve({data,error:options.queryError}).then(resolve)}};
       assert.ok(['assurance_reviews','report_previews','cost_baselines','cost_observations','wbs_mappings','milestone_mappings','risk_identity_mappings','risk_scale_mappings'].includes(table),`Unexpected table access ${table}`);
@@ -72,11 +76,12 @@ function fixture(options = {}) {
     '@/features/assurance/lib/wbs-comparison':wbsComparison,
     '@/features/assurance/lib/schedule-comparison':scheduleComparison,
     '@/features/assurance/lib/risk-comparison':riskComparison,
+    '@/features/assurance/lib/review-period':reviewPeriod,
     '@/features/reports/lib/render-report':{renderReportPdf:async(input)=>{renders.push(input);return Buffer.from('PDF')},
       renderReportDocx:async(input)=>{renders.push(input);return Buffer.from('DOCX')}},
   };
   return {assurance:load('src/features/assurance/actions/assurance-actions.ts',dependencies),
-    reports:load('src/features/reports/actions/report-actions.ts',dependencies),calls,uploads,removals,renders};
+    reports:load('src/features/reports/actions/report-actions.ts',dependencies),calls,uploads,removals,renders,inserts};
 }
 function form(extra={}) {
   const data=new FormData();
@@ -212,4 +217,24 @@ test('restricted server action callers cannot claim or approve',async()=>{
 test('unregistered upload cleanup failures are explicit without changing storage permissions',async()=>{
   const f=fixture({cleanupDenied:true,rpc:(_name,input)=>input.p_operation==='export_finish'?{error:{message:'Analysis changed'}}:null});
   await assert.rejects(()=>f.reports.exportReport(form({previewId:'preview-1',format:'pdf'})),/Unregistered private export may require cleanup/);
+});
+test('createAssuranceReview stores the cut-off date as-is, with an Indonesian title',async()=>{
+  const f=fixture({existingReview:false});
+  await f.assurance.createAssuranceReview(form({reportingDate:'2026-10-16'}));
+  assert.deepEqual(f.inserts,[{table:'assurance_reviews',row:{
+    project_id:'project-1',reporting_period:'2026-10-16',
+    cutoff_precision:'date',
+    title:'16 Oktober 2026 Assurance Review',created_by:'user-1',
+  }}]);
+});
+test('createAssuranceReview is idempotent per (project, date)',async()=>{
+  const existing=fixture();
+  await existing.assurance.createAssuranceReview(form({reportingDate:'2026-10-16'}));
+  assert.equal(existing.inserts.length,0);
+});
+test('createAssuranceReview rejects a month-only or malformed cut-off date',async()=>{
+  const f=fixture({existingReview:false});
+  await assert.rejects(()=>f.assurance.createAssuranceReview(form({reportingDate:'2026-10'})),/valid reporting date/);
+  await assert.rejects(()=>f.assurance.createAssuranceReview(form({reportingDate:'not-a-date'})),/valid reporting date/);
+  assert.equal(f.inserts.length,0);
 });

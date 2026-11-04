@@ -378,7 +378,7 @@ async function persistCostObservations(
       p_contract_version: contractVersion,
       p_observations: observations.map((observation) => {
         const chunk = chunksByIndex.get(observation.evidence_chunk_index);
-        const sourceLocation = chunk?.parser_metadata?.sourceLocation;
+        const sourceLocation = observation.source_location ?? chunk?.parser_metadata?.sourceLocation;
         return {
           measure: observation.measure,
           source_value: observation.source_value,
@@ -431,7 +431,7 @@ async function persistAssuranceObservations(
     ...observations.risk_register_statements.map((observation) => ({ domain: "risk", observation_type: "risk_register_statement", observation })),
   ].map(({ domain, observation_type, observation }) => {
     const chunk = chunksByIndex.get(observation.evidence_chunk_index);
-    const sourceLocation = chunk?.parser_metadata?.sourceLocation;
+    const sourceLocation = observation.source_location ?? chunk?.parser_metadata?.sourceLocation;
     return {
       domain,
       observation_type,

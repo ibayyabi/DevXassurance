@@ -37,6 +37,11 @@ supported evidence files and calls the configured LLM when available.
   currencies stay source values without conversion. A reviewer may correct the
   assessed value with an attributed reason; the original extraction and its
   citations are unchanged.
+- New Assurance reviews use a reporting cut-off date; existing monthly reviews
+  retain their month-end assessment date. Apply migration
+  `202611030001_assurance_cutoff_period.sql` before deploying the application.
+  Reviewers select evidence explicitly: choosing a cut-off does not filter
+  documents automatically. Missing or unprocessed evidence remains a gap.
 - The Advisor searches fresh project evidence with active-review, role, and
   period scope, preserves follow-up conversation context, and shows only
   citations verified against the exact retrieved chunk and source location.

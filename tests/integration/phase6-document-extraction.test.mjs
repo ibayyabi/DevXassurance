@@ -1400,3 +1400,146 @@ test("structured assurance preserves source versions and excludes unsupported pr
     assert.equal(coverage.risk, "processed");
   }
 });
+
+// A per-cell XLSX reference pins one exact cell, so an unresolved formula in a
+// sibling cell on the same row must not disqualify it. The formula cell itself
+// and the full-row reference that spans its column stay disqualifying.
+test("a per-cell citation survives a sibling cell's unresolved formula while the formula cell and its row citation stay rejected", async () => {
+  const rowLocation = {
+    kind: "xlsx",
+    sheetName: "Weekly",
+    tableNumber: 0,
+    rowStart: 12,
+    rowEnd: 12,
+    cellRangeStart: "A12",
+    cellRangeEnd: "C12",
+  };
+  const cellReference = (sourceId, column, text) => ({
+    sourceId,
+    chunkIndex: 0,
+    text,
+    modelText: text,
+    sourceLocation: {
+      ...rowLocation,
+      cellRangeStart: `${column}12`,
+      cellRangeEnd: `${column}12`,
+    },
+  });
+  const rowText = "Progress: 25% | Cost: 1,000 | Remaining: =B12*2 (no cached value)";
+  const chunks = [{
+    chunkIndex: 0,
+    chunkText: rowText,
+    sectionLabel: "Weekly",
+    sourceLocation: rowLocation,
+    formulaCells: [{
+      sheetName: "Weekly",
+      cellReference: "C12",
+      formula: "=B12*2",
+      formulaCacheStatus: "missing_cache",
+      formulaCacheType: null,
+      formulaCacheRaw: null,
+      cacheProvenance: null,
+      rowStart: 12,
+      rowEnd: 12,
+    }],
+    sourceReferences: [
+      { sourceId: "c0s0", chunkIndex: 0, text: rowText, modelText: rowText, sourceLocation: rowLocation },
+      cellReference("c0s1", "A", "Progress: 25%"),
+      cellReference("c0s2", "B", "Cost: 1,000"),
+      cellReference("c0s3", "C", "Remaining: =B12*2 (no cached value); formula cache: missing_cache"),
+    ],
+  }];
+
+  await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (prompt.startsWith("Classify the entire document") || isExecutiveSummaryPrompt(prompt)) {
+      return modelResponse(validModelOutput(prompt));
+    }
+    const output = validModelOutput(prompt);
+    output.facts = [
+      // A literal cell in column A, disjoint from the unresolved formula in C.
+      { fact_type: "milestone", extracted_text: "Progress: 25%", original_value: "Progress: 25%", confidence: 0.8, source_id: "c0s1" },
+      // The retained full-row reference spans the formula column.
+      { fact_type: "milestone", extracted_text: "Progress: 25%", original_value: "Progress: 25%", confidence: 0.8, source_id: "c0s0" },
+      // The unresolved formula cell itself.
+      { fact_type: "milestone", extracted_text: "Progress: 25%", original_value: "Progress: 25%", confidence: 0.8, source_id: "c0s3" },
+    ];
+    output.assurance_observations.progress = [{
+      raw_value: "25%", percent: 25, scope_level: "project", scope_label: null,
+      period_label: null, as_of_date: null, excerpt: "Progress: 25%", source_id: "c0s1",
+    }];
+    return modelResponse(output);
+  }, async () => {
+    const result = await extractDocumentGroups(
+      job("formula-guard-per-cell"),
+      chunks,
+      { parserVersion: "formula-guard-test-v1" },
+      memoryGroupStore(),
+    );
+    assert.equal(result.ok, true, `${result.errorCode}: ${result.errorMessage}`);
+    assert.deepEqual(
+      result.extraction.facts.map((fact) => [fact.extracted_text, fact.evidence_chunk_index]),
+      [["Progress: 25%", 0]],
+    );
+    assert.equal(result.extraction.assurance_observations.progress[0]?.source_location?.cellRangeStart, "A12");
+    const warnings = result.extraction.quality_warnings.join(" ");
+    assert.doesNotMatch(warnings, /facts\[0\]/);
+    assert.match(warnings, /facts\[1\] was excluded because facts\[1\]\.source_id cites formula_result_unavailable/);
+    assert.match(warnings, /facts\[2\] was excluded because facts\[2\]\.source_id cites formula_result_unavailable/);
+    // An unresolved formula still keeps every evidence domain unprocessed.
+    assert.deepEqual(
+      result.extraction.assurance_observation_coverage.map((row) => row.state),
+      ["unprocessed", "unprocessed", "unprocessed", "unprocessed"],
+    );
+  });
+});
+
+// A reference without a column range (non-XLSX, the synthetic fallback, or an
+// older persisted payload) keeps the conservative row-only rule.
+test("a citation without a column range stays conservative when its row has an unresolved formula", async () => {
+  const sourceLocation = { kind: "xlsx", sheetName: "Legacy", rowStart: 12, rowEnd: 12 };
+  const text = "Legacy: 42 units";
+  const chunks = [{
+    chunkIndex: 0,
+    chunkText: text,
+    sectionLabel: "Legacy",
+    sourceLocation,
+    formulaCells: [{
+      sheetName: "Legacy",
+      cellReference: "B12",
+      formula: "=SUM(A12:A11)",
+      formulaCacheStatus: "cached_error",
+      formulaCacheType: "error",
+      formulaCacheRaw: "#DIV/0!",
+      cacheProvenance: null,
+      rowStart: 12,
+      rowEnd: 12,
+    }],
+    sourceReferences: [{ sourceId: "c0s0", chunkIndex: 0, text, modelText: text, sourceLocation }],
+  }];
+
+  await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (prompt.startsWith("Classify the entire document") || isExecutiveSummaryPrompt(prompt)) {
+      return modelResponse(validModelOutput(prompt));
+    }
+    const output = validModelOutput(prompt);
+    output.facts = [
+      { fact_type: "risk", extracted_text: text, original_value: text, confidence: 0.8, source_id: "c0s0" },
+    ];
+    return modelResponse(output);
+  }, async () => {
+    const result = await extractDocumentGroups(
+      job("formula-guard-legacy"),
+      chunks,
+      { parserVersion: "formula-guard-test-v1" },
+      memoryGroupStore(),
+    );
+    assert.equal(result.ok, true, `${result.errorCode}: ${result.errorMessage}`);
+    assert.deepEqual(result.extraction.facts, []);
+    assert.match(
+      result.extraction.quality_warnings.join(" "),
+      /facts\[0\] was excluded because facts\[0\]\.source_id cites formula_result_unavailable/,
+    );
+  });
+});

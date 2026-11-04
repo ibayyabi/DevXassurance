@@ -81,6 +81,7 @@ export type ExtractedAction = {
 export type SourceCitation = {
   evidence_chunk_index: number;
   excerpt: string;
+  source_location?: ParsedSourceReference["sourceLocation"];
 };
 
 /**
@@ -107,6 +108,7 @@ export type ExtractedCostObservation = {
   status_label: string | null;
   evidence_chunk_index: number;
   excerpt: string;
+  source_location?: ParsedSourceReference["sourceLocation"];
 };
 
 export type AssuranceObservationDomain = "budget" | "schedule" | "progress" | "risk";
@@ -123,6 +125,7 @@ export type ExtractedMilestoneObservation = {
   as_of_date: string | null;
   evidence_chunk_index: number;
   excerpt: string;
+  source_location?: ParsedSourceReference["sourceLocation"];
 };
 
 export type ExtractedProgressObservation = {
@@ -134,6 +137,7 @@ export type ExtractedProgressObservation = {
   as_of_date: string | null;
   evidence_chunk_index: number;
   excerpt: string;
+  source_location?: ParsedSourceReference["sourceLocation"];
 };
 
 export type ExtractedRiskSnapshot = {
@@ -154,6 +158,7 @@ export type ExtractedRiskSnapshot = {
   raw_value: string;
   evidence_chunk_index: number;
   excerpt: string;
+  source_location?: ParsedSourceReference["sourceLocation"];
 };
 
 export type ExtractedRiskRegisterStatement = {
@@ -163,6 +168,7 @@ export type ExtractedRiskRegisterStatement = {
   as_of_date: string | null;
   evidence_chunk_index: number;
   excerpt: string;
+  source_location?: ParsedSourceReference["sourceLocation"];
 };
 
 export type ExtractedAssuranceObservationCoverage = {
@@ -341,7 +347,7 @@ type GroupAttemptResult = {
 type GroupAttemptError = Error & { attempts: number; errorCode: string };
 class TransientProviderError extends Error {}
 
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/15";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/16";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -729,14 +735,25 @@ function collectCandidateInterpretation(
     const [, sheetName, startText, endText] = match;
     const rowStart = Number(startText);
     const rowEnd = Number(endText);
+    // One reference per row keeps the candidate scope at row/table granularity;
+    // the per-cell references that share a row would multiply this citation set
+    // without widening what the diagnostic can cite. Row references come first.
+    const seenRows = new Set<number>();
     const sourceIds = references
       .filter((reference) => {
         const location = reference.sourceLocation;
-        return location?.sheetName === sheetName &&
-          typeof location.rowStart === "number" &&
-          typeof location.rowEnd === "number" &&
-          location.rowStart <= rowEnd &&
-          location.rowEnd >= rowStart;
+        if (
+          location?.sheetName !== sheetName ||
+          typeof location.rowStart !== "number" ||
+          typeof location.rowEnd !== "number" ||
+          location.rowStart > rowEnd ||
+          location.rowEnd < rowStart ||
+          seenRows.has(location.rowStart)
+        ) {
+          return false;
+        }
+        seenRows.add(location.rowStart);
+        return true;
       })
       .map((reference) => reference.sourceId);
     if (!sourceIds.length) return [];
@@ -862,7 +879,7 @@ function allowedSourceCitations(group: ChunkGroup) {
     group.chunks.flatMap((chunk) =>
       sourceReferencesForChunk(chunk).map((source) => [
         source.sourceId,
-        { evidence_chunk_index: source.chunkIndex, excerpt: source.text },
+        { evidence_chunk_index: source.chunkIndex, excerpt: source.text, source_location: source.sourceLocation },
       ] as const),
     ),
   );
@@ -874,11 +891,18 @@ function findSourceReference(group: ChunkGroup, sourceId: string) {
   }
   return undefined;
 }
+function xlsxColumnNumber(cell: string | null | undefined): number | null {
+  const letters = cell?.match(/^([A-Z]+)/i)?.[1]?.toUpperCase();
+  if (!letters) return null;
+  return [...letters].reduce((value, letter) => value * 26 + letter.charCodeAt(0) - 64, 0);
+}
+
 function referenceHasUnavailableFormula(
   chunk: ParsedChunk,
   reference: ParsedSourceReference,
 ): boolean {
-  const { sheetName, rowStart, rowEnd } = reference.sourceLocation ?? {};
+  const { sheetName, rowStart, rowEnd, cellRangeStart, cellRangeEnd } =
+    reference.sourceLocation ?? {};
   if (
     typeof sheetName !== "string" ||
     typeof rowStart !== "number" ||
@@ -886,12 +910,28 @@ function referenceHasUnavailableFormula(
   ) {
     return false;
   }
-  return (chunk.formulaCells ?? []).some((cell) =>
-    ["missing_cache", "cached_empty", "cached_error", "unknown"].includes(cell.formulaCacheStatus) &&
-    cell.sheetName === sheetName &&
-    cell.rowStart <= rowEnd &&
-    cell.rowEnd >= rowStart,
-  );
+  // A per-cell source pins an exact column range, so an unresolved formula in
+  // another column on the same row does not disqualify it. A row- or table-level
+  // source (or a legacy source without a range) keeps only its rows and stays
+  // disqualifying for every unresolved formula on those rows.
+  const startColumn = typeof cellRangeStart === "string" ? xlsxColumnNumber(cellRangeStart) : null;
+  const endColumn = typeof cellRangeEnd === "string" ? xlsxColumnNumber(cellRangeEnd) : null;
+  const columnMin = startColumn === null || endColumn === null ? null : Math.min(startColumn, endColumn);
+  const columnMax = startColumn === null || endColumn === null ? null : Math.max(startColumn, endColumn);
+  return (chunk.formulaCells ?? []).some((cell) => {
+    if (
+      !["missing_cache", "cached_empty", "cached_error", "unknown"].includes(cell.formulaCacheStatus) ||
+      cell.sheetName !== sheetName ||
+      !(cell.rowStart <= rowEnd && cell.rowEnd >= rowStart)
+    ) {
+      return false;
+    }
+    if (columnMin === null || columnMax === null) return true;
+    const formulaColumn = xlsxColumnNumber(cell.cellReference);
+    // An unreadable cell reference cannot be proven disjoint from the citation.
+    if (formulaColumn === null) return true;
+    return formulaColumn >= columnMin && formulaColumn <= columnMax;
+  });
 }
 
 function sourceHasUnavailableFormula(group: ChunkGroup, sourceId: unknown): boolean {
@@ -957,14 +997,9 @@ function sourceContainsExactXlsxText(sourceText: string, value: string) {
 }
 
 function sourceRangeContainsColumn(location: SheetSourceLocation, column: string) {
-  const columnNumber = (cell: string | null) => {
-    const letters = cell?.match(/^([A-Z]+)/i)?.[1]?.toUpperCase();
-    if (!letters) return null;
-    return [...letters].reduce((value, letter) => value * 26 + letter.charCodeAt(0) - 64, 0);
-  };
-  const target = columnNumber(`${column}1`);
-  const start = columnNumber(location.cell_range_start);
-  const end = columnNumber(location.cell_range_end);
+  const target = xlsxColumnNumber(`${column}1`);
+  const start = xlsxColumnNumber(location.cell_range_start);
+  const end = xlsxColumnNumber(location.cell_range_end);
   return target !== null && start !== null && end !== null &&
     target >= Math.min(start, end) && target <= Math.max(start, end);
 }
@@ -1824,6 +1859,7 @@ function validateGroupExtraction(
           as_of_date: asOfDate ?? null,
           status_label: statusLabel!,
           evidence_chunk_index: citation!.evidence_chunk_index,
+          source_location: citation!.source_location,
           excerpt: costExcerpt(citation!.excerpt, sourceValue!),
         });
       });
@@ -1915,6 +1951,7 @@ function validateGroupExtraction(
       period_label: periodLabel!,
       as_of_date: asOfDate ?? null,
       evidence_chunk_index: citation!.evidence_chunk_index,
+      source_location: citation!.source_location,
       excerpt: excerpt!,
     });
   });
@@ -1958,6 +1995,7 @@ function validateGroupExtraction(
       period_label: periodLabel!,
       as_of_date: asOfDate ?? null,
       evidence_chunk_index: citation!.evidence_chunk_index,
+      source_location: citation!.source_location,
       excerpt: excerpt!,
     });
   });
@@ -2023,6 +2061,7 @@ function validateGroupExtraction(
       as_of_date: asOfDate ?? null,
       raw_value: rawValue!,
       evidence_chunk_index: citation!.evidence_chunk_index,
+      source_location: citation!.source_location,
       excerpt: excerpt!,
     });
   });
@@ -2058,6 +2097,7 @@ function validateGroupExtraction(
       period_label: periodLabel!,
       as_of_date: asOfDate ?? null,
       evidence_chunk_index: citation!.evidence_chunk_index,
+      source_location: citation!.source_location,
       excerpt: excerpt!,
     });
   });
@@ -2521,7 +2561,9 @@ function requiredCitation(
     for (const citation of allowedSources.values()) {
       if (
         citation.evidence_chunk_index === value.evidence_chunk_index &&
-        typeof value.excerpt === "string" && value.excerpt.length > 0 && citation.excerpt.includes(value.excerpt)
+        typeof value.excerpt === "string" && value.excerpt.length > 0 && citation.excerpt.includes(value.excerpt) &&
+        (value.source_location === undefined ||
+          JSON.stringify(citation.source_location) === JSON.stringify(value.source_location))
       ) {
         return citation;
       }

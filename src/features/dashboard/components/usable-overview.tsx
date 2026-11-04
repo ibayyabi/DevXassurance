@@ -812,6 +812,7 @@ function formatDate(value: string) {
 
 function formatPeriod(value: string) {
   return new Intl.DateTimeFormat("id", {
+    day: "numeric",
     month: "long",
     timeZone: "UTC",
     year: "numeric",
@@ -820,6 +821,7 @@ function formatPeriod(value: string) {
 
 function shortPeriod(value: string) {
   return new Intl.DateTimeFormat("id", {
+    day: "numeric",
     month: "short",
     timeZone: "UTC",
     year: "2-digit",

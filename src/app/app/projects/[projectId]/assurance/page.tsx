@@ -4,15 +4,21 @@ import { canApproveAssuranceBaseline } from "@/features/projects/lib/roles";
 
 export default async function AssurancePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ projectId: string }>;
+  searchParams: Promise<{ review?: string }>;
 }) {
   const { projectId } = await params;
+  const { review: reviewParam } = await searchParams;
   const workspace = await getAssuranceWorkspace(projectId);
+  const review =
+    workspace.reviews.find((item) => item.id === reviewParam) ?? workspace.review;
   return (
     <AssuranceWorkspace
       projectId={projectId}
-      review={workspace.review}
+      review={review}
+      reviews={workspace.reviews}
       documents={workspace.documents}
       costObservations={workspace.costObservations}
       costBaselines={workspace.costBaselines}

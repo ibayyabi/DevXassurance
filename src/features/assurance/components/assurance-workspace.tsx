@@ -39,6 +39,7 @@ import type {
   AssuranceFinding,
   AssuranceReview,
 } from "@/features/assurance/lib/queries";
+import { formatReportingPeriod } from "@/features/assurance/lib/review-period";
 import { isReviewEvidenceSelectable } from "@/features/assurance/lib/evidence-readiness";
 import { Button } from "@/components/ui/button";
 import { ReviewEvidenceFilters } from "@/features/assurance/components/review-evidence-filters";
@@ -68,6 +69,7 @@ const reviewStatusLabels: Record<string, string> = {
 export function AssuranceWorkspace({
   projectId,
   review,
+  reviews,
   documents,
   costObservations,
   costBaselines,
@@ -80,6 +82,7 @@ export function AssuranceWorkspace({
 }: {
   projectId: string;
   review: AssuranceReview | null;
+  reviews: AssuranceReview[];
   documents: AssuranceDocument[];
   costObservations: CostObservation[];
   costBaselines: CostBaseline[];
@@ -104,18 +107,26 @@ export function AssuranceWorkspace({
           Mulai satu tinjauan assurance yang jelas
         </h2>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-ink-muted">
-          Pilih bulan pelaporan terlebih dahulu. Selanjutnya Anda menghubungkan
-          rencana yang disetujui dengan bukti periode berjalan, lalu mendapatkan
-          tiga kondisi: Anggaran, Jadwal, dan Risiko.
+          Satu tinjauan menilai proyek pada satu tanggal cut-off. Periode ini
+          adalah patokan waktu, bukan penyaring: bukti tidak otomatis dibuang
+          berdasarkan tanggalnya; bukti yang periodenya tercatat dan berada di
+          luar cut-off ditandai agar tidak tercampur diam-diam.
+        </p>
+        <p className="mt-2 max-w-2xl text-sm leading-6 text-ink-muted">
+          <span className="font-semibold text-ink">Baseline</span> adalah patokan
+          yang disetujui reviewer, referensi pembandingnya;{" "}
+          <span className="font-semibold text-ink">Current</span> adalah bukti
+          pada cut-off yang sedang dinilai. Selanjutnya Anda mendapatkan tiga
+          kondisi: Anggaran, Jadwal, dan Risiko.
         </p>
         <form action={createAssuranceReview} className="mt-6 flex max-w-md flex-col gap-3 sm:flex-row sm:items-end">
           <input type="hidden" name="projectId" value={projectId} />
           <label className="flex-1 text-sm font-medium text-ink-muted">
-            Bulan pelaporan
+            Tanggal cut-off
             <Input
-              type="month"
-              name="reportingMonth"
-              defaultValue={new Date().toISOString().slice(0, 7)}
+              type="date"
+              name="reportingDate"
+              defaultValue={new Date().toISOString().slice(0, 10)}
               required
               className="mt-1"
             />
@@ -155,10 +166,35 @@ export function AssuranceWorkspace({
   const missingBaseline = baselineIds.size === 0;
   const missingCurrent = currentIds.size === 0;
   const reviewReady = unavailableSelectedCount === 0 && !missingBaseline && !missingCurrent;
+  const periodMismatches = [...selectedIds].flatMap((id) => {
+    const document = documents.find((item) => item.id === id);
+    if (!document) return [];
+    const role = baselineIds.has(id) ? "baseline" : "current";
+    const direction = compareEvidencePeriod(document.detectedReportingPeriod, review.reportingPeriod);
+    if (!direction) return [];
+    if (direction === "older" && role !== "current") return [];
+    return [{ title: document.title, role, period: document.detectedReportingPeriod, direction }];
+  });
 
   return (
     <div className="space-y-5">
       <ProcessingRefresh active={activeProcessing} />
+      <ReviewSelector projectId={projectId} reviews={reviews} activeReviewId={review.id} />
+      {periodMismatches.length > 0 && (
+        <div className="rounded-lg bg-status-warn-bg p-3 text-sm text-status-warn-text" role="status">
+          <p className="font-semibold">
+            Bukti terpilih berada di luar tanggal cut-off ({formatReportingPeriod(review.reportingPeriod)}):
+          </p>
+          <ul className="mt-1 list-disc space-y-1 pl-5">
+            {periodMismatches.map((item) => (
+              <li key={`${item.role}-${item.title}`}>
+                {item.title} · {item.role === "baseline" ? "baseline" : "current"} · periode {item.period}{" "}
+                ({item.direction === "newer" ? "lebih baru" : "lebih lama"} dari cut-off)
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <ReviewHeader review={review} evidenceReady={reviewReady} />
       {!reviewReady && (
         <section className="rounded-xl border border-status-warn bg-status-warn-bg p-4 text-status-warn-text" role="status">
@@ -259,6 +295,79 @@ export function AssuranceWorkspace({
   );
 }
 
+
+function ReviewSelector({
+  projectId,
+  reviews,
+  activeReviewId,
+}: {
+  projectId: string;
+  reviews: AssuranceReview[];
+  activeReviewId: string;
+}) {
+  return (
+    <section className="rounded-2xl border border-ui-border bg-surface p-4 shadow-sm">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold text-ink-muted">Tinjauan:</span>
+        {reviews.map((item) => {
+          const active = item.id === activeReviewId;
+          return (
+            <Link
+              key={item.id}
+              href={`/app/projects/${projectId}/assurance?review=${item.id}`}
+              className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                active
+                  ? "bg-brand text-white"
+                  : "bg-base text-ink hover:bg-plan-track"
+              }`}
+            >
+              {formatReportingPeriod(item.reportingPeriod)}
+            </Link>
+          );
+        })}
+        <form action={createAssuranceReview} className="flex items-center gap-2">
+          <input type="hidden" name="projectId" value={projectId} />
+          <Input
+            type="date"
+            aria-label="Tanggal cut-off tinjauan baru"
+            name="reportingDate"
+            defaultValue={new Date().toISOString().slice(0, 10)}
+            required
+            className="h-8"
+          />
+          <Button type="submit" size="sm" variant="outline">
+            Tinjauan baru
+          </Button>
+        </form>
+      </div>
+      <p className="mt-2 text-xs leading-5 text-ink-muted">
+        Setiap tinjauan memakai satu tanggal cut-off. Periode ini bukan penyaring
+        bukti; bukti yang periodenya tercatat di luar cut-off ditandai agar tidak
+        tercampur diam-diam. Baseline = patokan yang disetujui; current = cut-off
+        yang dinilai.
+      </p>
+    </section>
+  );
+}
+
+function compareEvidencePeriod(
+  period: string | null,
+  cutoff: string,
+): "newer" | "older" | null {
+  if (!period) return null;
+  const trimmed = period.trim();
+  if (/^\d{4}-\d{2}$/.test(trimmed)) {
+    return trimmed < cutoff.slice(0, 7)
+      ? "older"
+      : trimmed > cutoff.slice(0, 7)
+        ? "newer"
+        : null;
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return trimmed < cutoff ? "older" : trimmed > cutoff ? "newer" : null;
+  }
+  return null;
+}
 
 function ReviewHeader({ review, evidenceReady }: { review: AssuranceReview; evidenceReady: boolean }) {
   const currentIndex = evidenceReady
