@@ -6,7 +6,7 @@ XLSX formula cells keep the formula, cache status, raw cached result/type, and s
 
 Validated PMO cost and assurance observations retain the cited cell location when available; older references without a cell location fall back to their source chunk. Per-cell references do not make an unresolved formula usable or establish complete domain coverage.
 
-XLSX percent cells that use a built-in (`0%`, `0.00%`) or custom percent number format display the fraction as its percentage (`0.125` → `12.5%`) beside the unchanged `[raw value: 0.125; number format: 0%]` annotation, so a stored fraction is converted only when the cell's own format proves it and the raw value stays traceable.
+XLSX percent cells whose own number format unambiguously proves scaling (a plain `0%`/`0.00%` section; not an escaped `\%`, quoted `"%"`, or sectioned/currency format) render the stored fraction as its exact percentage (`0.125` → `12.5%`, not Excel's rounded display) beside the unchanged `[raw value: 0.125; number format: 0%]` annotation, so the raw value stays traceable. XLSX citation text for a cell or row always begins with the readable text the model was shown, so a model-visible excerpt stays verifiable against the canonical source a citation must match.
 
 A cost observation's period label and cut-off date must appear in the cited source, exactly like assurance observations; a period or date read from another cell or snapshot is excluded instead of trusted.
 

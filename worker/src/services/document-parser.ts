@@ -740,8 +740,12 @@ async function parseXlsxDocument(
                       ? ` (stored cached result: ${cell.value}; freshness not established)`
                       : "";
             const displayValue = percentFormattedDisplayValue(cell, isoDate) ?? cell.value;
-            const value = cell.formula ? `${cell.formula}${formulaValueText}${formulaCacheTag}` : displayValue;
-            const format = cell.numberFormat || isFormula
+            // The raw value, number format, and cache disclaimer stay in an
+            // annotation appended after the readable text. The readable cell text
+            // the model is shown (modelText) is therefore always a contiguous
+            // substring of the canonical cell/row text a citation must match, so
+            // a model can cite exactly what it was given.
+            const annotation = cell.numberFormat || isFormula
               ? ` [raw value: ${cell.value}; number format: ${cell.numberFormat ?? "none"}${isoDate ? `; ISO date: ${isoDate}` : invalidDate ? `; Needs Review: invalid Excel serial ${cell.value}` : cell.dateFormat ? "; Needs Review: no cached date value" : ""}${formulaCacheTag}]`
               : "";
             const compactValue = cell.formula
@@ -756,13 +760,17 @@ async function parseXlsxDocument(
                 : isFormula
                   ? ` [formula cache: ${formulaStatus}]`
                   : "";
+            const modelCellText = `${labelText}${compactValue}${compactFormat}`;
             return {
-              text: `${labelText}${value}${format}`,
-              modelText: `${labelText}${compactValue}${compactFormat}`,
+              text: `${modelCellText}${annotation}`,
+              modelText: modelCellText,
+              annotation,
             };
           });
-          const text = cells.map((cell) => cell.text).join(" | ");
           const modelText = cells.map((cell) => cell.modelText).join(" | ");
+          // The row keeps every annotation after its readable text so the row
+          // reference stays citable against exactly what the model was shown.
+          const text = `${modelText}${cells.map((cell) => cell.annotation).filter(Boolean).join("")}`;
           if (row.cells.some((cell) => cell.dateFormat)) {
             warnings.push(`Sheet "${sheet.name}" contains date-formatted raw values; recognized dates are normalized and invalid or unavailable values need review.`);
           }
@@ -1065,17 +1073,34 @@ function classifyFormulaCache(
   };
 }
 
+// True only when every numeric section of the cell format is a plain percentage
+// pattern. Escaped literal `\%`, quoted `"%"`, color/condition sections, and
+// currency or date formats are never treated as proven scaling; an unusual
+// percent format simply leaves the stored fraction unconverted.
+// ponytail: plain `[#0…]%` sections only; widen if a real workbook needs more.
+function isPercentNumberFormat(format: string): boolean {
+  const sections = format
+    .replace(/"[^"]*"|\[[^\]]*\]|\\./g, "")
+    .split(";")
+    .map((section) => section.trim())
+    .filter(Boolean);
+  return (
+    sections.length > 0 &&
+    sections.every((section) => /^[#0][#0,]*(?:\.[#0]+)?%$/.test(section))
+  );
+}
+
 // A cell whose own number format is a percentage stores a fraction but displays
-// a percentage. Render that percentage only for a non-formula numeric literal
-// whose own cell format proves it, so a fraction is never converted on a guess.
-// The raw value and format stay in the same cell's annotation for provenance.
+// a percentage. Render that exact percentage (not a rounded display value) only
+// for a non-formula numeric literal whose own cell format proves scaling. The
+// raw value and format stay in the same cell's annotation for provenance.
 function percentFormattedDisplayValue(
   cell: WorkbookCell,
   isoDate: string | undefined,
 ): string | null {
   if (cell.formula || cell.textual || isoDate || !cell.value.trim()) return null;
   const format = cell.numberFormat;
-  if (!format || !format.replace(/"[^"]*"|\[[^\]]*\]/g, "").includes("%")) return null;
+  if (!format || !isPercentNumberFormat(format)) return null;
   const numeric = Number(cell.value);
   if (!Number.isFinite(numeric)) return null;
   return `${Number((numeric * 100).toPrecision(12))}%`;
