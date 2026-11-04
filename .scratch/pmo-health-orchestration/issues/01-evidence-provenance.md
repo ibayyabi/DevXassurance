@@ -4,15 +4,15 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** claimed
+**Status:** resolved
 
 Baca [rencana dan kontrak bersama](../plan.md), khususnya constraint model dan kuota. Gunakan fixture Smart Building untuk replay deterministik tanpa provider live.
 
-- [ ] Reproduksi alur parser → validasi → hasil/persistensi untuk bukti W4/W5 tanpa panggilan LLM.
-- [ ] Nilai literal yang didukung diterima dengan lokasi tepat walaupun sel lain mengandung formula unresolved; hasil formula unresolved tidak dikarang atau dinilai nol.
-- [ ] Hubungan lintas sel untuk periode, scope, dan satuan hanya diterima bila struktur sumber membuktikannya; kasus ambigu tetap gap.
-- [ ] Source ID palsu, cut-off salah, cache versi lama, dan kutipan tidak didukung tidak lolos; provenance tetap benar saat cache hit dan tersimpan.
-- [ ] Bukti verifikasi dan batas yang tersisa dicatat dalam Comments.
+- [x] Reproduksi alur parser → validasi → hasil/persistensi untuk bukti W4/W5 tanpa panggilan LLM.
+- [x] Nilai literal yang didukung diterima dengan lokasi tepat walaupun sel lain mengandung formula unresolved; hasil formula unresolved tidak dikarang atau dinilai nol.
+- [x] Hubungan lintas sel untuk periode, scope, dan satuan hanya diterima bila struktur sumber membuktikannya; kasus ambigu tetap gap.
+- [x] Source ID palsu, cut-off salah, cache versi lama, dan kutipan tidak didukung tidak lolos; provenance tetap benar saat cache hit dan tersimpan.
+- [x] Bukti verifikasi dan batas yang tersisa dicatat dalam Comments.
 
 ## Comments
 
@@ -26,3 +26,7 @@ Baca [rencana dan kontrak bersama](../plan.md), khususnya constraint model dan k
 - Verifikasi offline pada kandidat: 34 pengujian evidence/extraction dan 4 pengujian XLSX terarah lulus, `tsc --noEmit` lulus; parser membaca W4 D7 `12.5%` dan W5 D8 `20.4%`. Ini tidak membuktikan persistensi database atau kualitas model production.
 - Blocker correctness: `contextSources` membangun kutipan `${subject.key}: ${subject.value}` dari label dan nilai pada dua sel, tetapi menyimpan lokasi hanya untuk sel nilai. Kutipan tersebut bukan kutipan verbatim dari satu sel yang ditunjuk; benahi dan buktikan lokasi label maupun nilai sebelum menggabungkan patch. Review independen juga belum selesai karena 429.
 - Tidak ada provider LLM aplikasi live atau mutasi Supabase hosted. Pengguna memilih menunggu Command Code, bukan mengganti pelaksana.
+
+- Kandidat terakhir `01bd56d`: suite parser/extraction/provenance dan budget terarah lulus dengan OCR lokal tidak tersedia dikecualikan; `tsc --noEmit` lulus. Replay worker deterministik pada fixture checkout utama membaca W4 12,5% (9 Oktober 2026) dan W5 20,4% (16 Oktober 2026), scope Alarm Kebencanaan, dengan tiga referensi provenance.
+- Persistensi observasi W4/W5 dan cache/fencing diuji melalui RPC PostgreSQL pada database disposable tanpa jaringan; tidak ada mutasi Supabase hosted atau panggilan LLM aplikasi live. Hasil ini belum membuktikan kualitas klasifikasi model production, review UI, atau kesehatan proyek end-to-end.
+- Guard naratif menolak klaim ambigu, negasi, dan konteks risiko/biaya yang dikenali; daftar istilah bukan jaminan untuk semua bahasa/template. Formula cache tetap perlu review dan tidak dianggap bukti kesegaran perhitungan.
