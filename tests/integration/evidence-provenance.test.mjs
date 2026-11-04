@@ -226,6 +226,10 @@ function alarmGroupResponse(prompt, capture, includeInvalid = false) {
   const subjectValue = subjectReference
     ? /^[^:]+:\s*(.+)$/.exec(subjectReference.text ?? "")?.[1]?.trim() ?? null
     : null;
+  const groupNumber = /This request contains group (\d+)/.exec(prompt)?.[1];
+  assert.ok(groupNumber, "group prompts carry their stable group index");
+  capture.groupIndexes ??= [];
+  capture.groupIndexes.push(Number(groupNumber) - 1);
   capture.groupCalls = (capture.groupCalls ?? 0) + 1;
 
   const output = baseGroupOutput(references);
@@ -478,6 +482,16 @@ test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived 
     assert.equal(jobResult.status, "completed", jobResult.processing_error);
     assert.equal(jobResult.parser_version, "document-parser/14");
     assert.equal(jobResult.assurance_observations.progress.length, 1);
+    const coldGroupRows = [...store.rows.values()];
+    const completedGroupIndexes = coldGroupRows
+      .filter((row) => row.status === "completed")
+      .map((row) => row.groupIndex);
+    const failedGroupIndexes = coldGroupRows
+      .filter((row) => row.status === "failed")
+      .map((row) => row.groupIndex);
+    assert.ok(completedGroupIndexes.length > 0, "the cold run checkpoints completed groups");
+    assert.ok(failedGroupIndexes.length > 0, "the cold run leaves partial groups retryable");
+    const warmGroupCallStart = capture.groupIndexes.length;
     const callsAfterColdRun = capture.groupCalls;
     assert.ok(callsAfterColdRun > 0, "the initial result came through group extraction");
 
@@ -485,7 +499,17 @@ test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived 
       await processDocumentJob(job(buffer), store),
     );
     assert.equal(warmResult.status, "completed", warmResult.processing_error);
-    assert.equal(capture.groupCalls, callsAfterColdRun, "the warm run reuses completed extraction groups");
+    const warmGroupCalls = capture.groupIndexes.slice(warmGroupCallStart);
+    const completedGroupSet = new Set(completedGroupIndexes);
+    assert.equal(
+      warmGroupCalls.some((groupIndex) => completedGroupSet.has(groupIndex)),
+      false,
+      "the warm run reuses completed groups without calling them again",
+    );
+    assert.ok(
+      failedGroupIndexes.every((groupIndex) => warmGroupCalls.includes(groupIndex)),
+      "partial/failed groups are retried instead of being treated as cached",
+    );
     assert.deepEqual(
       warmResult.assurance_observations.progress[0].scope_provenance,
       jobResult.assurance_observations.progress[0].scope_provenance,

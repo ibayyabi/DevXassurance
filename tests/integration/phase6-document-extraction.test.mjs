@@ -1229,11 +1229,11 @@ test("cost observations keep the source value and carry deterministic normalizat
   assert.ok(costSource.includes(observations[1].excerpt));
 });
 
-test("cost currency is left unknown when citation wording does not bind a unique unit to the amount", async () => {
+test("cost currency stays unknown when the cited context has unrelated currency mentions", async () => {
   const source =
     "Approved baseline amount: 100 | Reporting currency: USD | Legacy currency: IDR";
   const outcome = await extractCostObservations([
-    { measure: "approved_baseline", source_value: source },
+    { measure: "approved_baseline", source_value: "100" },
   ], source);
 
   assert.equal(outcome.ok, true, `${outcome.errorCode}: ${outcome.errorMessage}`);
