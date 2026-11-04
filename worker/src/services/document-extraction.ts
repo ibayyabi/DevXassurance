@@ -1316,24 +1316,57 @@ function citedProgressValueHasRiskContext(
           ? [cited.reference.cell]
           : [];
     const riskMetricLabel = /\b(?:risk|likelihood|probability|rating|impact|severity)\b/iu;
+    const progressMetricLabel =
+      /\b(?:actual|progress|completion|completed|complete|realisasi|kemajuan)\b/iu;
     const candidate = rawValue.trim().toLocaleLowerCase();
-    return sourceCells.some((cell) =>
-      riskMetricLabel.test(cell.label ?? "") &&
+    const matchingCells = sourceCells.filter((cell) =>
       [cell.rawValue, cell.value].some((value) => value.trim().toLocaleLowerCase() === candidate),
     );
+    const riskCellCount = matchingCells.filter((cell) => riskMetricLabel.test(cell.label ?? "")).length;
+    const progressCellCount = matchingCells.filter(
+      (cell) => progressMetricLabel.test(cell.label ?? "") && !riskMetricLabel.test(cell.label ?? ""),
+    ).length;
+    return progressCellCount > 1 || (riskCellCount > 0 && progressCellCount !== 1);
   }
-  const riskMetricField =
-    /(?:^|[^\p{L}\p{N}])(?:risk(?:\s+(?:likelihood|probability|rating|score|impact|severity))?|likelihood|probability|rating|impact|severity)\s*(?:%|percent(?:age)?|score|rating)?\s*[:=]?\s*$/iu;
+  const riskMetricBefore =
+    /(?:^|[^\p{L}\p{N}])(?:risk(?:\s+(?:likelihood|probability|rating|score|impact|severity|progress))?|likelihood|probability|rating|impact|severity)\s*(?:%|percent(?:age)?|score|rating)?\s*[:=]?\s*$/iu;
+  const riskMetricAfter =
+    /^\s*(?:risk\s+)?(?:likelihood|probability|rating|impact|severity|risk)\b/iu;
+  const progressMetricBefore =
+    /(?:^|[^\p{L}\p{N}])(?:project\s+)?(?:actual|progress|completion|completed|complete|realisasi|kemajuan)\s*(?:%|percent(?:age)?|persen)?\s*[:=]?\s*$/iu;
+  const progressMetricAfter =
+    /^\s*(?:project\s+)?(?:actual|progress|completion|completed|complete|realisasi|kemajuan)\b/iu;
   const candidate = rawValue.trim().toLocaleLowerCase();
-  return citation.excerpt.split(/[;|\n]+|[.!?]\s+/u).some((clause) => {
+  if (!candidate) return false;
+  const percentTokens = [...candidate.matchAll(/\d+(?:[.,]\d+)?\s*(?:%|percent(?:age)?|persen)/giu)];
+  if (percentTokens.length === 0) return false;
+  let riskSupportCount = 0;
+  let progressSupportCount = 0;
+  let ambiguousRole = false;
+  for (const clause of citation.excerpt.split(/[;|\n]+|[.!?]\s+/u)) {
     const text = clause.toLocaleLowerCase();
     let valueIndex = text.indexOf(candidate);
     while (valueIndex >= 0) {
-      if (riskMetricField.test(text.slice(0, valueIndex))) return true;
+      for (const token of percentTokens) {
+        const tokenIndex = token.index ?? 0;
+        const start = valueIndex + tokenIndex;
+        const end = start + token[0].length;
+        const prefix = text.slice(0, start);
+        const suffix = text.slice(end);
+        const isRisk = riskMetricBefore.test(prefix) || riskMetricAfter.test(suffix);
+        const isProgress = progressMetricBefore.test(prefix) || progressMetricAfter.test(suffix);
+        if (isRisk) riskSupportCount += 1;
+        if (isProgress) progressSupportCount += 1;
+        if (isRisk && isProgress) ambiguousRole = true;
+      }
       valueIndex = text.indexOf(candidate, valueIndex + candidate.length);
     }
-    return false;
-  });
+  }
+  return (
+    ambiguousRole ||
+    progressSupportCount > 1 ||
+    (riskSupportCount > 0 && progressSupportCount !== 1)
+  );
 }
 function resolveSheetSourceLocations(
   group: ChunkGroup,

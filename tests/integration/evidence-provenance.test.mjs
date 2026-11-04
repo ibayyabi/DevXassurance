@@ -110,7 +110,7 @@ async function syntheticCachedFormulaWorkbook() {
   );
   zip.file(
     "xl/worksheets/sheet1.xml",
-    `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Record</t></is></c><c r="B1" t="inlineStr"><is><t>EAC Literal</t></is></c><c r="C1" t="inlineStr"><is><t>EAC Formula</t></is></c><c r="D1" t="inlineStr"><is><t>Report Date</t></is></c><c r="E1" t="inlineStr"><is><t>Schedule Status</t></is></c><c r="F1" t="inlineStr"><is><t>Cost Status</t></is></c><c r="G1" t="inlineStr"><is><t>Actual %</t></is></c><c r="H1" t="inlineStr"><is><t>Likelihood %</t></is></c><c r="I1" t="inlineStr"><is><t>Metadata</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Formula row</t></is></c><c r="B2"><v>500</v></c><c r="C2"><f>200+300</f><v>500</v></c><c r="D2" t="str"><f>TEXT(DATE(2026,10,16),&quot;yyyy-mm-dd&quot;)</f><v>2026-10-16</v></c><c r="E2" t="str"><f>IF(TRUE(),&quot;Green&quot;,&quot;Red&quot;)</f><v>Green</v></c><c r="F2" t="inlineStr"><is><t>Green</t></is></c><c r="G2"><v>0.125</v></c><c r="H2" t="inlineStr"><is><t>25%</t></is></c><c r="I2" t="inlineStr"><is><t>2026-10-01</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Literal row</t></is></c><c r="B3"><v>750</v></c><c r="D3" t="inlineStr"><is><t>2026-10-09</t></is></c><c r="E3" t="inlineStr"><is><t>Amber</t></is></c><c r="F3" t="inlineStr"><is><t>Green</t></is></c><c r="G3"><v>12.5</v></c><c r="H3"><v>20.4</v></c></row></sheetData></worksheet>`,
+    `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Record</t></is></c><c r="B1" t="inlineStr"><is><t>EAC Literal</t></is></c><c r="C1" t="inlineStr"><is><t>EAC Formula</t></is></c><c r="D1" t="inlineStr"><is><t>Report Date</t></is></c><c r="E1" t="inlineStr"><is><t>Schedule Status</t></is></c><c r="F1" t="inlineStr"><is><t>Cost Status</t></is></c><c r="G1" t="inlineStr"><is><t>Actual %</t></is></c><c r="H1" t="inlineStr"><is><t>Likelihood %</t></is></c><c r="I1" t="inlineStr"><is><t>Metadata</t></is></c><c r="J1" t="inlineStr"><is><t>Project Progress %</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Formula row</t></is></c><c r="B2"><v>500</v></c><c r="C2"><f>200+300</f><v>500</v></c><c r="D2" t="str"><f>TEXT(DATE(2026,10,16),&quot;yyyy-mm-dd&quot;)</f><v>2026-10-16</v></c><c r="E2" t="str"><f>IF(TRUE(),&quot;Green&quot;,&quot;Red&quot;)</f><v>Green</v></c><c r="F2" t="inlineStr"><is><t>Green</t></is></c><c r="G2"><v>0.125</v></c><c r="H2" t="inlineStr"><is><t>25%</t></is></c><c r="I2" t="inlineStr"><is><t>2026-10-01</t></is></c><c r="J2" t="inlineStr"><is><t>25%</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Literal row</t></is></c><c r="B3"><v>750</v></c><c r="D3" t="inlineStr"><is><t>2026-10-09</t></is></c><c r="E3" t="inlineStr"><is><t>Amber</t></is></c><c r="F3" t="inlineStr"><is><t>Green</t></is></c><c r="G3"><v>12.5</v></c><c r="H3"><v>20.4</v></c></row></sheetData></worksheet>`,
   );
   const buffer = await zip.generateAsync({ type: "nodebuffer" });
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
@@ -1119,6 +1119,16 @@ test("cached formulas remain review-only while literal siblings and percent head
         excerpt: likelihoodPercent.text,
         source_id: likelihoodPercent.source_id,
       },
+      {
+        raw_value: "25%",
+        percent: 25,
+        scope_level: "project",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: formulaRow.text,
+        source_id: formulaRow.source_id,
+      },
     ];
     output.group_metadata_suggestions = {
       suggested_document_date: "2026-10-01",
@@ -1166,6 +1176,7 @@ test("cached formulas remain review-only while literal siblings and percent head
     [
       [0.125, "0.125", "G2"],
       [12.5, "12.5", "G3"],
+      [25, "25%", "A2"],
     ],
   );
   assert.match(result.processing_error ?? "", /formula_cache_review_required/);
@@ -2228,14 +2239,29 @@ test("narrative scope labels must match the complete explicit field value", asyn
     /progress\[0\].*scope_label must be supported by a structural scope source/,
   );
 });
-test("narrative risk likelihood percentages are not progress evidence", async () => {
+test("risk likelihood percentages need a separate unambiguous progress field", async () => {
   const text = "Risk likelihood: 25%";
+  const suffixText = "25% likelihood";
+  const mixedText = "Risk likelihood: 25%; Project progress: 25%";
   const source = {
     sourceId: "risk-likelihood",
     chunkIndex: 0,
     text,
     modelText: text,
   };
+  const suffixSource = {
+    sourceId: "risk-likelihood-suffix",
+    chunkIndex: 0,
+    text: suffixText,
+    modelText: suffixText,
+  };
+  const mixedSource = {
+    sourceId: "mixed-risk-and-progress",
+    chunkIndex: 0,
+    text: mixedText,
+    modelText: mixedText,
+  };
+  const chunkText = `${text}; ${suffixText}; ${mixedText}`;
   const result = await withLocalOllama(async (_url, init) => {
     const prompt = JSON.parse(init.body).messages[1].content;
     if (isExecutiveSummaryPrompt(prompt)) {
@@ -2245,27 +2271,68 @@ test("narrative risk likelihood percentages are not progress evidence", async ()
     const references = documentContextFromPrompt(prompt);
     if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
     const output = baseGroupOutput(references);
-    output.assurance_observations.progress = [{
-      raw_value: "25%",
-      percent: 25,
-      scope_level: "project",
-      scope_label: null,
-      period_label: null,
-      as_of_date: null,
-      excerpt: text,
-      source_id: "risk-likelihood",
-    }];
+    output.assurance_observations.progress = [
+      {
+        raw_value: "25%",
+        percent: 25,
+        scope_level: "project",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: text,
+        source_id: "risk-likelihood",
+      },
+      {
+        raw_value: "25%",
+        percent: 25,
+        scope_level: "project",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: suffixText,
+        source_id: "risk-likelihood-suffix",
+      },
+      {
+        raw_value: suffixText,
+        percent: 25,
+        scope_level: "project",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: suffixText,
+        source_id: "risk-likelihood-suffix",
+      },
+      {
+        raw_value: "25%",
+        percent: 25,
+        scope_level: "project",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: mixedText,
+        source_id: "mixed-risk-and-progress",
+      },
+    ];
     return modelResponse(output);
   }, async () =>
     await extractDocumentGroups(
-      job(text, { fileName: "risk-likelihood.txt" }),
-      [{ chunkIndex: 0, chunkText: text, sourceReferences: [source] }],
+      job(chunkText, { fileName: "risk-likelihood.txt" }),
+      [{
+        chunkIndex: 0,
+        chunkText,
+        sourceReferences: [source, suffixSource, mixedSource],
+      }],
       { parserVersion: "narrative-risk-percent-v1" },
       memoryGroupStore(),
     ),
   );
   assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
-  assert.deepEqual(result.extraction.assurance_observations.progress, []);
+  assert.deepEqual(
+    result.extraction.assurance_observations.progress.map(({ percent, source_id }) =>
+      [percent, source_id],
+    ),
+    [[25, "mixed-risk-and-progress"]],
+  );
   assert.match(
     result.extraction.quality_warnings.join(" "),
     /risk likelihood or rating, not progress evidence/,
