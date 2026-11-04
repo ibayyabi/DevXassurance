@@ -109,16 +109,31 @@ const scaleWords =
  * dollar currencies.
  */
 export function normalizeCostCurrency(sourceValue: string) {
-  const upper = sourceValue.toUpperCase();
-  const code = currencyCodes.find((candidate) =>
-    new RegExp(`\\b${candidate}\\b`).test(upper),
+  const amountMatches = [...sourceValue.matchAll(/-?\d[\d., \u00a0]*\d|-?\d/g)];
+  const currencyTokenPattern = new RegExp(
+    `\\b(?:${currencyCodes.join("|")}|RP)\\b|[€£¥₩₹]`,
+    "giu",
   );
-  if (code) return code;
-  const lowered = sourceValue.toLowerCase();
-  for (const [symbol, mapped] of Object.entries(currencySymbols)) {
-    if (lowered.includes(symbol)) return mapped;
-  }
-  return null;
+  const currencyMatches = [...sourceValue.matchAll(currencyTokenPattern)];
+  if (amountMatches.length !== 1 || currencyMatches.length !== 1) return null;
+
+  const amount = amountMatches[0];
+  const currency = currencyMatches[0];
+  const amountStart = amount.index ?? -1;
+  const amountEnd = amountStart + amount[0].length;
+  const currencyStart = currency.index ?? -1;
+  const currencyEnd = currencyStart + currency[0].length;
+  const separator = currencyEnd <= amountStart
+    ? sourceValue.slice(currencyEnd, amountStart)
+    : amountEnd <= currencyStart
+      ? sourceValue.slice(amountEnd, currencyStart)
+      : null;
+  if (separator === null || !/^[\s:(),\[\]]*$/u.test(separator)) return null;
+
+  const token = currency[0];
+  return currencyCodes.find((candidate) => candidate === token.toUpperCase()) ??
+    currencySymbols[token.toLowerCase()] ??
+    null;
 }
 
 /**

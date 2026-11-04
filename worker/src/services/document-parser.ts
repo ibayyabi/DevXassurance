@@ -352,6 +352,8 @@ type FormulaCell = {
 // "Subsystem" or "Work Package"). Read only as a document-level fallback when
 // the workbook declares exactly one such value.
 const SUBJECT_KEY_CUE = /\b(?:sub[\s-]?system|component|work\s*package|discipline|package|scope)\b/i;
+const SHEET_TITLE_CUE =
+  /\b(?:project|program(?:me)?|progress|weekly|monthly|periodic|report|status|subcontractor|contractor|work\s*package|scope|overview|dashboard|schedule|plan|minutes)\b/i;
 
 type ZipTextReader = {
   file(path: string): { async(type: "text"): Promise<string> } | null;
@@ -360,7 +362,7 @@ type ZipTextReader = {
 
 // Bump whenever parsed chunk/source-reference output changes: cached extraction
 // groups are keyed by this version, so older rows are never reused.
-const PARSER_VERSION = "document-parser/13";
+const PARSER_VERSION = "document-parser/14";
 const MAX_CHUNK_LENGTH = 4000;
 // Growth ceiling per chunk: retained row references always fit, then cell
 // references are added row by row. Cells left uncovered stay citable through
@@ -734,8 +736,26 @@ async function parseXlsxDocument(
           .sort(([left], [right]) => left - right)
           .map(([column, label]) => `${columnLetters(column)}: ${label}`)
           .join(" | ");
-        // A title citation must name one literal cell, not the concatenated
-        // header row that happens to begin at that cell.
+        // A sheet title must be a literal cell in a structurally separate
+        // pre-table row, never the first label in an ordinary table header.
+        const firstRow = tableRows[0];
+        const standaloneTitle =
+          tableIndex === 0 &&
+          firstRow.cells.length === 1 &&
+          firstRow.cells[0].textual &&
+          !firstRow.cells[0].formula &&
+          SHEET_TITLE_CUE.test(firstRow.cells[0].value) &&
+          (
+            (tableRows.length === 1 && tables.length > 1) ||
+            (
+              tableRows.length >= 3 &&
+              tableRows[1].cells.length > 1 &&
+              tableRows[1].cells.every((cell) => cell.textual) &&
+              tableRows[2].cells.some((cell) => !cell.textual)
+            )
+          )
+            ? { row: firstRow, cell: firstRow.cells[0] }
+            : undefined;
         const titleCell = tableRows
           .slice(0, headerCount)
           .flatMap((row) => row.cells.map((cell) => ({ row, cell })))
@@ -743,8 +763,11 @@ async function parseXlsxDocument(
         const titleCellText = titleCell
           ? `${columnLetters(columnNumber(titleCell.cell.reference) ?? 0) || "Cell"}: ${titleCell.cell.value}`
           : null;
-        if (!(sheet.name in sheetTitles) && titleCell && titleCellText) {
-          sheetTitles[sheet.name] = { text: titleCellText, cell: titleCell.cell.reference };
+        const sheetTitleText = standaloneTitle
+          ? `${columnLetters(columnNumber(standaloneTitle.cell.reference) ?? 0) || "Cell"}: ${standaloneTitle.cell.value}`
+          : null;
+        if (!(sheet.name in sheetTitles) && standaloneTitle && sheetTitleText) {
+          sheetTitles[sheet.name] = { text: sheetTitleText, cell: standaloneTitle.cell.reference };
         }
         const titleCellReferences: SourceCellReference[] =
           titleCell && titleCellText

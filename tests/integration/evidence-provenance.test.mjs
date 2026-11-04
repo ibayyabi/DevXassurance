@@ -1,8 +1,8 @@
 // Ticket 01 — evidence provenance and local reproduction.
-//
 // Replays the real Smart Building W4/W5 weekly workbooks through the worker seam
-// (parse -> validated extraction -> job result) with a controlled model response
-// and no live provider call. The response uses only prompt-visible source text.
+// (parse -> prompt-derived controlled response -> validated extraction -> result)
+// without a live model call. The response is synthetic test plumbing, not evidence
+// of model quality. The workbook values below are assertions only.
 // It pins:
 //   * exact value, period, date, and scope provenance across parser, validator,
 //     result, and cache hit;
@@ -27,11 +27,9 @@ const ALARM_FILE = "01_Alarm_Kebencanaan_Subcontractor_Weekly.xlsx";
 const FIXTURE_ROOT = process.env.PMO_HEALTH_FIXTURE_ROOT ??
   join(REPO_ROOT, "demo-evidence-fixtures/smart-building-itb");
 const WEEKLY = "Weekly Report";
-// The workbook's subject is not hardcoded here: the controlled model response
-// reads it from the document-context references the prompt supplies, and the
-// expectations are taken from the parse result.
+// The workbook's subject is not hardcoded here: the controlled response reads it
+// from the context references the prompt supplies.
 const DIMENSIONS = ["overall", "schedule", "cost", "risk", "governance", "audit_readiness"];
-
 // Each row's own due date is a legitimate milestone date (a due column), while
 // the row's cut-off must not stand in for it.
 const MILESTONE_TEXT = /([^|:]{1,40}):\s*(\d{4}-\d{2}-\d{2})/;
@@ -39,6 +37,25 @@ const CASES = [
   { session: "2026-10-09_w4", percent: 12.5, week: "W4", cutOff: "2026-10-09" },
   { session: "2026-10-16_w5", percent: 20.4, week: "W5", cutOff: "2026-10-16" },
 ];
+
+function alarmRowFields(text) {
+  const fields = new Map(
+    text.split(/\s*\|\s*/).flatMap((part) => {
+      const separator = part.indexOf(":");
+      return separator > 0
+        ? [[part.slice(0, separator).trim().toLocaleLowerCase(), part.slice(separator + 1).trim()]]
+        : [];
+    }),
+  );
+  const week = fields.get("week");
+  const cutOffDate = fields.get("cut-off date");
+  const actual = /^(\d+(?:[.,]\d+)?)\s*%/.exec(fields.get("actual %") ?? "");
+  if (!week || !/^\d{4}-\d{2}-\d{2}$/.test(cutOffDate ?? "") || !actual) return null;
+  const percent = Number(actual[1].replace(",", "."));
+  return Number.isFinite(percent)
+    ? { week, cutOffDate, percent, rawValue: actual[0].trim() }
+    : null;
+}
 
 function alarmBuffer(session) {
   const path = join(FIXTURE_ROOT, "sessions", session, ALARM_FILE);
@@ -194,7 +211,7 @@ function executiveSummaryOutput(input) {
 }
 
 // One group response for the real workbooks, built only from the prompt.
-function alarmGroupResponse(prompt, spec, capture, includeInvalid = false) {
+function alarmGroupResponse(prompt, capture, includeInvalid = false) {
   const references = documentContextFromPrompt(prompt);
   if (isClassificationPrompt(prompt)) return classificationOutput(references);
   const contextReferences = documentContextReferencesFromPrompt(prompt);
@@ -212,13 +229,19 @@ function alarmGroupResponse(prompt, spec, capture, includeInvalid = false) {
   capture.groupCalls = (capture.groupCalls ?? 0) + 1;
 
   const output = baseGroupOutput(references);
-  const rowSource = references.find(
-    (reference) =>
+  const rowCandidates = references
+    .filter((reference) =>
       reference.source_location?.sheetName === WEEKLY &&
-      reference.text.includes(`Week: ${spec.week}`) &&
-      reference.text.includes(spec.cutOff) &&
-      reference.text.includes(`Actual %: ${spec.percent}%`),
-  );
+      typeof reference.source_location.rowStart === "number" &&
+      reference.source_location.rowStart === reference.source_location.rowEnd,
+    )
+    .map((reference) => ({ reference, fields: alarmRowFields(reference.text) }))
+    .filter(({ fields }) => fields !== null);
+  const selectedRow = rowCandidates.find(
+    ({ reference }) => reference.source_id === capture.targetSourceId,
+  ) ?? null;
+  const rowSource = selectedRow?.reference;
+  const rowFields = selectedRow?.fields;
   const rowNumber = rowSource?.source_location?.rowStart;
   const isExactCellInRow = (reference) =>
     reference.source_location?.sheetName === WEEKLY &&
@@ -235,31 +258,30 @@ function alarmGroupResponse(prompt, spec, capture, includeInvalid = false) {
       MILESTONE_TEXT.test(reference.text),
   );
 
-  if (rowSource && actualSource) {
-    const varianceIndex = rowSource.text.indexOf(" | Variance");
-    const rowExcerpt = varianceIndex > 0 ? rowSource.text.slice(0, varianceIndex) : rowSource.text;
+  if (rowSource && rowFields && actualSource) {
+    const rowExcerpt = rowSource.text;
     const dueDate = MILESTONE_TEXT.exec(dueDateSource?.text ?? "")?.[2] ?? null;
     const progress = [
       {
-        raw_value: `${spec.percent}%`,
-        percent: spec.percent,
+        raw_value: rowFields.rawValue,
+        percent: rowFields.percent,
         scope_level: subjectValue ? "wbs" : "unknown",
         scope_label: subjectValue,
         scope_source_id: subjectValue ? subjectReference.source_id : null,
-        period_label: spec.week,
-        as_of_date: spec.cutOff,
+        period_label: rowFields.week,
+        as_of_date: rowFields.cutOffDate,
         excerpt: rowExcerpt,
         source_id: rowSource.source_id,
       },
       // A due date in the same row is not the record date.
       ...(dueDate
         ? [{
-            raw_value: `${spec.percent}%`,
-            percent: spec.percent,
+            raw_value: rowFields.rawValue,
+            percent: rowFields.percent,
             scope_level: subjectValue ? "wbs" : "unknown",
             scope_label: subjectValue,
             scope_source_id: subjectValue ? subjectReference.source_id : null,
-            period_label: spec.week,
+            period_label: rowFields.week,
             as_of_date: dueDate,
             excerpt: rowSource.text,
             source_id: rowSource.source_id,
@@ -269,8 +291,8 @@ function alarmGroupResponse(prompt, spec, capture, includeInvalid = false) {
     if (includeInvalid) {
       progress.push(
         {
-          raw_value: `${spec.percent}%`,
-          percent: spec.percent,
+          raw_value: rowFields.rawValue,
+          percent: rowFields.percent,
           scope_level: "wbs",
           scope_label: "Kamera Pengawasan",
           period_label: null,
@@ -279,8 +301,8 @@ function alarmGroupResponse(prompt, spec, capture, includeInvalid = false) {
           source_id: rowSource.source_id,
         },
         ...(subjectValue ? [{
-          raw_value: `${spec.percent}%`,
-          percent: spec.percent,
+          raw_value: rowFields.rawValue,
+          percent: rowFields.percent,
           scope_level: "wbs",
           scope_label: subjectValue,
           scope_source_id: null,
@@ -290,8 +312,8 @@ function alarmGroupResponse(prompt, spec, capture, includeInvalid = false) {
           source_id: rowSource.source_id,
         }] : []),
         ...(subjectValue ? [{
-          raw_value: `${spec.percent}%`,
-          percent: spec.percent,
+          raw_value: rowFields.rawValue,
+          percent: rowFields.percent,
           scope_level: "wbs",
           scope_label: subjectValue,
           scope_source_id: `${subjectReference.source_id}-missing`,
@@ -301,8 +323,8 @@ function alarmGroupResponse(prompt, spec, capture, includeInvalid = false) {
           source_id: rowSource.source_id,
         }] : []),
         ...(subjectValue ? [{
-          raw_value: `${spec.percent}%`,
-          percent: spec.percent,
+          raw_value: rowFields.rawValue,
+          percent: rowFields.percent,
           scope_level: "wbs",
           scope_label: subjectValue,
           scope_source_id: subjectReference.source_id,
@@ -312,8 +334,8 @@ function alarmGroupResponse(prompt, spec, capture, includeInvalid = false) {
           source_id: rowSource.source_id,
         }] : []),
         {
-          raw_value: `${spec.percent}%`,
-          percent: spec.percent,
+          raw_value: rowFields.rawValue,
+          percent: rowFields.percent,
           scope_level: "unknown",
           scope_label: null,
           period_label: null,
@@ -327,8 +349,8 @@ function alarmGroupResponse(prompt, spec, capture, includeInvalid = false) {
     output.facts = [
       {
         fact_type: "milestone",
-        extracted_text: `${spec.percent}%`,
-        original_value: `${spec.percent}%`,
+        extracted_text: rowFields.rawValue,
+        original_value: rowFields.rawValue,
         confidence: 0.8,
         source_id: actualSource.source_id,
       },
@@ -352,18 +374,18 @@ function alarmGroupResponse(prompt, spec, capture, includeInvalid = false) {
   return output;
 }
 
-function alarmFetchMock(spec, capture, includeInvalid = false) {
+function alarmFetchMock(capture, includeInvalid = false) {
   return async (_url, init) => {
     const prompt = JSON.parse(init.body).messages[1].content;
     if (isExecutiveSummaryPrompt(prompt)) {
       const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
       return modelResponse(executiveSummaryOutput(input));
     }
-    return modelResponse(alarmGroupResponse(prompt, spec, capture, includeInvalid));
+    return modelResponse(alarmGroupResponse(prompt, capture, includeInvalid));
   };
 }
 
-test("the real W4/W5 workbooks link literal actuals to exact row, period, and scope provenance", async () => {
+test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived controlled response", async () => {
   const outcomes = [];
   for (const spec of CASES) {
     const buffer = alarmBuffer(spec.session);
@@ -425,14 +447,36 @@ test("the real W4/W5 workbooks link literal actuals to exact row, period, and sc
       `${spec.session} keeps exact key and value cells for every subject`,
     );
 
+    const targetRow = sourceReferences
+      .filter((reference) =>
+        reference.sourceLocation?.sheetName === WEEKLY &&
+        typeof reference.sourceLocation.rowStart === "number" &&
+        reference.sourceLocation.rowStart === reference.sourceLocation.rowEnd,
+      )
+      .map((reference) => ({ reference, fields: alarmRowFields(reference.text) }))
+      .filter(({ fields }) => fields !== null)
+      .reduce(
+        (latest, candidate) =>
+          !latest ||
+          candidate.reference.sourceLocation.rowStart > latest.reference.sourceLocation.rowStart
+            ? candidate
+            : latest,
+        null,
+      );
+    assert.ok(targetRow, `${spec.session} has a complete period/cut-off/actual row`);
+    assert.equal(
+      targetRow.reference.sourceId,
+      rowSource.sourceId,
+      `${spec.session} latest complete row matches the fixture expectation`,
+    );
     const store = memoryGroupStore();
-    const capture = {};
-    const mock = alarmFetchMock(spec, capture);
+    const capture = { targetSourceId: targetRow.reference.sourceId };
+    const mock = alarmFetchMock(capture);
     const jobResult = await withLocalOllama(mock, async () =>
       await processDocumentJob(job(buffer), store),
     );
     assert.equal(jobResult.status, "completed", jobResult.processing_error);
-    assert.equal(jobResult.parser_version, "document-parser/13");
+    assert.equal(jobResult.parser_version, "document-parser/14");
     assert.equal(jobResult.assurance_observations.progress.length, 1);
     const callsAfterColdRun = capture.groupCalls;
     assert.ok(callsAfterColdRun > 0, "the initial result came through group extraction");
@@ -455,9 +499,9 @@ test("the real W4/W5 workbooks link literal actuals to exact row, period, and sc
       "the validated exact scope provenance is retained in the completed group cache",
     );
 
-    const negativeCapture = {};
+    const negativeCapture = { targetSourceId: targetRow.reference.sourceId };
     const negative = await withLocalOllama(
-      alarmFetchMock(spec, negativeCapture, true),
+      alarmFetchMock(negativeCapture, true),
       async () =>
         await extractDocumentGroups(
           job(buffer),
@@ -726,7 +770,7 @@ test("a generated XLSX keeps a literal cell while a sibling formula has no cache
     ),
   );
   assert.equal(result.status, "completed", result.processing_error);
-  assert.equal(result.parser_version, "document-parser/13");
+  assert.equal(result.parser_version, "document-parser/14");
   assert.equal(result.processing_status, "needs_review");
   assert.match(result.processing_error ?? "", /Formula results are unavailable/);
   assert.ok(groupCalls > 0);
@@ -774,7 +818,7 @@ test("ambiguous or foreign workbook scope declarations are not offered or accept
       value: titleText, rawValue: titleText, dateIso: null,
     },
   };
-  const rowText = "Progress: 20%";
+  const rowText = "Task: Project Alpha | Progress: 20%";
   const rowReference = {
     sourceId: "weekly-progress",
     chunkIndex: 0,
@@ -789,10 +833,16 @@ test("ambiguous or foreign workbook scope declarations are not offered or accept
       cellRangeStart: "A2",
       cellRangeEnd: "B2",
     },
-    rowCells: [{
-      sheetName: "Weekly", row: 2, column: "A", cell: "A2", label: "Progress",
-      value: "20%", rawValue: "20%", dateIso: null,
-    }],
+    rowCells: [
+      {
+        sheetName: "Weekly", row: 2, column: "A", cell: "A2", label: "Task",
+        value: "Project Alpha", rawValue: "Project Alpha", dateIso: null,
+      },
+      {
+        sheetName: "Weekly", row: 2, column: "B", cell: "B2", label: "Progress",
+        value: "20%", rawValue: "20%", dateIso: null,
+      },
+    ],
   };
   const projectCell = (sourceId, row, column, text) => ({
     sourceId,
@@ -968,6 +1018,20 @@ test("ambiguous or foreign workbook scope declarations are not offered or accept
     foreign.extraction.quality_warnings.join(" "),
     /scope_source_id must cite the matching declared subject value cell/,
   );
+  const taskOnly = await run(
+    [weeklyChunk],
+    {
+      parserVersion: "task-text-is-not-scope-test-v1",
+      subjects: [],
+      sheetTitles: allSheetTitles,
+    },
+    null,
+  );
+  assert.equal(taskOnly.extraction.assurance_observations.progress.length, 0);
+  assert.match(
+    taskOnly.extraction.quality_warnings.join(" "),
+    /progress\[0\]\.scope_label must be supported by a structural scope source/,
+  );
 });
 
 
@@ -1010,7 +1074,7 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
       cells: [
         cell(10, "A", "Week", "W4", "W4", null),
         cell(10, "B", "Month", "October 2026", "October 2026", null),
-        cell(10, "C", "Report Date", "2026-10-31", "46326", "2026-10-31"),
+        cell(10, "C", "Report Date", "2026-10-31", "2026-10-31", null),
         cell(10, "D", "Cut-off Date", "2026-10-30", "46325", "2026-10-30"),
         cell(10, "E", "Actual %", "30%", "0.3", null),
       ],
@@ -1218,7 +1282,7 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
     const result = await extractDocumentGroups(
       job("weekly.txt"),
       chunks,
-      { parserVersion: "document-parser/13" },
+      { parserVersion: "document-parser/14" },
       memoryGroupStore(),
     );
     assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
@@ -1350,7 +1414,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
       ),
     );
 
-  const cold = await runOnce("document-parser/13");
+  const cold = await runOnce("document-parser/14");
   assert.equal(cold.ok, true, cold.ok ? undefined : cold.errorMessage);
   assert.equal(calls, 1);
   assert.equal(cold.extraction.assurance_observations.progress[0].percent, 42);
@@ -1362,8 +1426,8 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // Every completed row records the parser and validation versions that produced
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
-  assert.equal(cached.parserVersion, "document-parser/13");
-  assert.equal(cached.schemaVersion, "phase6-document-extraction/23");
+  assert.equal(cached.parserVersion, "document-parser/14");
+  assert.equal(cached.schemaVersion, "phase6-document-extraction/24");
 
   // A cache hit re-derives the location from the live chunk instead of trusting
   // a stored payload that dropped it.
@@ -1371,7 +1435,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   delete withoutLocation.assurance_observations.progress[0].source_location;
   store.rows.set(cached.groupKey, { ...cached, result: withoutLocation });
   calls = 0;
-  const warm = await runOnce("document-parser/13");
+  const warm = await runOnce("document-parser/14");
   assert.equal(warm.ok, true, warm.ok ? undefined : warm.errorMessage);
   assert.equal(calls, 0, "the completed group is reused without a model call");
   assert.deepEqual(
@@ -1383,7 +1447,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // the stale payload is neither selected nor trusted.
   calls = 0;
   marker = "Progress: 42%";
-  const stale = await runOnce("document-parser/12");
+  const stale = await runOnce("document-parser/13");
   assert.equal(stale.ok, true, stale.ok ? undefined : stale.errorMessage);
   assert.equal(calls, 1, "the stale cached group is re-extracted");
   assert.equal(stale.extraction.facts[0].extracted_text, "Progress: 42%");

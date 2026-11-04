@@ -97,6 +97,8 @@ export type ExtractedCostObservation = {
   currency: string | null;
   scope_level: "project" | "wbs";
   scope_label: string | null;
+  scope_source_id?: string;
+  scope_provenance?: ObservationScopeProvenance[];
   // Work-package identity as stated by the source. Null for project scope and
   // for any field the source does not state. A canonical code is never captured
   // here; it is assigned only by a reviewer-accepted mapping.
@@ -391,7 +393,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/23";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/24";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -1466,7 +1468,7 @@ Required JSON schema:
   "health_snapshots": [{"dimension":"overall|schedule|cost|risk|governance|audit_readiness","score":null,"status":"green|amber|red|insufficient_evidence","evidence_coverage":0.0,"status_text":"...","source_summary":"...","snapshot_date":null,"source_id":null}],
   "alerts": [{"severity":"low|medium|high|critical","impacted_area":"...","explanation":"...","evidence_count":1,"recommended_action":"...","source_id":"..."}],
   "actions": [{"title":"...","owner_name":null,"priority":"low|medium|high","status":"open","source_id":"..."}],
-  "cost_observations": [{"measure":"approved_baseline|actual_to_date|committed|eac","source_value":"exact source text of the amount","scope_level":"project|wbs","scope_label":null,"wbs_code":null,"wbs_parent_code":null,"wbs_name":null,"scope_description":null,"period_label":null,"as_of_date":null,"status_label":null,"source_id":"..."}],
+  "cost_observations": [{"measure":"approved_baseline|actual_to_date|committed|eac","source_value":"exact source text of the amount","scope_level":"project|wbs","scope_label":null,"scope_source_id":null,"wbs_code":null,"wbs_parent_code":null,"wbs_name":null,"scope_description":null,"period_label":null,"as_of_date":null,"status_label":null,"source_id":"..."}],
   "assurance_observations": {
     "milestones": [{"label":"exact event label","raw_date":null,"date":null,"scope_level":"project|wbs|unknown","scope_label":null,"scope_source_id":null,"period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}],
     "progress": [{"raw_value":"exact percentage wording","percent":0,"scope_level":"project|wbs|unknown","scope_label":null,"scope_source_id":null,"period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}],
@@ -1481,7 +1483,7 @@ For health snapshots, return exactly one entry for every listed dimension. Use e
 Other statuses require a matching source_id and a score within green 80-100, amber 50-79, or red 0-49.
 Health status_text and source_summary fields must each be nonempty strings no longer than 500 characters.
 Group metadata suggestions are limited to document date, reporting period, and workstream. Every non-null suggestion requires a valid source_id.
-For cost observations, source_value must be text present in the cited source and scope_level "wbs" requires the work-package code or name in scope_label. For a WBS value, also capture the work package's stated identity from the source: wbs_code (its own code), wbs_parent_code (its parent's code), wbs_name (its name), and scope_description (its stated deliverable or scope). Leave any of these null when the source does not state it, and never invent a code or a canonical identity. For a project-total value leave all four null. Report as_of_date as YYYY-MM-DD and leave period_label as the source's own wording. Return [] when these sources state no cost value.
+For cost observations, source_value must be text present in the cited source. WBS scope requires a parser-labelled scope column in the cited row, an explicitly marked WBS/work-package scope in the cited text, or the unique declared-subject context; a task mention alone is not scope proof. For a declared subject, set scope_source_id to its value-cell source_id. Also capture the work package's stated identity from the source: wbs_code (its own code), wbs_parent_code (its parent's code), wbs_name (its name), and scope_description (its stated deliverable or scope). Leave any of these null when the source does not state it, and never invent a code or canonical identity. For a project-total value leave all four null. Report as_of_date as YYYY-MM-DD and leave period_label as the source's own wording. Return [] when these sources state no cost value.
 - Every assurance observation requires an excerpt and citation source_id from this group. Each non-null raw value, label, status, rating, owner, mitigation, WBS, and normalized date/number must be supported by that excerpt. Use null rather than interpreting a formula without a stored cache. Return all four arrays even when empty.
 - DOCUMENT_CONTEXT_REFERENCES_JSON exposes parser-authored key and value cells separately, each with its own source_id, exact cell, and verbatim model-visible text. Their reciprocal paired_source_id fields link only the parser-authored key/value pair. Use them only to establish a work-package scope. For a declared subject, set scope_source_id to the declared_subject value-cell source_id; the paired declared_subject_key cell and the cited sheet_title cell prove the association. Never concatenate key/value text into a citation or use context references for values, dates, facts, or summaries.
 Report document dates as YYYY-MM-DD and reporting periods as their first day YYYY-MM-01.
@@ -1743,12 +1745,16 @@ function validateGroupExtraction(
   // off as another field's value.
   const RECORD_DATE_CUE = /\b(?:cut[\s-]?off|as[\s-]?of|report(?:ing|ed)?\s*(?:date|period)|period|periode)\b/i;
   const DUE_DATE_CUE = /\b(?:due|target|start|finish|milestone|planned|actual|baseline|mitigation|submission|delivery|approval)\b/i;
-  const SCOPE_COLUMN_CUE = /\b(?:sub[\s-]?system|component|work\s*package|discipline|package|scope|activity|task|wbs)\b/i;
-  const PERIOD_COLUMN_CUE = /\b(?:week|weekly|report(?:ing)?\s*period|period|periode|month|monthly|minggu|pekan|bulan)\b/i;
+  const SCOPE_COLUMN_CUE = /\b(?:sub[\s-]?system|component|work\s*package|discipline|package|scope|wbs)\b/i;
+  const PERIOD_COLUMN_CUE = /^(?:(?:report(?:ing)?|current|this|last|previous|next|fiscal)\s+)?(?:week(?:ly)?|month(?:ly)?|period|periode|minggu|pekan|bulan|sprint|cycle|quarter)(?:\s*(?:no\.?|number|label|end(?:ing|ed)?|start(?:ing)?))?$/i;
   const referenceForCitation = (citation: SourceCitation | null) => {
     return citation?.source_id ? findSourceReference(group, citation.source_id) : undefined;
   };
   const cellLabel = (cell: ParsedSourceCell) => cell.label ?? "";
+  const isPeriodValue = (value: string) =>
+    /^(?:w(?:eek)?\s*[-#]?\s*\d{1,2}(?:\s+(?:19|20)\d{2})?|(?:19|20)\d{2}(?:[-/]\d{1,2}){0,2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:[.,]?\s+\d{2,4})?|q[1-4](?:\s+(?:fy\s*)?\d{2,4})?|fy\s*\d{2,4}|(?:sprint|cycle)\s*\d{1,3})$/iu.test(value.trim());
+  const cellDateValue = (cell: ParsedSourceCell) =>
+    cell.dateIso ?? (isIsoDate(cell.value.trim()) ? cell.value.trim() : null);
   const isRecordColumn = (cell: ParsedSourceCell) =>
     RECORD_DATE_CUE.test(cellLabel(cell)) && !DUE_DATE_CUE.test(cellLabel(cell));
   const isDueColumn = (cell: ParsedSourceCell) =>
@@ -1763,18 +1769,19 @@ function validateGroupExtraction(
     const reference = referenceForCitation(citation);
     const rowCells = reference?.rowCells;
     if (rowCells?.length) {
-      const dateCells = rowCells.filter((cell) => cell.dateIso);
+      const dateCells = rowCells.filter((cell) => cellDateValue(cell));
       const recordColumns = dateCells.filter(isRecordColumn);
       if (recordColumns.length > 1) {
         return `${path} is ambiguous: the cited row has more than one cut-off or period date column (${recordColumns.map(cellLabel).join(", ")})`;
       }
       if (recordColumns.length === 1) {
         const column = recordColumns[0];
-        return column.dateIso === claimed
+        const dateValue = cellDateValue(column);
+        return dateValue === claimed
           ? null
-          : `${path} is ${claimed}, but the cited row's "${cellLabel(column)}" column states ${column.dateIso}`;
+          : `${path} is ${claimed}, but the cited row's "${cellLabel(column)}" column states ${dateValue}`;
       }
-      const unrelated = dateCells.find((cell) => isDueColumn(cell) && cell.dateIso === claimed);
+      const unrelated = dateCells.find((cell) => isDueColumn(cell) && cellDateValue(cell) === claimed);
       if (unrelated) {
         return `${path} is the value of the cited row's "${cellLabel(unrelated)}" column, not a cut-off or period date`;
       }
@@ -1808,9 +1815,9 @@ function validateGroupExtraction(
     const reference = referenceForCitation(citation);
     const rowCells = reference?.rowCells;
     if (rowCells?.length) {
-      const dateCells = rowCells.filter((cell) => cell.dateIso);
-      if (dateCells.some((cell) => isDueColumn(cell) && cell.dateIso === claimed)) return null;
-      const record = dateCells.find((cell) => isRecordColumn(cell) && cell.dateIso === claimed);
+      const dateCells = rowCells.filter((cell) => cellDateValue(cell));
+      if (dateCells.some((cell) => isDueColumn(cell) && cellDateValue(cell) === claimed)) return null;
+      const record = dateCells.find((cell) => isRecordColumn(cell) && cellDateValue(cell) === claimed);
       return record
         ? `${path} is the cited row's "${cellLabel(record)}" value, not a due or event date`
         : `${path} cannot be attributed to a due or event date column in the cited row`;
@@ -1847,7 +1854,9 @@ function validateGroupExtraction(
     const reference = referenceForCitation(citation);
     const rowCells = reference?.rowCells;
     if (rowCells?.length) {
-      const periodColumns = rowCells.filter((cell) => PERIOD_COLUMN_CUE.test(cellLabel(cell)));
+      const periodColumns = rowCells.filter(
+        (cell) => PERIOD_COLUMN_CUE.test(cellLabel(cell).trim()) && isPeriodValue(cell.value),
+      );
       if (periodColumns.length > 1) {
         return `${path} is ambiguous: the cited row has more than one period column (${periodColumns.map(cellLabel).join(", ")})`;
       }
@@ -1858,8 +1867,11 @@ function validateGroupExtraction(
     }
     const cell = reference?.cell;
     if (cell) {
-      return PERIOD_COLUMN_CUE.test(cellLabel(cell)) &&
-          cell.value.trim().toLocaleLowerCase() === claimed.trim().toLocaleLowerCase()
+      return (
+        PERIOD_COLUMN_CUE.test(cellLabel(cell)) &&
+        isPeriodValue(cell.value) &&
+        cell.value.trim().toLocaleLowerCase() === claimed.trim().toLocaleLowerCase()
+      )
         ? null
         : `${path} cannot be attributed to a matching period column in the cited source`;
     }
@@ -1880,6 +1892,18 @@ function validateGroupExtraction(
     } else if (citation && !citation.excerpt.toLocaleLowerCase().includes(periodLabel.toLocaleLowerCase())) {
       rowErrors.push(`${path} is not present in the cited source`);
     }
+  };
+  const hasExplicitTextScope = (
+    citation: SourceCitation | null,
+    scopeLabel: string,
+  ) => {
+    const reference = referenceForCitation(citation);
+    if (!reference || reference.sourceLocation?.kind === "xlsx") return false;
+    const escaped = scopeLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(
+      `\\b(?:wbs|work[\\s-]?package|sub[\\s-]?system|component|discipline|package|scope)\\b\\s*(?:name|code)?\\s*[:#-]?\\s*${escaped}(?=$|[^\\p{L}\\p{N}_])`,
+      "iu",
+    ).test(citation?.excerpt ?? "");
   };
   // Scope provenance resolves through the exact source IDs and canonical texts
   // shown to the model, including both cells of a declared subject.
@@ -2233,6 +2257,16 @@ function validateGroupExtraction(
         const statusLabel = nullableBoundedString(observation.status_label, `${path}.status_label`, rowErrors, 200);
         const asOfDate = nullableIsoDate(observation.as_of_date ?? null, `${path}.as_of_date`, rowErrors);
         const citation = requiredCitation(observation, allowedSources, path, rowErrors, fromCache);
+        const scopeSourceId = nullableBoundedString(
+          observation.scope_source_id ?? null,
+          `${path}.scope_source_id`,
+          rowErrors,
+          200,
+        );
+        const scopeEvidence = scopeLabel
+          ? scopeProvenance(citation, scopeLabel, scopeSourceId)
+          : null;
+        const explicitTextScope = scopeLabel ? hasExplicitTextScope(citation, scopeLabel) : false;
         const measureCue = COST_MEASURE_SOURCE_CUES[measure as ExtractedCostObservation["measure"]];
         if (
           citation &&
@@ -2252,10 +2286,23 @@ function validateGroupExtraction(
           rowErrors.push(`${path}.scope_label is required for a work-package cost value`);
         }
         if (
+          scopeSourceId &&
+          !scopeEvidence?.some(
+            (entry) => entry.kind === "declared_subject" && entry.source_id === scopeSourceId,
+          )
+        ) {
+          rowErrors.push(`${path}.scope_source_id must cite the matching declared subject value cell`);
+        }
+        if (scopeLevel === "wbs" && !scopeEvidence && !explicitTextScope) {
+          rowErrors.push(`${path}.scope_label must be supported by a structural scope source`);
+        }
+        if (
           citation &&
           scopeLevel === "wbs" &&
           scopeLabel &&
-          !citation.excerpt.toLocaleLowerCase().includes(scopeLabel.toLocaleLowerCase())
+          !citation.excerpt.toLocaleLowerCase().includes(scopeLabel.toLocaleLowerCase()) &&
+          !scopeEvidence &&
+          !explicitTextScope
         ) {
           rowErrors.push(`${path}.scope_label is not present in the cited source`);
         }
@@ -2296,6 +2343,8 @@ function validateGroupExtraction(
           // identity there carry no comparison meaning and are dropped to keep
           // selection unambiguous.
           scope_label: scopeLevel === "project" ? null : scopeLabel!,
+          ...(scopeEvidence ? { scope_provenance: scopeEvidence } : {}),
+          ...(scopeEvidence && scopeSourceId ? { scope_source_id: scopeSourceId } : {}),
           wbs_code: scopeLevel === "project" ? null : wbsCode,
           wbs_parent_code: scopeLevel === "project" ? null : wbsParentCode,
           wbs_name: scopeLevel === "project" ? null : wbsName,
@@ -2399,7 +2448,16 @@ function validateGroupExtraction(
     ) {
       rowErrors.push(`${path}.scope_source_id must cite the matching declared subject value cell`);
     }
-    if (scopeLabel && !textIsCited(scopeLabel, excerpt) && !scopeEvidence) {
+    const explicitTextScope = scopeLabel ? hasExplicitTextScope(citation, scopeLabel) : false;
+    if (scopeLevel === "wbs" && !scopeEvidence && !explicitTextScope) {
+      rowErrors.push(`${path}.scope_label must be supported by a structural scope source`);
+    }
+    if (
+      scopeLabel &&
+      !textIsCited(scopeLabel, excerpt) &&
+      !scopeEvidence &&
+      !explicitTextScope
+    ) {
       rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
     }
     checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors);
@@ -2465,7 +2523,16 @@ function validateGroupExtraction(
     ) {
       rowErrors.push(`${path}.scope_source_id must cite the matching declared subject value cell`);
     }
-    if (scopeLabel && !textIsCited(scopeLabel, excerpt) && !scopeEvidence) {
+    const explicitTextScope = scopeLabel ? hasExplicitTextScope(citation, scopeLabel) : false;
+    if (scopeLevel === "wbs" && !scopeEvidence && !explicitTextScope) {
+      rowErrors.push(`${path}.scope_label must be supported by a structural scope source`);
+    }
+    if (
+      scopeLabel &&
+      !textIsCited(scopeLabel, excerpt) &&
+      !scopeEvidence &&
+      !explicitTextScope
+    ) {
       rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
     }
     checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors);

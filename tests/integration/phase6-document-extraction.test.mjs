@@ -1159,7 +1159,7 @@ function costModelOutput(prompt, observations) {
   };
 }
 
-async function extractCostObservations(observations) {
+async function extractCostObservations(observations, source = costSource) {
   return await withLocalOllama(
     async (_url, init) => {
       const prompt = JSON.parse(init.body).messages[1].content;
@@ -1167,8 +1167,8 @@ async function extractCostObservations(observations) {
     },
     async () =>
       await extractDocumentGroups(
-        job(costSource, { fileName: "cost-report.txt", title: "Cost Report" }),
-        [{ chunkIndex: 0, chunkText: costSource, sectionLabel: "Cost summary" }],
+        job(source, { fileName: "cost-report.txt", title: "Cost Report" }),
+        [{ chunkIndex: 0, chunkText: source, sectionLabel: "Cost summary" }],
         { parserVersion: "cost-evidence-test-v1" },
         memoryGroupStore(),
       ),
@@ -1227,6 +1227,19 @@ test("cost observations keep the source value and carry deterministic normalizat
   );
   assert.equal(observations[1].evidence_chunk_index, 0);
   assert.ok(costSource.includes(observations[1].excerpt));
+});
+
+test("cost currency is left unknown when citation wording does not bind a unique unit to the amount", async () => {
+  const source =
+    "Approved baseline amount: 100 | Reporting currency: USD | Legacy currency: IDR";
+  const outcome = await extractCostObservations([
+    { measure: "approved_baseline", source_value: source },
+  ], source);
+
+  assert.equal(outcome.ok, true, `${outcome.errorCode}: ${outcome.errorMessage}`);
+  assert.equal(outcome.extraction.cost_observations.length, 1);
+  assert.equal(outcome.extraction.cost_observations[0].normalized_amount, 100);
+  assert.equal(outcome.extraction.cost_observations[0].currency, null);
 });
 
 test("a cost value absent from its cited source is excluded, not accepted", async () => {
@@ -1301,6 +1314,26 @@ test("a WBS cost value captures the work-package identity, and a project total d
   assert.deepEqual(
     [project.wbs_code, project.wbs_parent_code, project.wbs_name, project.scope_description],
     [null, null, null, null],
+  );
+});
+
+test("a task mention inside a cost citation does not prove WBS scope", async () => {
+  const source =
+    "Approved baseline amount: USD 100. Task: Alarm Kebencanaan | Progress: 20%.";
+  const outcome = await extractCostObservations([
+    {
+      measure: "approved_baseline",
+      source_value: "USD 100",
+      scope_level: "wbs",
+      scope_label: "Alarm Kebencanaan",
+    },
+  ], source);
+
+  assert.equal(outcome.ok, true, `${outcome.errorCode}: ${outcome.errorMessage}`);
+  assert.deepEqual(outcome.extraction.cost_observations, []);
+  assert.match(
+    outcome.extraction.quality_warnings.join(" "),
+    /scope_label must be supported by a structural scope source/,
   );
 });
 

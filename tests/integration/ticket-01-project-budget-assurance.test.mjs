@@ -72,6 +72,11 @@ test("normalization reads unambiguous source values and refuses the rest", () =>
   assert.equal(normalizeCostAmount("IDR 1.250.000,50"), 1_250_000.5);
   assert.equal(normalizeCostCurrency("Approved budget of USD 980,000"), "USD");
   assert.equal(normalizeCostCurrency("Rp 1.250.000"), "IDR");
+  assert.equal(
+    normalizeCostCurrency("Approved baseline amount: 100 | Reporting currency: USD | Legacy currency: IDR"),
+    null,
+  );
+  assert.equal(normalizeCostCurrency("100 | Reporting currency: USD"), null);
 
   // A scale word, an ambiguous symbol, and an inconsistent layout stay unread.
   assert.equal(normalizeCostAmount("USD 1.2 million"), null);
