@@ -1,11 +1,12 @@
 # Rencana orkestrasi — evidence PMO hingga kesehatan proyek
 
-Status: draft untuk review; belum merupakan tiket implementasi yang disetujui. Baseline integrasi: `master` fork `ibayyabi/DevXassurance`, merge `695ce52`. Dokumen ini merinci dependensi dan kontrak untuk orkestrator; jangan langsung menjalankan semua slice.
+Status: pembagian slice dan dependensi disetujui; [tiket implementasi](issues/) telah diterbitkan. Keputusan yang masih terbuka dan izin pengujian live tetap berlaku. Baseline integrasi: `master` fork `ibayyabi/DevXassurance`, merge `695ce52`.
 
 ## Tujuan dan keputusan yang disepakati
 
 - PMO mengunggah dokumen proyek yang bervariasi; sistem menampilkan progress sebagai kondisi tersendiri di samping Budget, Schedule, dan Risk, dengan sumber dan perubahan per cut-off.
 - Observasi jelas dan tervalidasi dapat ditampilkan meskipun dokumen `needs_review`; baseline, mapping, konflik, dan nilai ambigu tetap memerlukan keputusan reviewer. Status pemrosesan dokumen bukan kualitas atau kelengkapan assurance.
+- RAG progress yang dilaporkan sumber ditampilkan sebagai klaim bersitasi, terpisah dari status hitungan. Status hitungan hanya menggunakan aturan proyek yang disetujui dan berversi; tanpa aturan yang berlaku, nilai tetap terlihat tetapi status belum dinilai. Ambang fixture bukan default global.
 - LLM aplikasi production tetap Ollama Cloud `gpt-oss:20b`; jangan mengubah provider/model production, menambah fallback otomatis, atau menjadikan DeepSeek/Qwen sebagai LLM aplikasi. DeepSeek via commandcode dapat dipakai sebagai subagent engineering.
 - Model lain hanya boleh dievaluasi sebagai alat **testing** pada environment terisolasi, tidak menulis konfigurasi production atau data proyek pengguna. Belum ada model pengujian yang dipilih atau tervalidasi.
 - Tidak ada spam provider: default 0 panggilan live. Uji otomatis deterministik memakai fixture/respons rekaman tersanitasi atau server fixture yang sudah ada; bukan bukti kualitas model. Setiap pengujian model riil butuh persetujuan eksplisit user dengan jumlah maksimum request, estimasi biaya, isi yang dikirim, serta kebijakan privasi. Hentikan saat 429/402/error berulang; jangan retry massal.
@@ -25,7 +26,7 @@ Status: draft untuk review; belum merupakan tiket implementasi yang disetujui. B
 1. **Evidence:** observasi yang digunakan memiliki file/versi, lokasi sumber, nilai asli, nilai normalisasi jika aman, jenis pengukuran, scope dan waktu. Jangan mengambil konteks tanggal/scope dari sel lain tanpa relasi baris/header yang terbukti. Jika provenance tidak cukup, tampilkan gap.
 2. **Coverage:** coverage domain/grup yang belum lengkap tetap terbuka. Observasi valid parsial tetap terlihat sebagai evidence dengan peringatan; satu observasi tidak membuktikan domain penuh. `unprocessed` tidak boleh diubah menjadi `absent`, hijau, atau nol. Domain lain yang didukung tidak boleh diturunkan hanya karena dokumen lain bermasalah tanpa alasan relevan.
 3. **Waktu:** review baru memakai cut-off; review bulanan lama tetap semantik month-end. Metadata dokumen yang hanya menyatakan bulan tidak membuktikan tanggal mingguan. Identik filename + isi berbeda = dokumen/snapshot berbeda. Jangan diam-diam mencampur evidence lintas cut-off.
-4. **Progress vs Schedule:** progress terpisah dari Schedule; planned vs actual untuk scope/periode yang sama dan dalam satuan sebanding. Nilai pecahan XLSX hanya dikonversi jika format/sumber mendukung. Pertahankan RAG sumber dan aturan evaluasi sebagai konsep berbeda; ambang progress perlu diputuskan, jangan mengangkat aturan fixture menjadi kebijakan global tanpa persetujuan.
+4. **Progress vs Schedule:** progress terpisah dari Schedule; planned vs actual untuk scope/periode yang sama dan dalam satuan sebanding. Nilai pecahan XLSX hanya dikonversi jika format/sumber mendukung. Pertahankan RAG sumber dan status hitungan terpisah; hitung hanya dengan aturan proyek yang disetujui dan berversi, jika tidak ada tampilkan belum dinilai.
 5. **Risk:** cocokkan ID persis atau mapping yang disetujui, dengan periode dan skala; ketiadaan observasi tidak membuktikan risk closed. Previous snapshot berbeda dari approved baseline.
 6. **Keamanan operasional:** semua observasi dan sumber milik project, service-role tidak di client, RLS dan claim-token/fencing dipertahankan. Tidak melakukan mutasi Supabase hosted/deployment/migrasi tanpa izin terpisah.
 
@@ -107,11 +108,10 @@ flowchart TD
 - Gunakan test perilaku deterministik pada seam tertinggi: unggah/worker → hasil validasi → hasil assurance/Overview; fixture provider mensimulasikan output tidak valid, quota 429, evidence parsial dan versi. Hindari test wiring, copy, incidental wording, atau sekadar not-throw.
 - Jangan mengirim 56 file ke provider untuk mencari penyebab. Mulai dari satu workbook W4 dan satu W5 hanya setelah ada anggaran live yang disetujui; unggahan penuh adalah keputusan user terpisah. Model test berbeda boleh menguji integrasi, tetapi final sign-off terhadap model production tetap perlu validasi terbatas `gpt-oss:20b` atas izin user.
 
-## Keputusan yang masih terbuka sebelum tiket dipublikasikan
+## Keputusan yang masih terbuka
 
-1. Ambang RAG progress: pakai aturan sumber per proyek jika dinyatakan, atau aturan assurance yang dikonfigurasi/disetujui? Jangan tetapkan `-5/-10 pp` secara global hanya karena fixture.
-2. Scope perbandingan dan rollup: sistem tidak boleh menghitung project total dari WBS saat kontrak saat ini melarangnya; putuskan apakah ingin mengubah aturan domain dan dengan bobot yang disetujui.
-3. Provider/model testing, izin data, lingkungan terisolasi, dan batas absolut request/biaya; belum ada yang dipilih.
-4. Kapan mengizinkan satu live smoke pada `gpt-oss:20b` production-like; default tidak ada panggilan sampai user memberi izin.
+1. Rollup project dari WBS tetap dilarang oleh kontrak saat ini; perubahan kebijakan dan bobot membutuhkan keputusan domain baru.
+2. Provider/model testing, izin data, lingkungan terisolasi, dan batas absolut request/biaya; belum ada yang dipilih.
+3. Kapan mengizinkan satu live smoke pada `gpt-oss:20b` production-like; default tidak ada panggilan sampai user memberi izin.
 
-Repo mengharuskan pengguna meninjau granularitas dan blocking edges sebelum tiket terpisah diterbitkan. Rencana ini bukan klaim implementasi sudah selesai.
+Tiket dengan keputusan yang belum tersedia ditandai `needs-info`; persetujuan rencana bukan izin menjalankan provider live. Rencana ini bukan klaim implementasi sudah selesai.
