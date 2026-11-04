@@ -89,6 +89,9 @@ test("normalization reads unambiguous source values and refuses the rest", () =>
   assert.equal(normalizeCostAmount("USD 1.2 million"), null);
   assert.equal(normalizeCostAmount("12.34.567"), null);
   assert.equal(normalizeCostCurrency("$1,000"), null);
+  assert.equal(normalizeCostCurrency("¥1,000"), null);
+  assert.equal(normalizeCostCurrency("JPY 1,000"), "JPY");
+  assert.equal(normalizeCostCurrency("CNY 1,000"), "CNY");
   assert.equal(normalizeCostCurrency("Total EAC is 1,250,000"), null);
 });
 

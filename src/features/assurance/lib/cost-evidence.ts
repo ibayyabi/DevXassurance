@@ -105,7 +105,6 @@ const currencySymbols: Record<string, string> = {
   rp: "IDR",
   "€": "EUR",
   "£": "GBP",
-  "¥": "JPY",
   "₩": "KRW",
   "₹": "INR",
 };

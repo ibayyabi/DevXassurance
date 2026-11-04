@@ -393,7 +393,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/30";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/31";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -1199,13 +1199,6 @@ function sourceCellMatchesCandidate(sourceCell: ParsedSourceCell, candidate: str
   ) {
     return true;
   }
-  if (
-    /^\d{4}-\d{2}-01$/u.test(normalized) &&
-    (sourceCell.dateIso?.startsWith(normalized.slice(0, 7)) ||
-      sourceCell.rawValue.trim().startsWith(normalized.slice(0, 7)))
-  ) {
-    return true;
-  }
   return !/^\d{4}-\d{2}-\d{2}$/u.test(normalized) &&
     containsNumericValue(normalized) &&
     citedTextSupportsNumericValue(normalized, sourceCell.rawValue);
@@ -1219,11 +1212,21 @@ function citedFormulaCacheStatusForValue(
   if (!candidate) return null;
   const cited = citedReference(group, citation);
   if (!cited) return null;
-  const sourceCells = cited.reference.rowCells?.length
-    ? cited.reference.rowCells
-    : cited.reference.cell
-      ? [cited.reference.cell]
-      : [];
+  const location = cited.reference.sourceLocation;
+  const exactCell =
+    cited.reference.cell &&
+    location?.kind === "xlsx" &&
+    location.cellRangeStart === cited.reference.cell.cell &&
+    location.cellRangeEnd === cited.reference.cell.cell
+      ? cited.reference.cell
+      : null;
+  const sourceCells = exactCell
+    ? [exactCell]
+    : cited.reference.rowCells?.length
+      ? cited.reference.rowCells
+      : cited.reference.cell
+        ? [cited.reference.cell]
+        : [];
   const statuses = sourceCells
     .filter((sourceCell) => sourceCellMatchesCandidate(sourceCell, candidate))
     .map((sourceCell) => formulaCacheStatusForSourceCell(group, citation, sourceCell))
@@ -1235,6 +1238,34 @@ function citedFormulaCacheStatusForValue(
 function sourceValueNeedsFormulaReview(status: string | null): boolean {
   return status === "cached_value";
 }
+
+function formulaCandidateReviewError(
+  group: ChunkGroup,
+  citation: SourceCitation | null,
+  candidate: string | null | undefined,
+  path: string,
+): string | null {
+  return candidate &&
+    sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, candidate))
+    ? `${path} cites a stored formula result whose freshness is not established; it remains source-reported evidence for review (${FORMULA_CACHE_REVIEW_MARKER})`
+    : null;
+}
+function citationIsCachedFormulaCell(
+  group: ChunkGroup,
+  citation: SourceCitation | null,
+): boolean {
+  const cited = citedReference(group, citation);
+  const cell = cited?.reference.cell;
+  const location = cited?.reference.sourceLocation;
+  return Boolean(
+    cell &&
+    location?.kind === "xlsx" &&
+    location.cellRangeStart === cell.cell &&
+    location.cellRangeEnd === cell.cell &&
+    formulaCacheStatusForSourceCell(group, citation, cell) === "cached_value",
+  );
+}
+
 
 function citedPercentCellForClaim(
   group: ChunkGroup,
@@ -1249,9 +1280,13 @@ function citedPercentCellForClaim(
     ? [cited.reference.cell]
     : cited.reference.rowCells ?? [];
   const percentHeader = /(?:%|\bpercent(?:age)?\b|\bpersen\b)/iu;
+  const progressHeader = /\b(?:actual|progress|complete|completed|completion|realisasi|kemajuan)\b/iu;
+  const nonProgressHeader = /\b(?:risk|likelihood|probability|rating|impact|severity)\b/iu;
   const matches = sourceCells.filter(
     (cell) =>
       percentHeader.test(cell.label ?? "") &&
+      progressHeader.test(cell.label ?? "") &&
+      !nonProgressHeader.test(cell.label ?? "") &&
       cell.rawValue.trim() === rawValue.trim() &&
       citedTextSupportsNumericValue(String(percentValue), cell.rawValue),
   );
@@ -1536,12 +1571,12 @@ Rules:
 - This group may suggest document date, reporting period, and workstream only. Artifact type and evidence role are classified once from the document-level preview.
 - Use insufficient_evidence when a health dimension lacks direct evidence; absence of a negative statement is not evidence of green status.
 - A source-group health assessment is not a document comparison. Do not claim change or variance unless both values appear in these sources.
-- Formula expressions are never evaluated. A stored cached formula result is only a source-reported candidate whose freshness is not established; never treat it as a current date/status or comparable cost/progress value. Preserve an explicitly reported cost source_value as review-only raw text, but do not normalize it. Do not accept formula-derived report dates or health statuses as current. Missing, empty, or error cache yields formula_result_unavailable and must not generate numeric values, statuses, variances, progress, or facts. Do not recalculate, interpolate, or infer any formula result.
+- Formula expressions are never evaluated. A stored cached formula result is only a source-reported candidate whose freshness is not established; never treat it as a current date/status or comparable cost/progress value, and do not derive alerts, actions, or risk snapshot/register status from it. Preserve an explicitly reported cost source_value as review-only raw text, but do not normalize it. Do not accept formula-derived report dates or health statuses as current. Missing, empty, or error cache yields formula_result_unavailable and must not generate numeric values, statuses, variances, progress, or facts. Do not recalculate, interpolate, or infer any formula result.
 - cost_observations collect project cost evidence found anywhere in these sources, whatever the artifact's primary type. Report one entry per stated cost value, copying source_value exactly as written in its cited source, including its currency wording and digit separators. Never convert, total, or restate a value.
 - Choose the cost measure from what the source says: approved_baseline (an approved or controlled budget reference), actual_to_date (cost already incurred), committed (contractually committed or ordered cost), eac (an explicitly reported total forecast or estimate at completion). Never record an actual or committed value as eac, and never record a value whose meaning the source does not state. Return [] only after processing this complete group and finding no cost values.
 - assurance_observations collect every source-backed milestone date, explicitly reported progress value, and item-level risk snapshot in this group, whatever the artifact's primary type. Do not infer baseline/current role; reviewer selection assigns that role later. Keep source scope, period, raw wording, and exact excerpt. Return [] for each array only when this complete group contains no such observation.
 - Milestones: keep the source label and raw date text. Normalize date only when the source explicitly gives an ISO YYYY-MM-DD date; do not convert locale dates. Set scope_level to project, wbs, or unknown from the source; WBS requires its exact scope_label.
-- Progress: report one entry per stated percentage, preserving 0 and the stated project/WBS scope. raw_value must be exact source wording; percent is the same percentage-point value (0–100), never a fraction, sum, average, or forecast. Omit non-numeric or unclear values; use unknown only when the scope is unclear.
+- Progress: report one entry per stated percentage, preserving 0 and the stated project/WBS scope. raw_value must be exact source wording; percent is the same percentage-point value (0–100), never a fraction, sum, average, or forecast. A General-formatted numeric cell requires a unique progress-semantics percent header (for example, Actual %); risk likelihood/probability percentages are not progress. Omit non-numeric or unclear values; use unknown only when the scope is unclear.
 - Risk: report each item separately with its source risk ID, status, source rating label/value/scale, owner, mitigation, mitigation due date, WBS, and period when stated. raw_value and excerpt must be verbatim source text. A register statement may say no_open_high_or_critical only when it explicitly states that no open high or critical risks exist; otherwise use open_risk_reported only for an explicit open-risk statement.
 - Never derive risk counts, conditions, changes, or dates. Do not turn no extracted rows into a claim that no risks exist. Unsupported values are omitted; the application validates the raw value and computes comparisons.
 - The application decides which cost values are comparable, normalizes amounts, and accepts baselines. Do not compare, calculate a variance, or claim that any value is approved for comparison.
@@ -2231,7 +2266,7 @@ function validateGroupExtraction(
     const labelledFieldBoundary =
       /^\s*[,，]\s*[\p{L}\p{N}_][\p{L}\p{N}_\s().%/_-]{0,79}\s*[:=]\s*$/u;
     const narrativeFieldBoundary =
-      /^\s*[,，]?\s*(?:actual\b(?:\s*%|\s+percent(?:age)?|\s+progress|\s+to\s+date)?|progress\b|realisasi\b|kemajuan\b|completed\b|completion\b|forecast\b|ramalan\b|estimate(?:\s+at\s+completion)?\b|estimasi\b|eac\b|baseline\b|approved\b|disetujui\b|budget\b|anggaran\b|cost\b|biaya\b|currency\b|mata\s+uang\b|amount\b|nilai\b|report(?:ed|ing)?\s+(?:date|period)\b|as[\s-]?of\b|cut[\s-]?off(?:\s+date)?\b|due(?:\s+date)?\b|target(?:\s+date)?\b|week\b|minggu\b|month\b|bulan\b|period(?:e)?\b)\s*[:#=-]?\s*$/iu;
+      /^\s*[,，–—-]?\s*(?:actual\b(?:\s*%|\s+percent(?:age)?|\s+progress|\s+to\s+date)?|progress\b|realisasi\b|kemajuan\b|completed\b|completion\b|forecast\b|ramalan\b|estimate(?:\s+at\s+completion)?\b|estimasi\b|eac\b|baseline\b|approved\b|disetujui\b|budget\b|anggaran\b|cost\b|biaya\b|currency\b|mata\s+uang\b|amount\b|nilai\b|report(?:ed|ing)?\s+(?:date|period)\b|as[\s-]?of\b|cut[\s-]?off(?:\s+date)?\b|due(?:\s+date)?\b|target(?:\s+date)?\b|week\b|minggu\b|month\b|bulan\b|period(?:e)?\b)\s*[:#=-]?\s*$/iu;
     const separatorBoundary = /^\s*[,;|:–—-]?\s*$/u;
     const grammaticalValueBoundary = /^\s+is\s*$/iu;
     const scopeCuePattern =
@@ -2619,6 +2654,18 @@ function validateGroupExtraction(
       if (citation && citationHasUnavailableFormula(group, citation)) {
         rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support an alert.`);
       }
+      if (citation && citationIsCachedFormulaCell(group, citation)) {
+        rowErrors.push(`${path}.source_id cites a stored formula result whose freshness is not established; the alert requires review (${FORMULA_CACHE_REVIEW_MARKER}).`);
+      }
+      for (const [field, candidate] of [
+        ["severity", severity],
+        ["impacted_area", impactedArea],
+        ["explanation", explanation],
+        ["recommended_action", recommendedAction],
+      ] as const) {
+        const formulaError = formulaCandidateReviewError(group, citation, candidate, `${path}.${field}`);
+        if (formulaError) rowErrors.push(formulaError);
+      }
       if (!["low", "medium", "high", "critical"].includes(severity)) rowErrors.push(`${path}.severity is invalid`);
       if (rowErrors.length) {
         warnInvalidRow(path, rowErrors);
@@ -2653,6 +2700,18 @@ function validateGroupExtraction(
       const citation = requiredCitation(action, allowedSources, path, rowErrors, fromCache);
       if (citation && citationHasUnavailableFormula(group, citation)) {
         rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support an action.`);
+      }
+      if (citation && citationIsCachedFormulaCell(group, citation)) {
+        rowErrors.push(`${path}.source_id cites a stored formula result whose freshness is not established; the action requires review (${FORMULA_CACHE_REVIEW_MARKER}).`);
+      }
+      for (const [field, candidate] of [
+        ["title", title],
+        ["owner_name", ownerName],
+        ["priority", priority],
+        ["status", status],
+      ] as const) {
+        const formulaError = formulaCandidateReviewError(group, citation, candidate, `${path}.${field}`);
+        if (formulaError) rowErrors.push(formulaError);
       }
       if (!["low", "medium", "high"].includes(priority)) rowErrors.push(`${path}.priority is invalid`);
       if (status !== "open") rowErrors.push(`${path}.status must be open for a recommended action`);
@@ -3085,6 +3144,9 @@ function validateGroupExtraction(
     const rawValue = boundedString(item.raw_value, `${path}.raw_value`, rowErrors, 1200);
     const citation = requiredCitation(item, allowedSources, path, rowErrors, fromCache);
     const excerpt = excerptFor(item, citation, path, rowErrors);
+    if (citation && citationIsCachedFormulaCell(group, citation)) {
+      rowErrors.push(`${path}.source_id cites a stored formula result whose freshness is not established; the risk snapshot requires review (${FORMULA_CACHE_REVIEW_MARKER}).`);
+    }
     const mitigationDueDate = checkedDate(item.mitigation_due_date ?? null, excerpt, `${path}.mitigation_due_date`, rowErrors, citation);
     const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors, citation);
     checkDate(citation, mitigationDueDate, `${path}.mitigation_due_date`, rowErrors, "due");
@@ -3092,11 +3154,15 @@ function validateGroupExtraction(
     checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors, rawValue);
     for (const [field, candidate] of [
       ["risk_id", riskId], ["name", name], ["description", description], ["status", status],
-      ["rating_label", ratingLabel], ["scale_label", scaleLabel], ["owner", owner],
-      ["mitigation", mitigation], ["wbs", wbs],
+      ["rating_label", ratingLabel],
+      ["rating_value", ratingValue === null || ratingValue === undefined ? null : String(ratingValue)],
+      ["scale_label", scaleLabel], ["owner", owner], ["mitigation", mitigation],
+      ["wbs", wbs], ["period_label", periodLabel],
       ["raw_mitigation_due_date", rawMitigationDueDate], ["raw_value", rawValue],
     ] as const) {
       if (!textIsCited(candidate, excerpt)) rowErrors.push(`${path}.${field} is not present in the cited excerpt`);
+      const formulaError = formulaCandidateReviewError(group, citation, candidate, `${path}.${field}`);
+      if (formulaError) rowErrors.push(formulaError);
     }
     if (mitigationDueDate && rawMitigationDueDate !== mitigationDueDate) {
       rowErrors.push(`${path}.mitigation_due_date can only normalize an exact ISO raw_mitigation_due_date`);
@@ -3144,6 +3210,12 @@ function validateGroupExtraction(
     const periodLabel = nullableBoundedString(item.period_label ?? null, `${path}.period_label`, rowErrors, 200);
     const citation = requiredCitation(item, allowedSources, path, rowErrors, fromCache);
     const excerpt = excerptFor(item, citation, path, rowErrors);
+    if (
+      (citation && citationIsCachedFormulaCell(group, citation)) ||
+      formulaCandidateReviewError(group, citation, rawValue, `${path}.raw_value`)
+    ) {
+      rowErrors.push(`${path} cites a stored formula result whose freshness is not established; the risk statement requires review (${FORMULA_CACHE_REVIEW_MARKER}).`);
+    }
     const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors, citation);
     checkDate(citation, asOfDate, `${path}.as_of_date`, rowErrors, "record");
     if (!["no_open_high_or_critical", "open_risk_reported"].includes(state)) {

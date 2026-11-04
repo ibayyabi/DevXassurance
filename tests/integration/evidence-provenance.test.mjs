@@ -110,7 +110,7 @@ async function syntheticCachedFormulaWorkbook() {
   );
   zip.file(
     "xl/worksheets/sheet1.xml",
-    `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Record</t></is></c><c r="B1" t="inlineStr"><is><t>EAC</t></is></c><c r="C1" t="inlineStr"><is><t>Report Date</t></is></c><c r="D1" t="inlineStr"><is><t>Schedule Status</t></is></c><c r="E1" t="inlineStr"><is><t>Cost Status</t></is></c><c r="F1" t="inlineStr"><is><t>Actual %</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Formula row</t></is></c><c r="B2"><f>200+300</f><v>500</v></c><c r="C2" t="str"><f>TEXT(DATE(2026,10,16),&quot;yyyy-mm-dd&quot;)</f><v>2026-10-16</v></c><c r="D2" t="str"><f>IF(TRUE(),&quot;Green&quot;,&quot;Red&quot;)</f><v>Green</v></c><c r="E2" t="inlineStr"><is><t>Green</t></is></c><c r="F2"><v>0.125</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Literal row</t></is></c><c r="B3"><v>750</v></c><c r="C3" t="inlineStr"><is><t>2026-10-09</t></is></c><c r="D3" t="inlineStr"><is><t>Amber</t></is></c><c r="E3" t="inlineStr"><is><t>Green</t></is></c><c r="F3"><v>12.5</v></c></row></sheetData></worksheet>`,
+    `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Record</t></is></c><c r="B1" t="inlineStr"><is><t>EAC Literal</t></is></c><c r="C1" t="inlineStr"><is><t>EAC Formula</t></is></c><c r="D1" t="inlineStr"><is><t>Report Date</t></is></c><c r="E1" t="inlineStr"><is><t>Schedule Status</t></is></c><c r="F1" t="inlineStr"><is><t>Cost Status</t></is></c><c r="G1" t="inlineStr"><is><t>Actual %</t></is></c><c r="H1" t="inlineStr"><is><t>Likelihood %</t></is></c><c r="I1" t="inlineStr"><is><t>Metadata</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Formula row</t></is></c><c r="B2"><v>500</v></c><c r="C2"><f>200+300</f><v>500</v></c><c r="D2" t="str"><f>TEXT(DATE(2026,10,16),&quot;yyyy-mm-dd&quot;)</f><v>2026-10-16</v></c><c r="E2" t="str"><f>IF(TRUE(),&quot;Green&quot;,&quot;Red&quot;)</f><v>Green</v></c><c r="F2" t="inlineStr"><is><t>Green</t></is></c><c r="G2"><v>0.125</v></c><c r="H2"><v>25</v></c><c r="I2" t="inlineStr"><is><t>2026-10-01</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Literal row</t></is></c><c r="B3"><v>750</v></c><c r="D3" t="inlineStr"><is><t>2026-10-09</t></is></c><c r="E3" t="inlineStr"><is><t>Amber</t></is></c><c r="F3" t="inlineStr"><is><t>Green</t></is></c><c r="G3"><v>12.5</v></c><c r="H3"><v>20.4</v></c></row></sheetData></worksheet>`,
   );
   const buffer = await zip.generateAsync({ type: "nodebuffer" });
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
@@ -923,7 +923,7 @@ test("cached formulas remain review-only while literal siblings and percent head
   const parsed = await parseDocumentBuffer("cached-formulas.xlsx", buffer);
   assert.equal(parsed.ok, true, parsed.ok ? undefined : parsed.errorMessage);
   if (!parsed.ok) return;
-  for (const cellReference of ["B2", "C2", "D2"]) {
+  for (const cellReference of ["C2", "D2", "E2"]) {
     assert.equal(
       parsed.chunks.flatMap((chunk) => chunk.formulaCells ?? [])
         .find((cell) => cell.cellReference === cellReference)?.formulaCacheStatus,
@@ -949,13 +949,21 @@ test("cached formulas remain review-only while literal siblings and percent head
         source.source_location?.rowStart === number &&
         source.source_location?.rowEnd === number &&
         source.source_location?.cellRangeStart === `A${number}` &&
-        source.source_location?.cellRangeEnd === `F${number}`,
+        source.source_location?.cellRangeEnd !== `A${number}`,
     );
     const formulaRow = row(2);
     const literalRow = row(3);
-    const formulaPercent = cell("F2");
-    const literalPercent = cell("F3");
-    assert.ok(formulaRow && literalRow && formulaPercent && literalPercent);
+    const formulaCostCell = cell("C2");
+    const literalCostCell = cell("B2");
+    const formulaStatus = cell("E2");
+    const literalDate = cell("I2");
+    const actualPercent = cell("G2");
+    const literalPercent = cell("G3");
+    const likelihoodPercent = cell("H2");
+    assert.ok(
+      formulaRow && literalRow && formulaCostCell && literalCostCell && formulaStatus &&
+      literalDate && actualPercent && literalPercent && likelihoodPercent,
+    );
 
     const output = baseGroupOutput(references);
     output.health_snapshots = output.health_snapshots.map((snapshot) => ({
@@ -985,6 +993,43 @@ test("cached formulas remain review-only while literal siblings and percent head
       }
       return snapshot;
     });
+    const cachedStatusClaims = {
+      source_id: formulaStatus.source_id,
+      excerpt: formulaStatus.text,
+    };
+    output.alerts = [{
+      severity: "high",
+      impacted_area: "Schedule",
+      explanation: "Green",
+      evidence_count: 1,
+      recommended_action: "Review schedule",
+      ...cachedStatusClaims,
+    }];
+    output.actions = [{
+      title: "Green",
+      owner_name: null,
+      priority: "high",
+      status: "open",
+      ...cachedStatusClaims,
+    }];
+    output.assurance_observations.risk_snapshots = [{
+      risk_id: null,
+      name: "Formula status risk",
+      description: "Green",
+      status: "Green",
+      rating_label: null,
+      rating_value: null,
+      scale_label: null,
+      owner: null,
+      mitigation: null,
+      mitigation_due_date: null,
+      raw_mitigation_due_date: null,
+      wbs: null,
+      period_label: null,
+      as_of_date: null,
+      raw_value: "Green",
+      ...cachedStatusClaims,
+    }];
     output.cost_observations = [
       {
         measure: "eac",
@@ -1000,6 +1045,21 @@ test("cached formulas remain review-only while literal siblings and percent head
         as_of_date: "2026-10-16",
         status_label: null,
         source_id: formulaRow.source_id,
+      },
+      {
+        measure: "eac",
+        source_value: "500",
+        scope_level: "project",
+        scope_label: null,
+        scope_source_id: null,
+        wbs_code: null,
+        wbs_parent_code: null,
+        wbs_name: null,
+        scope_description: null,
+        period_label: null,
+        as_of_date: null,
+        status_label: null,
+        source_id: literalCostCell.source_id,
       },
       {
         measure: "eac",
@@ -1025,8 +1085,8 @@ test("cached formulas remain review-only while literal siblings and percent head
         scope_label: null,
         period_label: null,
         as_of_date: null,
-        excerpt: formulaPercent.text,
-        source_id: formulaPercent.source_id,
+        excerpt: actualPercent.text,
+        source_id: actualPercent.source_id,
       },
       {
         raw_value: "12.5",
@@ -1045,12 +1105,22 @@ test("cached formulas remain review-only while literal siblings and percent head
         scope_label: null,
         period_label: null,
         as_of_date: null,
-        excerpt: formulaPercent.text,
-        source_id: formulaPercent.source_id,
+        excerpt: actualPercent.text,
+        source_id: actualPercent.source_id,
+      },
+      {
+        raw_value: "25",
+        percent: 25,
+        scope_level: "project",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: likelihoodPercent.text,
+        source_id: likelihoodPercent.source_id,
       },
     ];
     output.group_metadata_suggestions = {
-      suggested_document_date: "2026-10-16",
+      suggested_document_date: "2026-10-01",
       detected_reporting_period: null,
       suggested_workstream: null,
       source_id: formulaRow.source_id,
@@ -1066,13 +1136,17 @@ test("cached formulas remain review-only while literal siblings and percent head
   );
   assert.equal(result.status, "completed", result.processing_error);
   assert.equal(result.processing_status, "needs_review");
-  assert.equal(result.document_suggestions.suggested_document_date, null);
+  assert.equal(result.document_suggestions.suggested_document_date, "2026-10-01");
+  assert.deepEqual(result.alerts, []);
+  assert.deepEqual(result.actions, []);
+  assert.deepEqual(result.assurance_observations.risk_snapshots, []);
   assert.deepEqual(
     result.cost_observations.map(({ source_value, normalized_amount, as_of_date }) =>
       [source_value, normalized_amount, as_of_date],
     ),
     [
       ["500", null, null],
+      ["500", 500, null],
       ["750", 750, "2026-10-09"],
     ],
   );
@@ -1081,7 +1155,7 @@ test("cached formulas remain review-only while literal siblings and percent head
   );
   assert.equal(snapshots.schedule.status, "insufficient_evidence");
   assert.equal(snapshots.schedule.snapshot_date, null);
-  assert.match(snapshots.schedule.source_summary, /freshness not established/);
+  assert.equal(snapshots.schedule.source_summary.includes("freshness not established"), true);
   assert.equal(snapshots.cost.status, "green");
   assert.equal(snapshots.cost.snapshot_date, "2026-10-09");
   assert.deepEqual(
@@ -1089,11 +1163,14 @@ test("cached formulas remain review-only while literal siblings and percent head
       [percent, raw_value, source_location.cellRangeStart],
     ),
     [
-      [0.125, "0.125", "F2"],
-      [12.5, "12.5", "F3"],
+      [0.125, "0.125", "G2"],
+      [12.5, "12.5", "G3"],
     ],
   );
   assert.match(result.processing_error ?? "", /formula_cache_review_required/);
+  assert.match(result.processing_error ?? "", /alerts\[0\]\.source_id cites a stored formula result/);
+  assert.match(result.processing_error ?? "", /actions\[0\]\.source_id cites a stored formula result/);
+  assert.match(result.processing_error ?? "", /risk_snapshots\[0\]\.status cites a stored formula result/);
 });
 
 test("ambiguous or foreign workbook scope declarations are not offered or accepted", async () => {
@@ -1911,7 +1988,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
   assert.equal(cached.parserVersion, "document-parser/18");
-  assert.equal(cached.schemaVersion, "phase6-document-extraction/30");
+  assert.equal(cached.schemaVersion, "phase6-document-extraction/31");
 
   assert.equal(cached.status, "completed");
   assert.deepEqual(
@@ -2073,12 +2150,14 @@ test("narrative scope, period, and date claims stay tied to their source fields"
 test("narrative scope labels must match the complete explicit field value", async () => {
   const prefixText = "WBS: Alarm Kebencanaan, Actual %: 20.4%";
   const completeText = "Work package: Alarm Kebencanaan - Unit A, Realisasi %: 12.5%";
+  const dashText = "WBS: Alarm Kebencanaan — Actual %: 20.4%";
   const chunks = [{
     chunkIndex: 0,
-    chunkText: `${prefixText}\n${completeText}`,
+    chunkText: `${prefixText}\n${completeText}\n${dashText}`,
     sourceReferences: [
       ["narrative-prefix", prefixText],
       ["narrative-complete", completeText],
+      ["narrative-dash", dashText],
     ].map(([sourceId, text]) => ({
       sourceId,
       chunkIndex: 0,
@@ -2116,11 +2195,21 @@ test("narrative scope labels must match the complete explicit field value", asyn
         excerpt: references.find((reference) => reference.source_id === "narrative-complete").text,
         source_id: "narrative-complete",
       },
+      {
+        raw_value: "20.4%",
+        percent: 20.4,
+        scope_level: "wbs",
+        scope_label: "Alarm Kebencanaan",
+        period_label: null,
+        as_of_date: null,
+        excerpt: references.find((reference) => reference.source_id === "narrative-dash").text,
+        source_id: "narrative-dash",
+      },
     ];
     return modelResponse(output);
   }, async () =>
     await extractDocumentGroups(
-      job(`${prefixText}\n${completeText}`, { fileName: "narrative-scope.txt" }),
+      job(`${prefixText}\n${completeText}\n${dashText}`, { fileName: "narrative-scope.txt" }),
       chunks,
       { parserVersion: "narrative-scope-prefix-v1" },
       memoryGroupStore(),
@@ -2131,7 +2220,10 @@ test("narrative scope labels must match the complete explicit field value", asyn
     result.extraction.assurance_observations.progress.map(({ percent, scope_label }) =>
       [percent, scope_label],
     ),
-    [[12.5, "Alarm Kebencanaan - Unit A"]],
+    [
+      [12.5, "Alarm Kebencanaan - Unit A"],
+      [20.4, "Alarm Kebencanaan"],
+    ],
   );
   assert.match(
     result.extraction.quality_warnings.join(" "),
