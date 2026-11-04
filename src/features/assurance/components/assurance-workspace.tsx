@@ -34,9 +34,11 @@ import type {
 import type { MilestoneMapping } from "@/features/assurance/lib/schedule-comparison";
 import type { RiskMapping } from "@/features/assurance/lib/risk-comparison";
 import { ProcessingRefresh } from "@/features/assurance/components/processing-refresh";
+import { ObservationReviewPanel } from "@/features/assurance/components/observation-review-panel";
 import type {
   AssuranceDocument,
   AssuranceFinding,
+  AssuranceObservationReview,
   AssuranceReview,
 } from "@/features/assurance/lib/queries";
 import { formatReportingPeriod } from "@/features/assurance/lib/review-period";
@@ -71,6 +73,7 @@ export function AssuranceWorkspace({
   review,
   reviews,
   documents,
+  observationReview,
   costObservations,
   costBaselines,
   wbsScopeLabels,
@@ -84,6 +87,7 @@ export function AssuranceWorkspace({
   review: AssuranceReview | null;
   reviews: AssuranceReview[];
   documents: AssuranceDocument[];
+  observationReview: AssuranceObservationReview | null;
   costObservations: CostObservation[];
   costBaselines: CostBaseline[];
   wbsScopeLabels: string[];
@@ -267,6 +271,13 @@ export function AssuranceWorkspace({
         identityMappings={riskIdentityMappings}
         scaleMappings={riskScaleMappings}
         canApprove={canApproveBaseline}
+      />
+
+      <ObservationReviewPanel
+        projectId={projectId}
+        reviewId={review.id}
+        observationReview={observationReview}
+        canReview={canApproveBaseline}
       />
 
       <FindingsStep

@@ -47,6 +47,12 @@ export type ProgressObservation = {
   asOfDate: string | null;
   excerpt: string | null;
   sourceRef: AssuranceEvidenceReference | null;
+  /** Reviewer decision on this observation; null means still unreviewed. */
+  reviewDecision?: {
+    decision: "accepted" | "corrected";
+    percent: number | null;
+    reason: string | null;
+  } | null;
 };
 
 /**

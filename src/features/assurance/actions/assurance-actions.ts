@@ -67,6 +67,17 @@ type ObservationCoverageByRole = Record<
   "baseline" | "current",
   Record<ObservationCoverageDomain, AssuranceCoverageRow>
 >;
+type ObservationDecision = {
+  id: string;
+  document_id: string;
+  observation_fingerprint: string;
+  decision: "accepted" | "corrected" | "rejected";
+  corrected_observation: Record<string, unknown> | null;
+  reason: string;
+  decided_by: string;
+  decided_at: string;
+  observation_ids: string[];
+};
 type AssuranceObservationRow = {
   id: string;
   domain: "schedule" | "progress" | "risk";
@@ -94,6 +105,7 @@ type AssuranceSource = {
 type AssuranceAnalysisClaim = {
   attempt_id: string;
   sources: AssuranceSource[];
+  observation_decisions?: ObservationDecision[];
 };
 
 
@@ -203,8 +215,9 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
       return;
     }
 
+    const decisions = (claim.observation_decisions ?? []) as ObservationDecision[];
     const coverage = summarizeObservationCoverage(sources);
-    const reviewData = buildReviewExtraction(sources);
+    const reviewData = buildReviewExtraction(sources, decisions);
     const currentCostObservations = mapSelectedCostObservations(sources, "current");
     const baselineCostObservations = mapSelectedCostObservations(sources, "baseline");
     const budgetFinding = await buildProjectBudgetFinding(
@@ -218,9 +231,13 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
     reviewData.extraction.risk = buildRiskAssessment(
       reviewData.extraction, risk.comparison, sources, coverage.byRole, reportingPeriod,
     );
-    const findings = applyCoverageGaps(
-      evaluateAssuranceReview(reviewData.extraction, budgetFinding, schedule.finding),
-      coverage.byRole,
+    const findings = applyObservationDecisions(
+      applyCoverageGaps(
+        evaluateAssuranceReview(reviewData.extraction, budgetFinding, schedule.finding),
+        coverage.byRole,
+      ),
+      decisions,
+      sources,
     );
     const { data: published, error: publicationError } = await supabase.rpc(
       "finish_assurance_analysis_with_results",
@@ -240,6 +257,7 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
             sources.map((source) => source.source_version.contract_version).filter(Boolean),
           )],
           observation_coverage: coverage,
+          observation_review_summary: summarizeObservationDecisions(sources, decisions),
           comparison_engine: {
             budget: "pmo_cost_contract_v1",
             schedule: "pmo_schedule_observations_v1",
@@ -698,6 +716,53 @@ export async function correctBudgetFinding(formData: FormData): Promise<void> {
   revalidateAssurance(projectId);
 }
 
+/**
+ * Records one reviewer decision (accept / correct / reject) on a single
+ * supported observation. The fingerprint of the displayed observation is
+ * re-checked server-side so a stale page cannot write a decision over changed
+ * evidence. The stored observation is never modified; the decision carries its
+ * own reason and attribution and invalidates analyses built over it.
+ */
+export async function reviewAssuranceObservation(formData: FormData): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const observationId = String(formData.get("observationId") ?? "");
+  const fingerprint = String(formData.get("observationFingerprint") ?? "");
+  const decision = String(formData.get("decision") ?? "");
+  const reason = String(formData.get("reason") ?? "").trim();
+  const correctedPercent = String(formData.get("correctedPercent") ?? "").trim();
+
+  if (!projectId || !observationId) throw new Error("Choose an observation to review.");
+  if (!["accepted", "corrected", "rejected"].includes(decision)) {
+    throw new Error("Choose accept, correct, or reject for this observation.");
+  }
+  if (!reason) throw new Error("Record why this observation is accepted, corrected, or rejected.");
+  if (!/^[0-9a-f]{64}$/.test(fingerprint)) {
+    throw new Error("The observation version is missing; refresh the page and review again.");
+  }
+  let corrected: number | null = null;
+  if (decision === "corrected") {
+    corrected = Number(correctedPercent.replace(",", "."));
+    if (!Number.isFinite(corrected) || corrected < 0 || corrected > 100) {
+      throw new Error("Enter the corrected progress percentage as a number between 0 and 100.");
+    }
+  }
+
+  const { supabase, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  const { error } = await supabase.rpc("save_assurance_observation_decision", {
+    p_project_id: projectId,
+    p_observation_id: observationId,
+    p_observation_fingerprint: fingerprint,
+    p_decision: decision,
+    p_corrected_percent: corrected,
+    p_reason: reason.slice(0, 1000),
+  });
+  if (error) throw new Error(error.message);
+
+  revalidateAssurance(projectId);
+}
+
 export async function updateAssuranceAction(formData: FormData): Promise<void> {
   const projectId = String(formData.get("projectId") ?? "");
   const reviewId = String(formData.get("reviewId") ?? "");
@@ -976,10 +1041,24 @@ function summarizeObservationCoverage(sources: AssuranceSource[]) {
   return { byRole };
 }
 
-function buildReviewExtraction(sources: AssuranceSource[]): {
+function buildReviewExtraction(
+  sources: AssuranceSource[],
+  decisions: ObservationDecision[] = [],
+): {
   extraction: ReviewExtraction;
   progressSourceObservations: Record<string, unknown>[];
 } {
+  // Rejected observations stay in storage untouched; they are simply excluded
+  // from this analysis. A corrected progress value replaces the percent used
+  // by comparisons while the observation's original percent stays stored.
+  const excluded = new Set(
+    decisions.filter((item) => item.decision === "rejected")
+      .flatMap((item) => item.observation_ids),
+  );
+  const corrections = new Map(
+    decisions.filter((item) => item.decision === "corrected")
+      .flatMap((item) => item.observation_ids.map((observationId) => [observationId, item])),
+  );
   const rowsFor = (
     role: "baseline" | "current",
     domain: AssuranceObservationRow["domain"],
@@ -987,7 +1066,8 @@ function buildReviewExtraction(sources: AssuranceSource[]): {
   ) => sources
     .filter((source) => source.role === role)
     .flatMap((source) => source.assurance_observations
-      .filter((row) => row.domain === domain && row.observation_type === observationType)
+      .filter((row) => row.domain === domain && row.observation_type === observationType
+        && !excluded.has(row.id))
       .map((row) => ({ source, row })));
 
   const mapMilestones = (role: "baseline" | "current"): MilestoneObservation[] =>
@@ -1012,15 +1092,26 @@ function buildReviewExtraction(sources: AssuranceSource[]): {
     const observation = row.observation;
     const scopeLevel = observation.scope_level;
     if (scopeLevel !== "project" && scopeLevel !== "wbs" && scopeLevel !== "unknown") return [];
+    const correction = corrections.get(row.id);
+    const correctedPercent = typeof correction?.corrected_observation?.percent === "number"
+      ? correction.corrected_observation.percent
+      : null;
     return [{
       role: source.role,
       scopeLevel,
       scopeLabel: snapshotText(observation.scope_label),
-      percent: typeof observation.percent === "number" ? observation.percent : null,
+      percent: correctedPercent ??
+        (typeof observation.percent === "number" ? observation.percent : null),
       periodLabel: snapshotText(observation.period_label),
       asOfDate: snapshotText(observation.as_of_date),
       excerpt: row.excerpt,
       sourceRef: assuranceEvidenceReference(source, row),
+      reviewDecision: correction
+        ? { decision: "corrected" as const, percent: correctedPercent, reason: correction.reason }
+        : decisions.some((item) =>
+            item.decision === "accepted" && item.observation_ids.includes(row.id))
+          ? { decision: "accepted" as const, percent: null, reason: null }
+          : null,
     }];
   });
   const riskSnapshots = (role: "baseline" | "current"): RiskSnapshot[] =>
@@ -1180,6 +1271,53 @@ function applyCoverageGaps(
       confidence: findingIsActionable ? finding.confidence : null,
     };
   });
+}
+
+/**
+ * Reviewer decisions never touch the stored observation; this annotates the
+ * published findings with what a reviewer decided so reports and UI show
+ * reviewed versus unreviewed evidence instead of silently merging them.
+ */
+function applyObservationDecisions(
+  findings: ReturnType<typeof evaluateAssuranceReview>,
+  decisions: ObservationDecision[],
+  sources: AssuranceSource[],
+) {
+  if (!decisions.length) return findings;
+  const domainByDecision = new Map(decisions.map((decision) => {
+    const source = sources.find((item) => item.document_id === decision.document_id);
+    const observation = source?.assurance_observations.find((row) =>
+      decision.observation_ids.includes(row.id));
+    return [decision.id, { decision, domain: observation?.domain ?? null }];
+  }));
+  const decisionLabels = { accepted: "accepted", corrected: "corrected", rejected: "rejected" };
+  return findings.map((finding) => {
+    const relevant = [...domainByDecision.values()].filter((item) =>
+      item.domain !== null &&
+      (item.domain === finding.domain ||
+        (finding.domain === "schedule" && item.domain === "progress")));
+    if (!relevant.length) return finding;
+    const summary = relevant
+      .map(({ decision }) =>
+        `Reviewer ${decisionLabels[decision.decision]} an observation${decision.reason ? `: ${decision.reason}` : ""}.`)
+      .join(" ");
+    return { ...finding, explanation: `${finding.explanation} Reviewer decisions: ${summary}` };
+  });
+}
+
+function summarizeObservationDecisions(
+  sources: AssuranceSource[],
+  decisions: ObservationDecision[],
+) {
+  const counts = { accepted: 0, corrected: 0, rejected: 0 };
+  for (const decision of decisions) counts[decision.decision] += decision.observation_ids.length;
+  return {
+    total_observations: sources.reduce(
+      (total, source) => total + source.assurance_observations.length, 0,
+    ),
+    reviewed: counts.accepted + counts.corrected + counts.rejected,
+    ...counts,
+  };
 }
 
 function snapshotText(value: unknown): string | null {

@@ -152,6 +152,272 @@ type ActionRow = {
   status: AssuranceAction["status"];
 };
 
+export type ObservationReviewRow = {
+  id: string;
+  documentId: string;
+  domain: string;
+  observationType: string;
+  observation: Record<string, unknown>;
+  observationFingerprint: string;
+  excerpt: string;
+  pageNumber: number | null;
+  sectionLabel: string | null;
+  sourceLocation: Record<string, string | number> | null;
+};
+
+export type ObservationReviewDecisionRow = {
+  observationFingerprint: string;
+  decision: "accepted" | "corrected" | "rejected";
+  correctedObservation: Record<string, unknown> | null;
+  reason: string;
+  decidedBy: string;
+  decidedAt: string;
+};
+
+export type ObservationCoverageDisplayRow = {
+  documentId: string;
+  domain: string;
+  state: string;
+  totalGroups: number;
+  processedGroups: number;
+  reason: string | null;
+};
+
+export type ObservationReviewDocument = {
+  documentId: string;
+  title: string;
+  role: "baseline" | "current";
+  processingStatus: string;
+  processingError: string | null;
+  coverage: ObservationCoverageDisplayRow[];
+};
+
+export type AssuranceObservationReview = {
+  documents: ObservationReviewDocument[];
+  observations: ObservationReviewRow[];
+  decisions: ObservationReviewDecisionRow[];
+};
+
+const coverageDomains = ["budget", "schedule", "progress", "risk"] as const;
+
+/**
+ * The per-observation review surface for one assurance review: current-version
+ * observations of the selected evidence, their existing reviewer decisions, and
+ * per-document coverage across all four domains. A domain without a stored
+ * coverage row stays `unprocessed` with an explicit reason — it is never
+ * absent, zero, or green by omission.
+ */
+export async function getAssuranceObservationReview(
+  projectId: string,
+  reviewId: string,
+): Promise<AssuranceObservationReview> {
+  const { supabase } = await requireProjectMembership(projectId);
+
+  const [linksResult, reviewResult] = await Promise.all([
+    supabase
+      .from("assurance_review_documents")
+      .select("document_id, evidence_role")
+      .eq("review_id", reviewId)
+      .eq("project_id", projectId),
+    supabase
+      .from("assurance_reviews")
+      .select("id")
+      .eq("id", reviewId)
+      .eq("project_id", projectId)
+      .maybeSingle(),
+  ]);
+  if (linksResult.error) throw new Error(linksResult.error.message);
+  if (reviewResult.error) throw new Error(reviewResult.error.message);
+  if (!reviewResult.data) throw new Error("Assurance review was not found in this project.");
+
+  const links = (linksResult.data ?? []) as {
+    document_id: string;
+    evidence_role: "baseline" | "current";
+  }[];
+  const documentIds = [...new Set(links.map((link) => link.document_id))];
+  if (documentIds.length === 0) {
+    return { documents: [], observations: [], decisions: [] };
+  }
+
+  const [documentsResult, observationsResult, coverageResult, decisionsResult] = await Promise.all([
+    supabase
+      .from("documents")
+      .select(
+        "id, title, processing_status, processing_error, content_hash, assurance_observation_parser_version, assurance_observation_contract_version",
+      )
+      .eq("project_id", projectId)
+      .in("id", documentIds),
+    supabase
+      .from("assurance_observations")
+      .select(
+        "id, document_id, source_content_hash, parser_version, contract_version, domain, observation_type, observation, observation_fingerprint, evidence_chunk_index, excerpt, page_number, section_label, source_location",
+      )
+      .eq("project_id", projectId)
+      .in("document_id", documentIds)
+      .order("domain")
+      .order("observation_type")
+      .order("evidence_chunk_index")
+      .order("id"),
+    supabase
+      .from("assurance_observation_coverage")
+      .select(
+        "document_id, source_content_hash, parser_version, contract_version, domain, state, total_groups, processed_groups, reason",
+      )
+      .eq("project_id", projectId)
+      .in("document_id", documentIds),
+    supabase
+      .from("assurance_observation_decisions")
+      .select(
+        "document_id, source_content_hash, parser_version, contract_version, observation_fingerprint, decision, corrected_observation, reason, decided_by, decided_at",
+      )
+      .eq("project_id", projectId)
+      .in("document_id", documentIds)
+      .order("decided_at"),
+  ]);
+  if (documentsResult.error) throw new Error(documentsResult.error.message);
+  if (observationsResult.error) throw new Error(observationsResult.error.message);
+  if (coverageResult.error) throw new Error(coverageResult.error.message);
+  if (decisionsResult.error) throw new Error(decisionsResult.error.message);
+
+  type DocumentVersionRow = {
+    id: string;
+    title: string;
+    processing_status: string;
+    processing_error: string | null;
+    content_hash: string | null;
+    assurance_observation_parser_version: string | null;
+    assurance_observation_contract_version: string | null;
+  };
+  const documentRows = (documentsResult.data ?? []) as DocumentVersionRow[];
+  const versionKey = (row: {
+    content_hash: string | null;
+    assurance_observation_parser_version: string | null;
+    assurance_observation_contract_version: string | null;
+  }) =>
+    JSON.stringify([
+      row.content_hash,
+      row.assurance_observation_parser_version,
+      row.assurance_observation_contract_version,
+    ]);
+  const currentVersion = new Map(documentRows.map((row) => [row.id, versionKey(row)]));
+  const roleByDocument = new Map(links.map((link) => [link.document_id, link.evidence_role]));
+
+  const documents: ObservationReviewDocument[] = documentRows
+    .filter((row) => roleByDocument.has(row.id))
+    .map((row) => ({
+      documentId: row.id,
+      title: row.title,
+      role: roleByDocument.get(row.id) ?? "current",
+      processingStatus: row.processing_status,
+      processingError: row.processing_error,
+      coverage: coverageDomains.map((domain) => {
+        const stored = ((coverageResult.data ?? []) as {
+          document_id: string;
+          source_content_hash: string;
+          parser_version: string;
+          contract_version: string;
+          domain: string;
+          state: string;
+          total_groups: number;
+          processed_groups: number;
+          reason: string | null;
+        }[]).find((coverage) =>
+          coverage.document_id === row.id &&
+          coverage.domain === domain &&
+          versionKey({
+            content_hash: coverage.source_content_hash,
+            assurance_observation_parser_version: coverage.parser_version,
+            assurance_observation_contract_version: coverage.contract_version,
+          }) === versionKey(row));
+        return stored
+          ? {
+              documentId: row.id,
+              domain,
+              state: stored.state,
+              totalGroups: stored.total_groups,
+              processedGroups: stored.processed_groups,
+              reason: stored.reason,
+            }
+          : {
+              documentId: row.id,
+              domain,
+              state: "unprocessed",
+              totalGroups: 0,
+              processedGroups: 0,
+              reason: "No validated observation coverage exists for this source version; re-run extraction.",
+            };
+      }),
+    }));
+
+  const observations: ObservationReviewRow[] = ((observationsResult.data ?? []) as {
+    id: string;
+    document_id: string;
+    source_content_hash: string;
+    parser_version: string;
+    contract_version: string;
+    domain: string;
+    observation_type: string;
+    observation: Record<string, unknown>;
+    observation_fingerprint: string;
+    excerpt: string;
+    page_number: number | null;
+    section_label: string | null;
+    source_location: Record<string, unknown> | null;
+  }[])
+    .filter((row) =>
+      currentVersion.get(row.document_id) ===
+        JSON.stringify([row.source_content_hash, row.parser_version, row.contract_version]))
+    .map((row) => ({
+      id: row.id,
+      documentId: row.document_id,
+      domain: row.domain,
+      observationType: row.observation_type,
+      observation: row.observation,
+      observationFingerprint: row.observation_fingerprint,
+      excerpt: row.excerpt,
+      pageNumber: row.page_number,
+      sectionLabel: row.section_label,
+      sourceLocation: sourceLocationRecord(row.source_location),
+    }));
+
+  const observationFingerprints = new Set(observations.map((row) => row.observationFingerprint));
+  const decisions: ObservationReviewDecisionRow[] = ((decisionsResult.data ?? []) as {
+    document_id: string;
+    source_content_hash: string;
+    parser_version: string;
+    contract_version: string;
+    observation_fingerprint: string;
+    decision: ObservationReviewDecisionRow["decision"];
+    corrected_observation: Record<string, unknown> | null;
+    reason: string;
+    decided_by: string;
+    decided_at: string;
+  }[])
+    .filter((row) =>
+      currentVersion.get(row.document_id) ===
+        JSON.stringify([row.source_content_hash, row.parser_version, row.contract_version]) &&
+      observationFingerprints.has(row.observation_fingerprint))
+    .map((row) => ({
+      observationFingerprint: row.observation_fingerprint,
+      decision: row.decision,
+      correctedObservation: row.corrected_observation,
+      reason: row.reason,
+      decidedBy: row.decided_by,
+      decidedAt: row.decided_at,
+    }));
+
+  return { documents, observations, decisions };
+}
+
+function sourceLocationRecord(value: Record<string, unknown> | null): Record<string, string | number> | null {
+  if (!value) return null;
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, string | number] =>
+      typeof entry[1] === "string" || typeof entry[1] === "number",
+  );
+  return entries.length ? Object.fromEntries(entries) : null;
+}
+
 export async function getAssuranceWorkspace(projectId: string) {
   const { supabase, membership } = await requireProjectMembership(projectId);
   const [

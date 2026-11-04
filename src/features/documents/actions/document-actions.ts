@@ -84,8 +84,11 @@ export async function updateDocumentClassification(
     Boolean(completedExtraction),
     Boolean(values.documentType || values.evidenceRole),
   )) {
+    // Ticket 03: promotion resolves the classification question only. Formula
+    // and quality warnings are separate review signals and must stay visible,
+    // so processing_error is never cleared here.
     const { error: promoteError } = await supabase.from("documents")
-      .update({ processing_status: "completed", processing_error: null })
+      .update({ processing_status: "completed" })
       .eq("id", documentId)
       .eq("project_id", projectId)
       .eq("processing_status", "needs_review");

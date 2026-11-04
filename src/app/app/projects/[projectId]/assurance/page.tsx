@@ -1,5 +1,5 @@
 import { AssuranceWorkspace } from "@/features/assurance/components/assurance-workspace";
-import { getAssuranceWorkspace } from "@/features/assurance/lib/queries";
+import { getAssuranceObservationReview, getAssuranceWorkspace } from "@/features/assurance/lib/queries";
 import { canApproveAssuranceBaseline } from "@/features/projects/lib/roles";
 
 export default async function AssurancePage({
@@ -14,12 +14,16 @@ export default async function AssurancePage({
   const workspace = await getAssuranceWorkspace(projectId);
   const review =
     workspace.reviews.find((item) => item.id === reviewParam) ?? workspace.review;
+  const observationReview = review
+    ? await getAssuranceObservationReview(projectId, review.id)
+    : null;
   return (
     <AssuranceWorkspace
       projectId={projectId}
       review={review}
       reviews={workspace.reviews}
       documents={workspace.documents}
+      observationReview={observationReview}
       costObservations={workspace.costObservations}
       costBaselines={workspace.costBaselines}
       wbsScopeLabels={workspace.wbsScopeLabels}
