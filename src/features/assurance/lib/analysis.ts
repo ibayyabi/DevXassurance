@@ -53,6 +53,8 @@ export type ProgressObservation = {
     percent: number | null;
     reason: string | null;
   } | null;
+  /** The extracted percent before a reviewer correction, when one applies. */
+  sourcePercent?: number | null;
 };
 
 /**

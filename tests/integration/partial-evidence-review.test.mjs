@@ -135,7 +135,7 @@ const progressObservation = (id, percent, extra = {}) =>
 
 test("rejected observations are excluded from analysis while accepted ones stay used", async () => {
   const progressComparisons = (f) => {
-    const publication = f.calls.find((call) => call.name === "finish_assurance_analysis_with_results");
+    const publication = f.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
     return publication.input.p_result_metadata.progress_observations;
   };
   const f = fixture({
@@ -165,7 +165,7 @@ test("correction replaces the compared percent; the metadata keeps the original 
     ],
   });
   await f.assurance.runAssuranceAnalysis(form());
-  const publication = f.calls.find((call) => call.name === "finish_assurance_analysis_with_results");
+  const publication = f.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
   const scopes = publication.input.p_result_metadata.progress_observations;
   assert.equal(scopes[0].current.percent, 21.4, "the comparison uses the corrected percent");
   const sourceRow = publication.input.p_result_metadata.progress_source_observations
@@ -197,7 +197,7 @@ test("mixed coverage keeps unprocessed domains open and gap reasons visible", as
     },
   });
   await f.assurance.runAssuranceAnalysis(form());
-  const publication = f.calls.find((call) => call.name === "finish_assurance_analysis_with_results");
+  const publication = f.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
   const risk = publication.input.p_findings.find((finding) => finding.domain === "risk");
   assert.equal(risk.condition, "more_evidence_required", "an unprocessed domain is never assessed");
   assert.match(risk.explanation, /formula cache missing/, "the specific gap reason stays visible");
@@ -230,7 +230,7 @@ test("unprocessed coverage is never reported as absent, zero, or green", async (
     },
   });
   await f.assurance.runAssuranceAnalysis(form());
-  const publication = f.calls.find((call) => call.name === "finish_assurance_analysis_with_results");
+  const publication = f.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
   const coverage = publication.input.p_metadata.observation_coverage;
   const progressCoverage = coverage.byRole.current.progress;
   assert.equal(progressCoverage.state, "unprocessed");
@@ -255,7 +255,7 @@ test("reviewer decision text reaches the published findings without rewriting or
     ],
   });
   await f.assurance.runAssuranceAnalysis(form());
-  const publication = f.calls.find((call) => call.name === "finish_assurance_analysis_with_results");
+  const publication = f.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
   const finding = publication.input.p_findings.find((item) => item.domain === "schedule");
   assert.match(finding.explanation, /Reviewer accepted an observation: didukung sel D7/);
 });
@@ -409,7 +409,7 @@ test("cost decisions replace comparison values while source rows keep originals"
     },
   });
   await replacement.assurance.runAssuranceAnalysis(form());
-  const publication = replacement.calls.find((call) => call.name === "finish_assurance_analysis_with_results");
+  const publication = replacement.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
   assert.ok(publication, "analysis publishes with cost decisions applied");
   const summary = publication.input.p_metadata.observation_review_summary;
   assert.equal(summary.reviewed, 1);
@@ -446,4 +446,60 @@ test("progress comparison still separates corrected review state from unreviewed
   assert.ok(Math.abs(project.deltaPercentPoints - 8.9) < 1e-9);
   const wbs = result.find((scope) => scope.scopeLevel === "wbs");
   assert.equal(wbs.current.reviewDecision ?? null, null, "unreviewed observations stay distinguishable");
+});
+
+test("a rejected no_open_high_or_critical statement can never produce an on_track risk", async () => {
+  const riskStatement = (id, state) =>
+    observation(id, "risk", "risk_register_statement", { state, raw_value: "Tidak ada risiko tinggi" });
+  const f = fixture({
+    currentObservations: [],
+    claim: {
+      attempt_id: "attempt-1",
+      sources: [
+        source("base", "baseline", "Baseline W4", "a".repeat(64), [], allProcessed),
+        source("current", "current", "Current W5", "b".repeat(64), [riskStatement("r-st", "no_open_high_or_critical")], allProcessed),
+      ],
+      observation_decisions: [
+        { id: "d1", target_type: "assurance", document_id: "current", observation_fingerprint: "f".repeat(64),
+          decision: "rejected", corrected_observation: null, reason: "klaim tidak didukung potret risiko",
+          decided_by: "user-1", decided_at: "2026-11-05T00:00:00Z", observation_ids: ["r-st"] },
+      ],
+    },
+  });
+  await f.assurance.runAssuranceAnalysis(form());
+  const publication = f.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
+  const risk = publication.input.p_findings.find((finding) => finding.domain === "risk");
+  assert.notEqual(risk.condition, "on_track",
+    "a rejected all-clear statement must not drive the Risk condition to on_track");
+  assert.equal(risk.condition, "more_evidence_required",
+    "with the statement rejected and no snapshots, risk stays an evidence gap");
+});
+
+test("an unreviewed no_open_high_or_critical statement still produces on_track risk", async () => {
+  const riskStatement = (id, state) =>
+    observation(id, "risk", "risk_register_statement", { state, raw_value: "Tidak ada risiko tinggi" });
+  const f = fixture({
+    claim: {
+      attempt_id: "attempt-1",
+      sources: [
+        source("base", "baseline", "Baseline W4", "a".repeat(64), [], allProcessed),
+        source("current", "current", "Current W5", "b".repeat(64), [riskStatement("r-st", "no_open_high_or_critical")], allProcessed),
+      ],
+      observation_decisions: [],
+    },
+  });
+  await f.assurance.runAssuranceAnalysis(form());
+  const publication = f.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
+  const risk = publication.input.p_findings.find((finding) => finding.domain === "risk");
+  assert.equal(risk.condition, "on_track",
+    "the source statement remains usable while it is unreviewed");
+});
+
+test("analysis publishes through the decision-fingerprint RPC", async () => {
+  const f = fixture();
+  await f.assurance.runAssuranceAnalysis(form());
+  assert.ok(
+    f.calls.some((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint"),
+    "publication records the observation-decision fingerprint it was built over",
+  );
 });

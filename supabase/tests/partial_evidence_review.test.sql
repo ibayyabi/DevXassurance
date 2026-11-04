@@ -6,7 +6,7 @@
 --   psql -v ON_ERROR_STOP=1 -f supabase/tests/partial_evidence_review.test.sql
 
 begin;
-select extensions.plan(40);
+select extensions.plan(45);
 
 insert into auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, created_at, updated_at)
 values
@@ -305,6 +305,65 @@ select lives_ok(
   'a decision can be changed later with a new reason'
 );
 select is(pg_temp.decision_count()::int, 3, 'one decision per observation after re-decision');
+
+-- ---------------------------------------------------------------------------
+-- Decision invalidation: a finished analysis goes stale when a decision
+-- changes, and an in-flight attempt cannot publish over the new decision.
+-- ---------------------------------------------------------------------------
+-- Simulate a published analysis: record the current decision fingerprint in
+-- last_success/latest_attempt and set status findings_ready.
+update public.assurance_reviews
+set status = 'findings_ready', current_step = 'findings',
+  analysis_metadata = analysis_metadata || jsonb_build_object(
+    'last_success', jsonb_build_object(
+      'id', 'a0000000-0000-4000-8000-0000000000a1',
+      'fingerprint', 'x', 'observation_decision_fingerprint',
+      (select (public.assurance_observation_decisions_snapshot(
+        '50000000-0000-4000-8000-000000000003', '50000000-0000-4000-8000-000000000021'))->>'fingerprint')),
+    'latest_attempt', jsonb_build_object(
+      'id', 'a0000000-0000-4000-8000-0000000000a1', 'outcome', 'succeeded',
+      'observation_decision_fingerprint',
+      (select (public.assurance_observation_decisions_snapshot(
+        '50000000-0000-4000-8000-000000000003', '50000000-0000-4000-8000-000000000021'))->>'fingerprint')))
+where id = '50000000-0000-4000-8000-000000000021';
+
+-- The review previously had no analysis; start one against the current
+-- decisions and let a decision change mid-flight.
+update public.assurance_reviews
+set analysis_metadata = analysis_metadata || jsonb_build_object(
+  'latest_attempt', jsonb_build_object(
+    'id', 'a0000000-0000-4000-8000-0000000000a2', 'outcome', 'analyzing',
+    'lease_until', now() + interval '15 minutes',
+    'observation_decision_fingerprint',
+    (select (public.assurance_observation_decisions_snapshot(
+      '50000000-0000-4000-8000-000000000003', '50000000-0000-4000-8000-000000000021'))->>'fingerprint')))
+where id = '50000000-0000-4000-8000-000000000021';
+update public.assurance_reviews set status = 'analyzing'
+where id = '50000000-0000-4000-8000-000000000021';
+
+-- Re-deciding the milestone observation changes the decision fingerprint.
+select lives_ok(
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''assurance'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), ''accepted'', ''Keputusan koreksi sebelumnya ditarik; tanggal terbaca jelas.'', null::jsonb)'),
+  're-deciding an observation after a finished analysis is allowed'
+);
+select is(
+  (select status::text from public.assurance_reviews where id = '50000000-0000-4000-8000-000000000021'),
+  'evidence_ready', 'a finished analysis goes stale to evidence_ready after a decision change'
+);
+select is(
+  (select analysis_error from public.assurance_reviews where id = '50000000-0000-4000-8000-000000000021'),
+  'Reviewer decisions changed. Run the analysis again.',
+  'the stale review explains why its findings no longer apply'
+);
+select is(
+  (select analysis_metadata->'latest_attempt'->>'outcome' from public.assurance_reviews where id = '50000000-0000-4000-8000-000000000021'),
+  'invalidated', 'the in-flight attempt is invalidated so it cannot publish over the new decision'
+);
+select ok(
+  (select analysis_metadata->'observation_decision_invalidation'->>'reason'
+    from public.assurance_reviews where id = '50000000-0000-4000-8000-000000000021') is not null,
+  'the invalidation reason is recorded in analysis metadata'
+);
 
 -- Stale source version: re-extraction under a new parser version orphans the
 -- old decisions. They stay stored for audit but leave the snapshot (consumers

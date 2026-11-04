@@ -396,9 +396,111 @@ begin
       'contract_version', v_contract_version,
       'reason', btrim(p_reason), 'decided_by', auth.uid())
   );
+
+  -- A new decision changes the source fingerprint, so every finished analysis
+  -- of this project is stale: reset it to evidence_ready (mirroring
+  -- invalidate_assurance_reference_results) and invalidate any in-flight
+  -- attempt so it cannot publish over the new decision.
+  perform public.invalidate_assurance_observation_results(p_project_id);
   return decision_id;
 end;
 $$;
+
+-- Walk every analyzed review and, if its stored decision fingerprint no longer
+-- matches the live snapshot, mark it stale. Reference-style invalidation, but
+-- keyed on the observation-decision fingerprint.
+create or replace function public.invalidate_assurance_observation_results(p_project_id uuid)
+returns void language plpgsql security definer set search_path = '' as $$
+declare
+  r record;
+  snapshot jsonb;
+  success jsonb;
+  attempt jsonb;
+begin
+  for r in
+    select id, status, analysis_metadata from public.assurance_reviews
+    where project_id = p_project_id and status in ('analyzing', 'findings_ready', 'report_draft', 'approved')
+    order by id for update
+  loop
+    success := r.analysis_metadata->'last_success';
+    attempt := r.analysis_metadata->'latest_attempt';
+    if success->>'id' is null and not (
+      r.status = 'analyzing' and attempt->>'outcome' = 'analyzing'
+    ) then continue; end if;
+    snapshot := null;
+    begin
+      snapshot := public.assurance_observation_decisions_snapshot(p_project_id, r.id);
+    exception when others then
+      snapshot := null;
+    end;
+    if snapshot is null then continue; end if;
+    if success->>'id' is not null
+      and (success->>'observation_decision_fingerprint') is not null
+      and (success->>'observation_decision_fingerprint') is distinct from snapshot->>'fingerprint'
+      or (r.status = 'analyzing' and attempt->>'outcome' = 'analyzing'
+        and (attempt->>'observation_decision_fingerprint') is distinct from snapshot->>'fingerprint') then
+      update public.assurance_reviews set status = 'evidence_ready', current_step = 'analysis',
+        analysis_error = 'Reviewer decisions changed. Run the analysis again.',
+        approved_at = null, reviewed_by = null,
+        analysis_metadata = analysis_metadata || jsonb_build_object(
+          'observation_decision_invalidation', jsonb_build_object(
+            'reason', 'Reviewer decisions changed', 'at', clock_timestamp()
+          )
+        ) || case when attempt->>'outcome' = 'analyzing' then
+          jsonb_build_object('latest_attempt', attempt || jsonb_build_object(
+            'outcome', 'invalidated', 'finished_at', clock_timestamp()
+          )) else '{}'::jsonb end,
+        updated_at = clock_timestamp()
+      where id = r.id and project_id = p_project_id;
+    end if;
+  end loop;
+end;
+$$;
+revoke all on function public.invalidate_assurance_observation_results(uuid) from public, anon, authenticated;
+
+-- Findings published by finish_assurance_analysis record the decision
+-- fingerprint they were built over, both in last_success and in the in-flight
+-- attempt, so the invalidation above can compare against them.
+create or replace function public.finish_assurance_analysis_with_decision_fingerprint(
+  p_project_id uuid,
+  p_review_id uuid,
+  p_attempt_id uuid,
+  p_findings jsonb,
+  p_actions jsonb default '[]',
+  p_metadata jsonb default '{}',
+  p_result_metadata jsonb default '{}'
+)
+returns boolean language plpgsql security definer set search_path = '' as $$
+declare published boolean; snapshot jsonb;
+begin
+  snapshot := public.assurance_observation_decisions_snapshot(p_project_id, p_review_id);
+  published := public.finish_assurance_analysis_with_results(
+    p_project_id, p_review_id, p_attempt_id, p_findings, p_actions, p_metadata, p_result_metadata
+  );
+  if not coalesce(published, false) then
+    return false;
+  end if;
+  update public.assurance_reviews
+  set analysis_metadata = analysis_metadata
+    || jsonb_build_object(
+      'last_success', jsonb_set(
+        coalesce(analysis_metadata->'last_success', '{}'::jsonb),
+        '{observation_decision_fingerprint}', to_jsonb(snapshot->>'fingerprint')),
+      'latest_attempt', jsonb_set(
+        coalesce(analysis_metadata->'latest_attempt', '{}'::jsonb),
+        '{observation_decision_fingerprint}', to_jsonb(snapshot->>'fingerprint')))
+    , updated_at = clock_timestamp()
+  where id = p_review_id and project_id = p_project_id;
+  if not found then
+    raise exception 'Assurance review disappeared while recording the decision fingerprint.';
+  end if;
+  return true;
+end;
+$$;
+revoke all on function public.finish_assurance_analysis_with_decision_fingerprint(uuid, uuid, uuid, jsonb, jsonb, jsonb, jsonb)
+  from public, anon;
+grant execute on function public.finish_assurance_analysis_with_decision_fingerprint(uuid, uuid, uuid, jsonb, jsonb, jsonb, jsonb)
+  to authenticated;
 revoke all on function public.save_assurance_observation_decision(uuid, text, uuid, text, text, text, jsonb)
   from public, anon;
 grant execute on function public.save_assurance_observation_decision(uuid, text, uuid, text, text, text, jsonb)

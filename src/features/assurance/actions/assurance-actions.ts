@@ -234,7 +234,8 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
     const schedule = await buildScheduleComparison(supabase, projectId, reviewData.extraction);
     const risk = await buildRiskSnapshotComparison(supabase, projectId, reviewData.extraction);
     reviewData.extraction.risk = buildRiskAssessment(
-      reviewData.extraction, risk.comparison, sources, coverage.byRole, reportingPeriod,
+      reviewData.extraction, risk.comparison, reviewData.riskStatements,
+      coverage.byRole, reportingPeriod,
     );
     const findings = applyObservationDecisions(
       applyCoverageGaps(
@@ -245,7 +246,7 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
       sources,
     );
     const { data: published, error: publicationError } = await supabase.rpc(
-      "finish_assurance_analysis_with_results",
+      "finish_assurance_analysis_with_decision_fingerprint",
       {
         p_project_id: projectId,
         p_review_id: reviewId,
@@ -1102,6 +1103,10 @@ function buildReviewExtraction(
 ): {
   extraction: ReviewExtraction;
   progressSourceObservations: Record<string, unknown>[];
+  riskStatements: {
+    current: { source: AssuranceSource; row: AssuranceObservationRow }[];
+    baseline: { source: AssuranceSource; row: AssuranceObservationRow }[];
+  };
 } {
   // Rejected observations stay in storage untouched; they are simply excluded
   // from this analysis. A corrected progress value replaces the percent used
@@ -1157,6 +1162,7 @@ function buildReviewExtraction(
       scopeLabel: snapshotText(observation.scope_label),
       percent: correctedPercent ??
         (typeof observation.percent === "number" ? observation.percent : null),
+      sourcePercent: typeof observation.percent === "number" ? observation.percent : null,
       periodLabel: snapshotText(observation.period_label),
       asOfDate: snapshotText(observation.as_of_date),
       excerpt: row.excerpt,
@@ -1169,6 +1175,15 @@ function buildReviewExtraction(
           : null,
     }];
   });
+  const riskStatements = (role: "baseline" | "current") =>
+    sources
+      .filter((source) => source.role === role)
+      .flatMap((source) => source.assurance_observations
+        .filter((row) => row.domain === "risk" && row.observation_type === "risk_register_statement"
+          && !excluded.has(row.id))
+        .map((row) => ({ source, row })));
+  const currentStatements = riskStatements("current");
+  const baselineStatements = riskStatements("baseline");
   const riskSnapshots = (role: "baseline" | "current"): RiskSnapshot[] =>
     rowsFor(role, "risk", "risk_snapshot").map(({ source, row }) => {
       const observation = row.observation;
@@ -1233,27 +1248,29 @@ function buildReviewExtraction(
       },
     },
     progressSourceObservations,
+    // Decision-filtered register statements: the risk assessment must read the
+    // same effective evidence as every other comparison, so a rejected
+    // no_open_high_or_critical claim can never produce on_track.
+    riskStatements: {
+      current: currentStatements,
+      baseline: baselineStatements,
+    },
   };
 }
 
 function buildRiskAssessment(
   extraction: ReviewExtraction,
   comparison: ReturnType<typeof buildRiskComparison>,
-  sources: AssuranceSource[],
+  riskStatements: {
+    current: { source: AssuranceSource; row: AssuranceObservationRow }[];
+    baseline: { source: AssuranceSource; row: AssuranceObservationRow }[];
+  },
   coverage: ObservationCoverageByRole,
   reportingPeriodEndDate: string,
 ): ReviewExtraction["risk"] {
   const currentSnapshots = extraction.riskItems.currentSnapshots;
-  const currentStatements = sources
-    .filter((source) => source.role === "current")
-    .flatMap((source) => source.assurance_observations
-      .filter((row) => row.domain === "risk" && row.observation_type === "risk_register_statement")
-      .map((row) => ({ source, row })));
-  const baselineStatements = sources
-    .filter((source) => source.role === "baseline")
-    .flatMap((source) => source.assurance_observations
-      .filter((row) => row.domain === "risk" && row.observation_type === "risk_register_statement")
-      .map((row) => ({ source, row })));
+  const currentStatements = riskStatements.current;
+  const baselineStatements = riskStatements.baseline;
   const explicitlyNoOpenHighRisk = currentStatements.some(
     ({ row }) => row.observation.state === "no_open_high_or_critical",
   );
