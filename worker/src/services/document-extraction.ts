@@ -363,11 +363,23 @@ const MAX_COST_OBSERVATIONS_PER_GROUP = 40;
 const MAX_ASSURANCE_OBSERVATIONS_PER_GROUP = 40;
 const MAX_COST_EXCERPT_CONTEXT = 240;
 const COST_MEASURES = costMeasures;
+// Indonesian PM/procurement spreadsheets rarely spell "approved baseline"; they
+// use domain terms (RAB, pagu, HPS, nilai kontrak, dsb.) instead. These cues
+// recognize that real-world vocabulary; they do not relax the requirement that
+// a cue be present in the cited excerpt, so an observation with no recognizable
+// role wording anywhere nearby is still rejected.
 const COST_MEASURE_SOURCE_CUES: Record<ExtractedCostObservation["measure"], RegExp> = {
-  approved_baseline: /\b(?:approved|disetujui)\b[\s\S]{0,60}\b(?:baseline|budget|anggaran)\b|\b(?:baseline|budget|anggaran)\b[\s\S]{0,60}\b(?:approved|disetujui)\b/i,
-  actual_to_date: /\b(?:actual|aktual|realisasi)\b/i,
-  committed: /\b(?:committed|commitment|komitmen|terikat)\b/i,
-  eac: /\b(?:eac|estimate at completion|estimasi biaya penyelesaian|perkiraan biaya penyelesaian)\b/i,
+  // "Nilai kontrak" (contract value) is deliberately excluded: it is
+  // genuinely ambiguous between an approved baseline and a committed amount,
+  // and the system's own rule is that ambiguity is a gap, not a guess.
+  approved_baseline:
+    /\b(?:approved|disetujui)\b[\s\S]{0,60}\b(?:baseline|budget|anggaran)\b|\b(?:baseline|budget|anggaran)\b[\s\S]{0,60}\b(?:approved|disetujui)\b|\b(?:rab|pagu(?:\s+anggaran)?|hps|harga\s+perkiraan\s+sendiri|biaya\s+dasar|baseline\s+cost|kontrak\s+awal)\b/i,
+  actual_to_date:
+    /\b(?:actual|aktual|realisasi|terbayar|dibayarkan|biaya\s+aktual|spent|paid|terserap)\b/i,
+  committed:
+    /\b(?:committed|commitment|komitmen|terikat|purchase\s+order|\bpo\b|nilai\s+pesanan|kontrak\s+pembelian|pengajuan\s+pembelian)\b/i,
+  eac:
+    /\b(?:eac|estimate\s+at\s+completion|estimasi\s+biaya\s+penyelesaian|perkiraan\s+biaya\s+penyelesaian|proyeksi\s+biaya|forecast(?:\s+cost)?|prakiraan\s+biaya|perkiraan\s+penyelesaian)\b/i,
 };
 function costMeasureMatchesCitation(
   measure: ExtractedCostObservation["measure"],

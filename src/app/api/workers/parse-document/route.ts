@@ -91,7 +91,7 @@ export async function POST(request: NextRequest) {
   const { error: initialLeaseError } = await supabase.rpc("extend_document_job_lease", {
     p_job_id: jobId,
     p_claim_token: claimToken,
-    p_minutes: 15,
+    p_minutes: 30,
   });
   if (initialLeaseError) return notOwnedResponse();
   const workerStarted = performance.now();

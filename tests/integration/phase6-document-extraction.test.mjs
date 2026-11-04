@@ -1229,6 +1229,84 @@ test("cost observations keep the source value and carry deterministic normalizat
   assert.ok(costSource.includes(observations[1].excerpt));
 });
 
+const indonesianCostSource =
+  "RINCIAN ANGGARAN BIAYA (RAB) Pagu Anggaran Rp 1.309.670.793 untuk hardware. " +
+  "Nilai Kontrak Rp 6.802.375.321. HPS Rp 1.350.000.000. " +
+  "Realisasi biaya sampai saat ini Rp 450.000.000. Terbayar Rp 200.000.000. " +
+  "Pengajuan Pembelian (purchase order) senilai Rp 1.375.170.793. " +
+  "Proyeksi biaya penyelesaian Rp 1.320.000.000. " +
+  "Catatan lokasi: luas lahan parkir sepeda motor adalah 4.500 m2, dekat gedung utama.";
+
+function indonesianCostModelOutput(prompt, observations) {
+  const group = validModelOutput(prompt);
+  if (isExecutiveSummaryPrompt(prompt)) return group;
+  const sourceId = documentContextFromPrompt(prompt)[0].source_id;
+  return {
+    ...group,
+    cost_observations: observations.map((observation) => ({
+      scope_level: "project",
+      scope_label: null,
+      period_label: null,
+      as_of_date: null,
+      status_label: null,
+      source_id: sourceId,
+      ...observation,
+    })),
+  };
+}
+
+async function extractIndonesianCostObservations(observations) {
+  return await withLocalOllama(
+    async (_url, init) => {
+      const prompt = JSON.parse(init.body).messages[1].content;
+      return modelResponse(indonesianCostModelOutput(prompt, observations));
+    },
+    async () =>
+      await extractDocumentGroups(
+        job(indonesianCostSource, { fileName: "rab.txt", title: "RAB" }),
+        [{ chunkIndex: 0, chunkText: indonesianCostSource, sectionLabel: "RAB" }],
+        { parserVersion: "cost-evidence-test-v1" },
+        memoryGroupStore(),
+      ),
+  );
+}
+
+test("Indonesian procurement wording (RAB/pagu/HPS/terbayar/PO/proyeksi) is recognized as its cost measure", async () => {
+  const outcome = await extractIndonesianCostObservations([
+    { measure: "approved_baseline", source_value: "Rp 1.309.670.793" },
+    { measure: "actual_to_date", source_value: "Rp 450.000.000" },
+    { measure: "committed", source_value: "Rp 1.375.170.793" },
+    { measure: "eac", source_value: "Rp 1.320.000.000" },
+  ]);
+
+  assert.equal(outcome.ok, true, `${outcome.errorCode}: ${outcome.errorMessage}`);
+  const observations = outcome.extraction.cost_observations;
+  assert.deepEqual(
+    observations.map((observation) => observation.measure),
+    ["approved_baseline", "actual_to_date", "committed", "eac"],
+  );
+  assert.equal(
+    outcome.extraction.quality_warnings.filter((warning) => warning.includes("measure does not match")).length,
+    0,
+    outcome.extraction.quality_warnings.join(" "),
+  );
+});
+
+test("a cost value with no recognizable role wording nearby is still excluded after the vocabulary expansion", async () => {
+  const outcome = await extractIndonesianCostObservations([
+    // "Luas bangunan" (building floor area) sits far from every cost-role
+    // cue; claiming it as an approved baseline must still be rejected.
+    { measure: "approved_baseline", source_value: "4.500 m2" },
+  ]);
+
+  assert.equal(outcome.ok, true, `${outcome.errorCode}: ${outcome.errorMessage}`);
+  assert.deepEqual(outcome.extraction.cost_observations, []);
+  assert.ok(
+    outcome.extraction.quality_warnings.some((warning) => warning.includes("measure does not match")),
+    outcome.extraction.quality_warnings.join(" "),
+  );
+});
+
 test("a cost value absent from its cited source is excluded, not accepted", async () => {
   const outcome = await extractCostObservations([
     { measure: "eac", source_value: "USD 9,999,999" },
