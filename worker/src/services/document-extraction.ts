@@ -1310,30 +1310,45 @@ function percentTokenMatchesValue(token: string, percentValue: number): boolean 
   return Number.isFinite(value) && Math.abs(value - percentValue) < 1e-9;
 }
 
-// Clause-local negative linkage: a risk/likelihood/rating or financial
-// metric within a few words of the progress wording claims the percentage
-// for that metric, so the value stays a gap instead of project progress.
-function clauseHasConflictingMetricLinkage(clause: string, start: number, end: number): boolean {
-  const metricPattern =
-    "(?:likelihood|probability|probabilitas|rating|impact|dampak|severity|risk|risiko|utilization|spent|budget|anggaran|invoice|payment|pembayaran|termin|paid|dibayar|kontrak|contract|penyerapan|absorption|cost|biaya|expenditure|slippage|delay|keterlambatan|penyimpangan)";
-  const connectors = "(?:is|was|are|were|that|yang|dari|of|for|untuk)";
-  // Right window: the token right after the value (and after one trailing
-  // preposition) must not name a metric.
-  const metricSuffix = new RegExp(
-    `^\\s*(?:${connectors})?\\s*(?:${metricPattern})\\b`,
+const NARRATIVE_METRIC_WORD_PATTERN =
+  "(?:likelihood|probability|probabilitas|rating|impact|dampak|severity|risk|risiko|utilization|spent|budget|anggaran|invoice|payment|pembayaran|termin|paid|dibayar|kontrak|contract|penyerapan|absorption|cost|biaya|expenditure|slippage|delay|keterlambatan|penyimpangan)";
+
+// Clause/field-level negative linkage: when the clause holding the
+// percentage names a risk or financial metric anywhere, the value stays a
+// gap unless it sits in its own structurally delimited progress field
+// (`Label: value`) whose label words and field content (up to the next
+// comma delimiter) are metric-free. There are deliberately no word-count
+// windows, so `Pembayaran dari penyedia proyek yang sudah selesai 80% dari
+// nilai kontrak` stays a gap however far the metric sits from the progress
+// word, while `Risk: high, Project progress: 25%` keeps its separated
+// progress field.
+// ponytail: safety rests on the metric word list plus `,` field delimiters;
+// synonyms outside the list slip through — extend the list when a report
+// misclassifies, or move to structural field parsing if that proves
+// insufficient.
+function occurrenceIsClaimedByConflictingMetric(clause: string, start: number, end: number): boolean {
+  const metricWord = new RegExp(
+    `(?:^|[^\\p{L}\\p{N}])(?:${NARRATIVE_METRIC_WORD_PATTERN})\\b`,
     "iu",
   );
-  // Left window: last up-to-three words before the value or the progress
-  // phrase must not name a metric (e.g. "Pembayaran selesai 80%", "budget
-  // utilization").
-  const metricPrefix = new RegExp(
-    `(?:^|[^\\p{L}\\p{N}])(?:${metricPattern})(?:\\s+[\\p{L}\\p{N}]+){0,2}\\s*(?:is|was|are|were|that|yang|dari|of|for|untuk)?\\s*(?::|=)?\\s*$`,
+  if (!metricWord.test(clause)) return false;
+  const before = clause.slice(0, start);
+  const after = clause.slice(end);
+  // Clauses are already split on `;`, `|`, and newlines; a comma is the
+  // remaining in-clause field delimiter.
+  const labelPart = before.slice(Math.max(before.lastIndexOf(","), 0));
+  const marker = Math.max(labelPart.lastIndexOf(":"), labelPart.lastIndexOf("="));
+  if (marker < 0) return true;
+  const labelWords = labelPart.slice(0, marker);
+  const progressTermWord = new RegExp(
+    `(?:^|[^\\p{L}\\p{N}])(?:${NARRATIVE_PROGRESS_TERM_PATTERN})(?=$|[^\\p{L}\\p{N}])`,
     "iu",
   );
+  const contentEnd = after.indexOf(",") >= 0 ? after.indexOf(",") : after.length;
   return (
-    metricSuffix.test(clause.slice(end)) ||
-    metricPrefix.test(clause.slice(0, start)) ||
-    metricPrefix.test(clause.slice(0, Math.max(0, start - 20)))
+    !progressTermWord.test(labelWords) ||
+    metricWord.test(labelWords) ||
+    metricWord.test(after.slice(0, contentEnd))
   );
 }
 
@@ -1374,7 +1389,7 @@ function narrativeProgressPercentIsSourceLinked(
       for (const token of percentTokens) {
         const start = valueIndex + (token.index ?? 0);
         const end = start + token[0].length;
-        if (clauseHasConflictingMetricLinkage(text, start, end)) continue;
+        if (occurrenceIsClaimedByConflictingMetric(text, start, end)) continue;
         if (
           progressBefore.test(text.slice(0, start)) ||
           progressAfter.test(text.slice(end)) ||

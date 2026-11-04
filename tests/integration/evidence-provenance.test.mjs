@@ -2368,6 +2368,8 @@ test("narrative progress needs explicit progress wording tied to its percentage"
     "invoice-completion": "Completion of 60% of invoice payments received",
     "budget-spent": "Actual: 45% of budget has been spent",
     "risk-progress-label": "Risk progress: 25%",
+    "pembayaran-long": "Pembayaran dari penyedia proyek yang sudah selesai 80% dari nilai kontrak",
+    "risk-comma-progress": "Risk: high, Project progress: 25%",
   };
   const chunks = [{
     chunkIndex: 0,
@@ -2438,6 +2440,11 @@ test("narrative progress needs explicit progress wording tied to its percentage"
       row("invoice-completion", "60%", 60),
       row("budget-spent", "45%", 45),
       row("risk-progress-label", "25%"),
+      // A financial metric anywhere in the clause keeps the value a gap,
+      // however far it sits from the progress word.
+      row("pembayaran-long", "80%", 80),
+      // A clearly delimited progress field beside a risk field still counts.
+      row("risk-comma-progress", "25%"),
     ];
     return modelResponse(output);
   }, async () =>
@@ -2468,10 +2475,11 @@ test("narrative progress needs explicit progress wording tied to its percentage"
       ["25%", 25, sources["realisasi-pekerjaan"]],
       ["25%", 25, sources["penyelesaian-pekerjaan"]],
       ["25%", 25, sources["kemajuan-pekerjaan"]],
+      ["25%", 25, sources["risk-comma-progress"]],
     ],
   );
   const warnings = result.extraction.quality_warnings.join(" ");
-  for (const index of [0, 1, 2, 3, 4, 6, 7, 8, 12, 23, 24, 25, 26, 27, 28, 29, 30]) {
+  for (const index of [0, 1, 2, 3, 4, 6, 7, 8, 12, 23, 24, 25, 26, 27, 28, 29, 30, 31]) {
     assert.match(
       warnings,
       new RegExp(`progress\\[${index}\\].*not linked to explicit progress`),
