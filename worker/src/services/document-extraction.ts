@@ -2232,6 +2232,7 @@ function validateGroupExtraction(
       /^\s*[,，]\s*[\p{L}\p{N}_][\p{L}\p{N}_\s().%/_-]{0,79}\s*[:=]\s*$/u;
     const narrativeFieldBoundary =
       /^\s*[,，]?\s*(?:actual\b(?:\s*%|\s+percent(?:age)?|\s+progress|\s+to\s+date)?|progress\b|realisasi\b|kemajuan\b|completed\b|completion\b|forecast\b|ramalan\b|estimate(?:\s+at\s+completion)?\b|estimasi\b|eac\b|baseline\b|approved\b|disetujui\b|budget\b|anggaran\b|cost\b|biaya\b|currency\b|mata\s+uang\b|amount\b|nilai\b|report(?:ed|ing)?\s+(?:date|period)\b|as[\s-]?of\b|cut[\s-]?off(?:\s+date)?\b|due(?:\s+date)?\b|target(?:\s+date)?\b|week\b|minggu\b|month\b|bulan\b|period(?:e)?\b)\s*[:#=-]?\s*$/iu;
+    const separatorBoundary = /^\s*[,;|:–—-]?\s*$/u;
     const grammaticalValueBoundary = /^\s+is\s*$/iu;
     const scopeCuePattern =
       /\b(?:wbs|work[\s-]?package|sub[\s-]?system|component|discipline|package|scope)\b\s*(?:name|code)?\s*[:#-]?\s*/giu;
