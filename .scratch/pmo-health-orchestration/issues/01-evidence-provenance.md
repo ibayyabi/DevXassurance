@@ -16,6 +16,14 @@ Baca [rencana dan kontrak bersama](../plan.md), khususnya constraint model dan k
 
 ## Comments
 
+**Handoff 6 — diagnosis dua kegagalan offline pada handoff 5.**
+
+1. `keeps the plan date cell locator` (actual undefined): test menyiapkan milestone dari sel `Baseline Start` sheet **Workplan & Gantt**, tetapi sheet itu tidak punya header terdeteksi — baris 4 (header asli) berada tepat di bawah baris timeline 3 sehingga parser menganggapnya baris data, dan baris data berikutnya dirender dengan prefiks huruf kolom (`F: 2026-09-18`), bukan label `Baseline Start`. Jadi **tidak ada** referensi valid/label yang pernah dibuat parser; produksi tidak salah (sel tanpa label → tanpa atribusi kolom → aturan excerpt tetap berlaku, tidak ada penerimaan keliru). Perbaikan di test: milestone memakai sel Due Date milik baris yang sama (`L7` W4 / `L8` W5 di sheet Weekly Report) yang memang berlabel, dengan label dan tanggal diturunkan dari teks prompt, bukan dari koordinat tetap. Bukti tambahan: assert `milestone.label` = label kolom due.
+2. `risk due date ['2026-10-23']` (actual `[]`): baris risk sintetis tidak mengisi `raw_mitigation_due_date`, sedangkan validator mensyaratkan `raw_mitigation_due_date === mitigation_due_date` bila tanggal diisi — sehingga seluruh baris risk dikecualikan. Perbaikan di test: `raw_mitigation_due_date` diisi sama dengan `mitigation_due_date`.
+3. Pengerasan produksi saat diagnosis: atribusi untuk **sel tunggal** kini memakai label kolom sel itu sendiri, bukan `dateIso`, sehingga sel tanggal berformat-teks (mis. `L7`/`L8` dan date string di sheet Risk) tetap dinilai dari kolomnya dan tidak bisa menyelundupkan kolom record sebagai tanggal due (atau sebaliknya). `EXTRACTION_SCHEMA_VERSION` → `phase6-document-extraction/20`; `PARSER_VERSION` tetap `document-parser/12` (output parser tidak berubah).
+
+Batas baru yang dicatat: sheet seperti Workplan & Gantt yang header aslinya berada di bawah baris timeline tidak punya label kolom; tanggal/scope di sana menjadi gap (bukan salah terima). Memperbaiki heuristik header itu di luar tiket ini.
+
 **Handoff 5 (worktree `../DevXassurance-pmo-health-01`, branch `ticket/pmo-health-01`, baseline `db96485`).**
 
 Dua bug semantik dari review 992299f diperbaiki.

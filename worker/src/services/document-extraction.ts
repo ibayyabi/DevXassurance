@@ -368,7 +368,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/19";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/20";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -1638,8 +1638,10 @@ function validateGroupExtraction(
       }
       return `${path} cannot be attributed to a cut-off or period column in the cited row`;
     }
+    // A single cited cell proves its own column through its label; the claimed
+    // date is already required to be inside that cell's text.
     const cell = reference?.cell;
-    if (cell?.dateIso === claimed && isDueColumn(cell)) {
+    if (cell && isDueColumn(cell)) {
       return `${path} is the value of the cited source's "${cellLabel(cell)}" column, not a cut-off or period date`;
     }
     return null;
@@ -1663,7 +1665,7 @@ function validateGroupExtraction(
         : null;
     }
     const cell = reference?.cell;
-    return cell?.dateIso === claimed && isRecordColumn(cell)
+    return cell && isRecordColumn(cell)
       ? `${path} is the cited source's "${cellLabel(cell)}" value, not a due or event date`
       : null;
   };
