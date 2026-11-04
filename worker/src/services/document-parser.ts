@@ -266,12 +266,29 @@ const execFileAsync = promisify(execFileCallback);
 
 export type ParsedSourceLocation = Record<string, string | number>;
 
+// One spreadsheet cell's structural identity: its exact cell, the column label
+// from the table header, the readable value, and the normalized date when the
+// cell is date-formatted. The worker proves a value's or date's column from this
+// metadata instead of trusting where a fragment sits in row text.
+export type ParsedSourceCell = {
+  sheetName: string;
+  row: number;
+  column: string;
+  cell: string;
+  label: string | null;
+  value: string;
+  rawValue: string;
+  dateIso: string | null;
+};
+
 export type ParsedSourceReference = {
   sourceId: string;
   chunkIndex: number;
   text: string;
   modelText: string;
   sourceLocation?: ParsedSourceLocation;
+  cell?: ParsedSourceCell;
+  rowCells?: ParsedSourceCell[];
 };
 
 export type ParsedChunk = {
@@ -303,6 +320,7 @@ type SourceCellReference = {
   text: string;
   modelText: string;
   location: ParsedSourceLocation;
+  cell?: ParsedSourceCell;
 };
 
 type SourceBlock = {
@@ -315,6 +333,7 @@ type SourceBlock = {
   modelText?: string;
   formulaCells?: FormulaCell[];
   cellReferences?: SourceCellReference[];
+  rowCells?: ParsedSourceCell[];
 };
 
 type FormulaCell = {
@@ -329,6 +348,11 @@ type FormulaCell = {
   rowEnd: number;
 };
 
+// A key-value row whose key names the artifact's own subject (for example
+// "Subsystem" or "Work Package"). Read only as a document-level fallback when
+// the workbook declares exactly one such value.
+const SUBJECT_KEY_CUE = /\b(?:sub[\s-]?system|component|work\s*package|discipline|package|scope)\b/i;
+
 type ZipTextReader = {
   file(path: string): { async(type: "text"): Promise<string> } | null;
   files: Record<string, unknown>;
@@ -336,7 +360,7 @@ type ZipTextReader = {
 
 // Bump whenever parsed chunk/source-reference output changes: cached extraction
 // groups are keyed by this version, so older rows are never reused.
-const PARSER_VERSION = "document-parser/10";
+const PARSER_VERSION = "document-parser/11";
 const MAX_CHUNK_LENGTH = 4000;
 // Growth ceiling per chunk: retained row references always fit, then cell
 // references are added row by row. Cells left uncovered stay citable through
@@ -612,6 +636,11 @@ async function parseXlsxDocument(
     const { sheets, date1904 } = await readWorkbookSheets(zip, parser);
     const blocks: SourceBlock[] = [];
     const warnings: string[] = [];
+    // Workbook-declared subject labels and each sheet's own title block: the
+    // worker's fallback proof for a component scope when the cited row has no
+    // scope column and the workbook declares exactly one subject.
+    const workbookSubjects = new Set<string>();
+    const sheetTitles: Record<string, string> = {};
 
     for (const sheet of sheets) {
       const xml = await zip.file(sheet.path)?.async("text");
@@ -695,11 +724,15 @@ async function parseXlsxDocument(
             }
           }
         }
+        const headerText = [...headers.entries()]
+          .sort(([left], [right]) => left - right)
+          .map(([column, label]) => `${columnLetters(column)}: ${label}`)
+          .join(" | ");
+        // The first table header of a sheet is its title block, which names the
+        // sheet's own subject.
+        if (!(sheet.name in sheetTitles)) sheetTitles[sheet.name] = headerText;
         blocks.push({
-          text: [...headers.entries()]
-            .sort(([left], [right]) => left - right)
-            .map(([column, label]) => `${columnLetters(column)}: ${label}`)
-            .join(" | "),
+          text: headerText,
           kind: "table-header",
           formulaCells: tableRows.slice(0, headerCount).flatMap(formulaCellsForRow),
           location: {
@@ -767,12 +800,30 @@ async function parseXlsxDocument(
               text: `${modelCellText}${annotation}`,
               modelText: modelCellText,
               annotation,
+              sourceCell: {
+                sheetName: sheet.name,
+                row: row.number,
+                column: columnLetters(column),
+                cell: cell.reference,
+                label: label ?? null,
+                value: compactValue,
+                rawValue: cell.value,
+                dateIso: isoDate ?? null,
+              } satisfies ParsedSourceCell,
             };
           });
           const modelText = cells.map((cell) => cell.modelText).join(" | ");
           // The row keeps every annotation after its readable text so the row
           // reference stays citable against exactly what the model was shown.
           const text = `${modelText}${cells.map((cell) => cell.annotation).filter(Boolean).join("")}`;
+          const rowCells = cells.map((cell) => cell.sourceCell);
+          // A key-value row whose key names the artifact's own subject declares
+          // the workbook's subject; only a data row (never a header) counts.
+          const keyCell = row.cells[0];
+          if (keyCell?.textual && SUBJECT_KEY_CUE.test(keyCell.value)) {
+            const subjectCell = row.cells.slice(1).find((cell) => cell.value.trim());
+            if (subjectCell) workbookSubjects.add(subjectCell.value.trim());
+          }
           if (row.cells.some((cell) => cell.dateFormat)) {
             warnings.push(`Sheet "${sheet.name}" contains date-formatted raw values; recognized dates are normalized and invalid or unavailable values need review.`);
           }
@@ -791,6 +842,7 @@ async function parseXlsxDocument(
             kind: "table-row",
             formulaCells: formulaCellsForRow(row),
             location: rowLocation,
+            rowCells,
             cellReferences: row.cells.map((cell, cellIndex) => ({
               text: cells[cellIndex].text,
               modelText: cells[cellIndex].modelText,
@@ -799,6 +851,7 @@ async function parseXlsxDocument(
                 cellRangeStart: cell.reference,
                 cellRangeEnd: cell.reference,
               },
+              cell: cells[cellIndex].sourceCell,
             })),
             groupKey: `sheet:${sheet.name}:table:${tableIndex}`,
             sectionLabel: sheet.name,
@@ -826,6 +879,8 @@ async function parseXlsxDocument(
         sheetNames: sheets.map((sheet) => sheet.name),
         textLength: chunks.reduce((length, chunk) => length + chunk.chunkText.length, 0),
         warnings: [...new Set(warnings)],
+        subjects: [...workbookSubjects],
+        sheetTitles,
       },
     };
   } catch (error) {
@@ -1686,7 +1741,10 @@ function chunkBlockGroup(blocks: SourceBlock[]): ParsedChunk[] {
     const sourceLocation = mergeSourceLocations(sourceBlocks);
     const sourceReferences: ParsedSourceReference[] = [];
     const addReference = (
-      reference: Pick<ParsedSourceReference, "text" | "modelText" | "sourceLocation">,
+      reference: Pick<
+        ParsedSourceReference,
+        "text" | "modelText" | "sourceLocation" | "cell" | "rowCells"
+      >,
     ) => {
       sourceReferences.push({
         sourceId: `s${chunks.length}s${sourceReferences.length}`,
@@ -1701,13 +1759,19 @@ function chunkBlockGroup(blocks: SourceBlock[]): ParsedChunk[] {
         text: block.text,
         modelText: block.modelText ?? block.text,
         sourceLocation: block.location,
+        rowCells: block.rowCells,
       });
       const cellReferences = block.cellReferences ?? [];
       if (sourceReferences.length + cellReferences.length > MAX_SOURCE_REFERENCES_PER_CHUNK) {
         continue;
       }
       for (const cell of cellReferences) {
-        addReference({ text: cell.text, modelText: cell.modelText, sourceLocation: cell.location });
+        addReference({
+          text: cell.text,
+          modelText: cell.modelText,
+          sourceLocation: cell.location,
+          cell: cell.cell,
+        });
       }
     }
     chunks.push({
@@ -1804,17 +1868,20 @@ function splitSourceBlock(block: SourceBlock): SourceBlock[] {
   const cellReferences = remaining.length > MAX_SOURCE_BLOCK_PART_LENGTH
     ? undefined
     : block.cellReferences;
+  const rowCells = remaining.length > MAX_SOURCE_BLOCK_PART_LENGTH
+    ? undefined
+    : block.rowCells;
 
   while (remaining.length > MAX_SOURCE_BLOCK_PART_LENGTH) {
     let splitAt = remaining.lastIndexOf(" ", MAX_SOURCE_BLOCK_PART_LENGTH);
     if (splitAt < 1) splitAt = MAX_SOURCE_BLOCK_PART_LENGTH;
     const part = remaining.slice(0, splitAt).trimEnd();
-    parts.push({ ...block, text: part, modelText, cellReferences, continuation });
+    parts.push({ ...block, text: part, modelText, cellReferences, rowCells, continuation });
     continuation =
       block.kind === "paragraph" ? part.slice(-PARAGRAPH_OVERLAP) : undefined;
     remaining = remaining.slice(splitAt).trimStart();
   }
-  if (remaining) parts.push({ ...block, text: remaining, modelText, cellReferences, continuation });
+  if (remaining) parts.push({ ...block, text: remaining, modelText, cellReferences, rowCells, continuation });
   return parts;
 }
 

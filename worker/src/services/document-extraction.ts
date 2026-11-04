@@ -5,7 +5,7 @@ import {
   normalizeCostCurrency,
 } from "../../../src/features/assurance/lib/cost-evidence";
 import { documentTypes } from "../../../src/features/documents/lib/constants";
-import type { ParsedChunk, ParsedSourceReference } from "./document-parser";
+import type { ParsedChunk, ParsedSourceCell, ParsedSourceReference } from "./document-parser";
 import { isRecord } from "../types/guards";
 import { citedTextSupportsNumericValue, containsNumericValue } from "../../../src/features/documents/lib/source-value-validation";
 
@@ -330,6 +330,8 @@ type ChunkGroup = {
   groupKey: string;
   chunks: ParsedChunk[];
   candidateInterpretation: string[];
+  subjects: string[];
+  sheetTitles: Record<string, string>;
 };
 type ModelProvider = {
   provider: "ollama" | "ollama_cloud" | "openai-compatible" | "gemini" | "groq";
@@ -349,7 +351,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/17";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/18";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -657,6 +659,18 @@ function buildChunkGroups(
   let current: ParsedChunk[] = [];
   let currentLength = 0;
   let currentScope: string | null = null;
+  // Workbook-declared subject labels and per-sheet title blocks, used only to
+  // prove a component scope the source structure already states.
+  const subjects = (Array.isArray(parserMetadata.subjects) ? parserMetadata.subjects : [])
+    .filter((subject): subject is string => typeof subject === "string" && subject.trim().length > 0)
+    .map((subject) => subject.trim());
+  const sheetTitles = isRecord(parserMetadata.sheetTitles)
+    ? Object.fromEntries(
+        Object.entries(parserMetadata.sheetTitles).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0,
+        ),
+      )
+    : {};
 
   const flush = () => {
     if (!current.length) return;
@@ -690,6 +704,8 @@ function buildChunkGroups(
       groupKey,
       chunks: current,
       candidateInterpretation,
+      subjects,
+      sheetTitles,
     });
     current = [];
     currentLength = 0;
@@ -1534,22 +1550,99 @@ function validateGroupExtraction(
     observationWarnings[domain].push(warning);
   };
   const allowedSources = allowedSourceCitations(group);
-  // A date is only attributable when the cited source is a single cell. A row or
-  // table citation spans columns, so a neighbouring date (for example a due
-  // date) could be presented as the record date. Column semantics for a
-  // multi-column citation are not proved by the cited text alone, so the date
-  // stays a gap instead of being guessed from its position in the excerpt.
-  const dateAttributionErrors = (
+  // A period/cut-off column states when the row's report is as of; a due,
+  // target, start, or mitigation date belongs to a different field. Only a
+  // labelled spreadsheet column (with its exact cell value) proves which column
+  // a date came from, so a neighbouring date can never be passed off as the
+  // record date. Values and dates keep their row/column relation from the
+  // parser's structured row metadata; a source without it keeps the excerpt rule.
+  const RECORD_DATE_CUE = /\b(?:cut[\s-]?off|as[\s-]?of|report(?:ing|ed)?\s*(?:date|period)|period|periode)\b/i;
+  const NON_RECORD_DATE_CUE = /\b(?:due|target|start|finish|planned|actual|baseline|mitigation|submission|delivery|approval)\b/i;
+  const SCOPE_COLUMN_CUE = /\b(?:sub[\s-]?system|component|work\s*package|discipline|package|scope|activity|task|wbs)\b/i;
+  const referenceForCitation = (citation: SourceCitation | null) => {
+    if (!citation) return undefined;
+    for (const chunk of group.chunks) {
+      const reference = sourceReferencesForChunk(chunk).find(
+        (source) =>
+          source.chunkIndex === citation.evidence_chunk_index &&
+          source.text === citation.excerpt,
+      );
+      if (reference) return reference;
+    }
+    return undefined;
+  };
+  // Returns an error string when the cited row cannot support the claimed date,
+  // or null when it can (or when the source carries no row structure).
+  const recordDateError = (
     citation: SourceCitation | null,
+    claimed: string,
+    path: string,
+  ): string | null => {
+    const reference = referenceForCitation(citation);
+    const rowCells = reference?.rowCells;
+    if (rowCells?.length) {
+      const label = (cell: ParsedSourceCell) => cell.label ?? "";
+      const dateCells = rowCells.filter((cell) => cell.dateIso);
+      const recordColumns = dateCells.filter(
+        (cell) => RECORD_DATE_CUE.test(label(cell)) && !NON_RECORD_DATE_CUE.test(label(cell)),
+      );
+      if (recordColumns.length > 1) {
+        return `${path} is ambiguous: the cited row has more than one cut-off or period date column (${recordColumns.map((cell) => label(cell)).join(", ")})`;
+      }
+      if (recordColumns.length === 1) {
+        const column = recordColumns[0];
+        return column.dateIso === claimed
+          ? null
+          : `${path} is ${claimed}, but the cited row's "${label(column)}" column states ${column.dateIso}`;
+      }
+      const unrelated = dateCells.find(
+        (cell) => NON_RECORD_DATE_CUE.test(label(cell)) && cell.dateIso === claimed,
+      );
+      if (unrelated) {
+        return `${path} is the value of the cited row's "${label(unrelated)}" column, not a cut-off or period date`;
+      }
+      return `${path} cannot be attributed to a cut-off or period column in the cited row`;
+    }
+    // A single cited cell proves its own column only through its label, so a
+    // date taken from a due/target-style column is rejected there too.
+    const cell = reference?.cell;
+    if (cell?.dateIso === claimed && cell.label && NON_RECORD_DATE_CUE.test(cell.label)) {
+      return `${path} is the value of the cited source's "${cell.label}" column, not a cut-off or period date`;
+    }
+    return null;
+  };
+  const checkRecordDate = (
+    citation: SourceCitation | null,
+    date: string | null | undefined,
     path: string,
     rowErrors: string[],
   ) => {
-    const location = citation?.source_location;
-    if (!location || location.kind !== "xlsx") return;
-    const start = location.cellRangeStart;
-    const end = location.cellRangeEnd;
-    if (typeof start === "string" && start === end) return;
-    rowErrors.push(`${path} spans more than one cell, so its date cannot be attributed to a column`);
+    if (!date) return;
+    const error = recordDateError(citation, date, path);
+    if (error) rowErrors.push(error);
+  };
+  // A scope label is proved when the cited row has a labelled scope column
+  // holding it, or when the workbook declares exactly one subject and the cited
+  // sheet's own title states that subject.
+  const scopeIsLinked = (citation: SourceCitation | null, scopeLabel: string): boolean => {
+    const reference = referenceForCitation(citation);
+    if (
+      reference?.rowCells?.some(
+        (cell) =>
+          cell.label !== null &&
+          SCOPE_COLUMN_CUE.test(cell.label) &&
+          cell.value.trim().toLocaleLowerCase() === scopeLabel.toLocaleLowerCase(),
+      )
+    ) {
+      return true;
+    }
+    if (group.subjects.length !== 1) return false;
+    const subject = group.subjects[0];
+    if (subject.toLocaleLowerCase() !== scopeLabel.toLocaleLowerCase()) return false;
+    const sheetName = reference?.sourceLocation?.sheetName;
+    if (typeof sheetName !== "string") return false;
+    const title = group.sheetTitles[sheetName] ?? "";
+    return title.toLocaleLowerCase().includes(subject.toLocaleLowerCase());
   };
 
   const facts: ExtractedFact[] = [];
@@ -1853,7 +1946,7 @@ function validateGroupExtraction(
           if (asOfDate && !citation.excerpt.includes(asOfDate)) {
             rowErrors.push(`${path}.as_of_date is not present in the cited source`);
           }
-          if (asOfDate) dateAttributionErrors(citation, `${path}.as_of_date`, rowErrors);
+          checkRecordDate(citation, asOfDate, `${path}.as_of_date`, rowErrors);
         }
         if (citation && citationHasUnavailableFormula(group, citation)) {
           rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support a cost value`);
@@ -1960,15 +2053,17 @@ function validateGroupExtraction(
     const excerpt = excerptFor(item, citation, path, rowErrors);
     const date = checkedDate(item.date ?? null, excerpt, `${path}.date`, rowErrors);
     const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
-    if (date) dateAttributionErrors(citation, `${path}.date`, rowErrors);
-    if (asOfDate) dateAttributionErrors(citation, `${path}.as_of_date`, rowErrors);
+    checkRecordDate(citation, date, `${path}.date`, rowErrors);
+    checkRecordDate(citation, asOfDate, `${path}.as_of_date`, rowErrors);
     if (!["project", "wbs", "unknown"].includes(scopeLevel)) rowErrors.push(`${path}.scope_level is invalid`);
     if (scopeLevel === "wbs" && !scopeLabel) rowErrors.push(`${path}.scope_label is required for WBS scope`);
     if (scopeLevel !== "wbs" && scopeLabel) rowErrors.push(`${path}.scope_label is only valid for WBS scope`);
     if (rawDate && !excerpt?.includes(rawDate)) rowErrors.push(`${path}.raw_date is not present in the cited excerpt`);
     if (date && rawDate !== date) rowErrors.push(`${path}.date can only normalize an exact ISO raw_date`);
     if (!textIsCited(label, excerpt)) rowErrors.push(`${path}.label is not present in the cited excerpt`);
-    if (!textIsCited(scopeLabel, excerpt)) rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
+    if (scopeLabel && !textIsCited(scopeLabel, excerpt) && !scopeIsLinked(citation, scopeLabel)) {
+      rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
+    }
     if (!textIsCited(periodLabel, excerpt)) rowErrors.push(`${path}.period_label is not present in the cited excerpt`);
     if (!rawDate && !date) rowErrors.push(`${path} must contain a source-reported date`);
     if (rowErrors.length) {
@@ -2013,10 +2108,12 @@ function validateGroupExtraction(
       !citedTextSupportsNumericValue(`${percentValue}%`, rawValue ?? "")) {
       rowErrors.push(`${path}.percent does not match a percentage in the cited excerpt`);
     }
-    if (!textIsCited(scopeLabel, excerpt)) rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
+    if (scopeLabel && !textIsCited(scopeLabel, excerpt) && !scopeIsLinked(citation, scopeLabel)) {
+      rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
+    }
     if (!textIsCited(periodLabel, excerpt)) rowErrors.push(`${path}.period_label is not present in the cited excerpt`);
     const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
-    if (asOfDate) dateAttributionErrors(citation, `${path}.as_of_date`, rowErrors);
+    checkRecordDate(citation, asOfDate, `${path}.as_of_date`, rowErrors);
     if (rowErrors.length) {
       warnObservationInvalidRow("progress", path, rowErrors);
       return;
@@ -2059,8 +2156,8 @@ function validateGroupExtraction(
     const excerpt = excerptFor(item, citation, path, rowErrors);
     const mitigationDueDate = checkedDate(item.mitigation_due_date ?? null, excerpt, `${path}.mitigation_due_date`, rowErrors);
     const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
-    if (mitigationDueDate) dateAttributionErrors(citation, `${path}.mitigation_due_date`, rowErrors);
-    if (asOfDate) dateAttributionErrors(citation, `${path}.as_of_date`, rowErrors);
+    checkRecordDate(citation, mitigationDueDate, `${path}.mitigation_due_date`, rowErrors);
+    checkRecordDate(citation, asOfDate, `${path}.as_of_date`, rowErrors);
     for (const [field, candidate] of [
       ["risk_id", riskId], ["name", name], ["description", description], ["status", status],
       ["rating_label", ratingLabel], ["scale_label", scaleLabel], ["owner", owner],
@@ -2116,7 +2213,7 @@ function validateGroupExtraction(
     const citation = requiredCitation(item, allowedSources, path, rowErrors, fromCache);
     const excerpt = excerptFor(item, citation, path, rowErrors);
     const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
-    if (asOfDate) dateAttributionErrors(citation, `${path}.as_of_date`, rowErrors);
+    checkRecordDate(citation, asOfDate, `${path}.as_of_date`, rowErrors);
     if (!["no_open_high_or_critical", "open_risk_reported"].includes(state)) {
       rowErrors.push(`${path}.state is invalid`);
     } else if (!riskRegisterStatementMatches(state as ExtractedRiskRegisterStatement["state"], excerpt ?? "")) {

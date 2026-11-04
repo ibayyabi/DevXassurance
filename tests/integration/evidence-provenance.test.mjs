@@ -3,14 +3,15 @@
 // Replays the real Smart Building W4/W5 weekly workbooks through the worker seam
 // (parse -> validated extraction -> job result) with a controlled model response
 // and no live provider call. The response is built only from the source text the
-// prompt exposes to the model, so the accepted evidence must be citable by a
-// model that never sees the canonical row text. It pins:
-//   * literal acceptance with an exact per-cell location while the same source
-//     group holds unresolved formulas, and no invented or zeroed formula result;
-//   * a dated actual accepted only when the cited source states the period and
-//     the cut-off; ambiguous or borrowed context stays a gap;
-//   * fake source IDs, unsupported excerpts, wrong cut-offs, and stale group
-//     cache versions do not pass, and provenance survives a cache hit.
+// prompt exposes to the model. It pins:
+//   * value, period, date, and component scope linked through the parser's
+//     row/column/header metadata, never from a fragment's position in row text;
+//   * a same-row due date rejected as the record date, and ambiguous duplicate
+//     cut-off columns rejected;
+//   * literal acceptance with an exact per-cell location while the same group
+//     holds unresolved formulas, and no invented or zeroed formula result;
+//   * fake source IDs, unsupported excerpts, wrong scopes, and stale cache
+//     versions rejected, with provenance kept on a cache hit.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -23,31 +24,15 @@ const { parseDocumentBuffer, extractDocumentGroups, processDocumentJob } =
 
 const ALARM_FILE = "01_Alarm_Kebencanaan_Subcontractor_Weekly.xlsx";
 const WEEKLY = "Weekly Report";
+// Declared by the workbook (`Subsystem / Scope` key-value rows) and stated by the
+// Weekly Report sheet title, both of which the prompt exposes through the file
+// name and source text.
+const SUBJECT = "Alarm Kebencanaan";
 const DIMENSIONS = ["overall", "schedule", "cost", "risk", "governance", "audit_readiness"];
 
 const CASES = [
-  {
-    session: "2026-10-09_w4",
-    actualCell: "D7",
-    actualRow: 7,
-    cutOffCell: "B7",
-    percent: 12.5,
-    week: "W4",
-    cutOff: "2026-10-09",
-    unresolvedCell: "F8",
-    unresolvedRow: 8,
-  },
-  {
-    session: "2026-10-16_w5",
-    actualCell: "D8",
-    actualRow: 8,
-    cutOffCell: "B8",
-    percent: 20.4,
-    week: "W5",
-    cutOff: "2026-10-16",
-    unresolvedCell: "F9",
-    unresolvedRow: 9,
-  },
+  { session: "2026-10-09_w4", actualCell: "D7", actualRow: 7, cutOffCell: "B7", percent: 12.5, week: "W4", cutOff: "2026-10-09", unresolvedCell: "F8", unresolvedRow: 8 },
+  { session: "2026-10-16_w5", actualCell: "D8", actualRow: 8, cutOffCell: "B8", percent: 20.4, week: "W5", cutOff: "2026-10-16", unresolvedCell: "F9", unresolvedRow: 9 },
 ];
 
 function alarmBuffer(session) {
@@ -185,172 +170,139 @@ function executiveSummaryOutput(input) {
   };
 }
 
-// A controlled response that only uses the source text the prompt exposes.
-function modelForCase(spec) {
+// One group response for the real workbooks, built only from the prompt.
+function alarmGroupResponse(prompt, spec) {
+  const references = documentContextFromPrompt(prompt);
+  if (isClassificationPrompt(prompt)) return classificationOutput(references);
+  const output = baseGroupOutput(references);
+  const rowSource = references.find(
+    (reference) =>
+      reference.source_location?.sheetName === WEEKLY &&
+      reference.text.includes(`Week: ${spec.week}`) &&
+      reference.text.includes(spec.cutOff) &&
+      reference.text.includes(`Actual %: ${spec.percent}%`),
+  );
+  const actualSource = references.find(
+    (reference) =>
+      reference.source_location?.sheetName === WEEKLY &&
+      reference.source_location?.cellRangeStart === spec.actualCell,
+  );
+  if (rowSource && actualSource) {
+    const varianceIndex = rowSource.text.indexOf(" | Variance");
+    const rowExcerpt = varianceIndex > 0 ? rowSource.text.slice(0, varianceIndex) : rowSource.text;
+    const dueDate = /Due Date:\s*(\d{4}-\d{2}-\d{2})/.exec(rowSource.text)?.[1] ?? null;
+    output.assurance_observations.progress = [
+      // The row states the week, the cut-off column, and the actual percentage:
+      // value, period, date, and the workbook's declared subject are all linked.
+      {
+        raw_value: `${spec.percent}%`,
+        percent: spec.percent,
+        scope_level: "wbs",
+        scope_label: SUBJECT,
+        period_label: spec.week,
+        as_of_date: spec.cutOff,
+        excerpt: rowExcerpt,
+        source_id: rowSource.source_id,
+      },
+      // A due date in the same row is not the record date, even though it is
+      // verbatim in the cited excerpt.
+      ...(dueDate
+        ? [{
+            raw_value: `${spec.percent}%`,
+            percent: spec.percent,
+            scope_level: "wbs",
+            scope_label: SUBJECT,
+            period_label: spec.week,
+            as_of_date: dueDate,
+            excerpt: rowSource.text,
+            source_id: rowSource.source_id,
+          }]
+        : []),
+      // A scope the workbook neither declares nor states on this row.
+      {
+        raw_value: `${spec.percent}%`,
+        percent: spec.percent,
+        scope_level: "wbs",
+        scope_label: "Kamera Pengawasan",
+        period_label: null,
+        as_of_date: null,
+        excerpt: rowExcerpt,
+        source_id: rowSource.source_id,
+      },
+      // A fabricated source ID never resolves.
+      {
+        raw_value: `${spec.percent}%`,
+        percent: spec.percent,
+        scope_level: "unknown",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: rowExcerpt,
+        source_id: `${actualSource.source_id}-missing`,
+      },
+    ];
+    output.facts = [
+      {
+        fact_type: "milestone",
+        extracted_text: `${spec.percent}%`,
+        original_value: `${spec.percent}%`,
+        confidence: 0.8,
+        source_id: actualSource.source_id,
+      },
+    ];
+  }
+  const cutOffSource = references.find(
+    (reference) =>
+      reference.source_location?.sheetName === WEEKLY &&
+      reference.source_location?.cellRangeStart === spec.cutOffCell,
+  );
+  if (cutOffSource) {
+    output.assurance_observations.milestones.push({
+      label: cutOffSource.text.split(":")[0],
+      raw_date: spec.cutOff,
+      date: spec.cutOff,
+      scope_level: "unknown",
+      scope_label: null,
+      period_label: null,
+      as_of_date: null,
+      excerpt: cutOffSource.text,
+      source_id: cutOffSource.source_id,
+    });
+  }
+  for (const [cell, text] of [
+    [spec.unresolvedCell, "Formula result"],
+    [`A${spec.unresolvedRow}`, "Next-week formula row"],
+  ]) {
+    const unresolved = references.find(
+      (reference) =>
+        reference.source_location?.sheetName === WEEKLY &&
+        reference.source_location?.cellRangeStart === cell,
+    );
+    if (unresolved) {
+      output.facts.push({
+        fact_type: "milestone",
+        extracted_text: text,
+        original_value: text,
+        confidence: 0.8,
+        source_id: unresolved.source_id,
+      });
+    }
+  }
+  return output;
+}
+
+function alarmFetchMock(spec) {
   return async (_url, init) => {
     const prompt = JSON.parse(init.body).messages[1].content;
     if (isExecutiveSummaryPrompt(prompt)) {
       const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
       return modelResponse(executiveSummaryOutput(input));
     }
-    const references = documentContextFromPrompt(prompt);
-    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
-    const output = baseGroupOutput(references);
-    const rowSource = references.find(
-      (reference) =>
-        reference.source_location?.sheetName === WEEKLY &&
-        reference.text.includes(`Week: ${spec.week}`) &&
-        reference.text.includes(spec.cutOff) &&
-        reference.text.includes(`Actual %: ${spec.percent}%`),
-    );
-    const actualSource = references.find(
-      (reference) =>
-        reference.source_location?.sheetName === WEEKLY &&
-        reference.source_location?.cellRangeStart === spec.actualCell,
-    );
-    if (rowSource && actualSource) {
-      // A slice of the text the model was shown, spanning several cells.
-      const varianceIndex = rowSource.text.indexOf(" | Variance");
-      const rowExcerpt = varianceIndex > 0 ? rowSource.text.slice(0, varianceIndex) : rowSource.text;
-      output.assurance_observations.progress = [
-        // One cell states the percentage, so the value is accepted with its exact
-        // location and no date (the cell itself states none).
-        {
-          raw_value: `${spec.percent}%`,
-          percent: spec.percent,
-          scope_level: "unknown",
-          scope_label: null,
-          period_label: null,
-          as_of_date: null,
-          excerpt: actualSource.text,
-          source_id: actualSource.source_id,
-        },
-        // The cited row spans columns, so a date inside it cannot be attributed
-        // to the value's column; the row's own cut-off stays a gap here.
-        {
-          raw_value: `${spec.percent}%`,
-          percent: spec.percent,
-          scope_level: "unknown",
-          scope_label: null,
-          period_label: spec.week,
-          as_of_date: spec.cutOff,
-          excerpt: rowExcerpt,
-          source_id: rowSource.source_id,
-        },
-        // A work-package scope from another sheet is not present in this source.
-        {
-          raw_value: `${spec.percent}%`,
-          percent: spec.percent,
-          scope_level: "wbs",
-          scope_label: "Alarm Kebencanaan",
-          period_label: null,
-          as_of_date: null,
-          excerpt: actualSource.text,
-          source_id: actualSource.source_id,
-        },
-        // A fabricated source ID never resolves.
-        {
-          raw_value: `${spec.percent}%`,
-          percent: spec.percent,
-          scope_level: "unknown",
-          scope_label: null,
-          period_label: null,
-          as_of_date: null,
-          excerpt: actualSource.text,
-          source_id: `${actualSource.source_id}-missing`,
-        },
-      ];
-      output.facts = [
-        {
-          fact_type: "milestone",
-          extracted_text: `${spec.percent}%`,
-          original_value: `${spec.percent}%`,
-          confidence: 0.8,
-          source_id: actualSource.source_id,
-        },
-      ];
-    }
-    // The cut-off cell alone carries the date, so its column is provable.
-    const cutOffSource = references.find(
-      (reference) =>
-        reference.source_location?.sheetName === WEEKLY &&
-        reference.source_location?.cellRangeStart === spec.cutOffCell,
-    );
-    if (cutOffSource) {
-      output.assurance_observations.milestones.push({
-        label: cutOffSource.text.split(":")[0],
-        raw_date: spec.cutOff,
-        date: spec.cutOff,
-        scope_level: "unknown",
-        scope_label: null,
-        period_label: null,
-        as_of_date: null,
-        excerpt: cutOffSource.text,
-        source_id: cutOffSource.source_id,
-      });
-    }
-    const unresolved = references.find(
-      (reference) =>
-        reference.source_location?.sheetName === WEEKLY &&
-        reference.source_location?.cellRangeStart === spec.unresolvedCell,
-    );
-    if (unresolved) {
-      output.facts.push({
-        fact_type: "milestone",
-        extracted_text: "Formula result",
-        original_value: "Formula result",
-        confidence: 0.8,
-        source_id: unresolved.source_id,
-      });
-    }
-    const unresolvedRow = references.find(
-      (reference) =>
-        reference.source_location?.sheetName === WEEKLY &&
-        reference.source_location?.rowStart === spec.unresolvedRow &&
-        reference.source_location?.rowEnd === spec.unresolvedRow &&
-        reference.source_location?.cellRangeStart === `A${spec.unresolvedRow}`,
-    );
-    if (unresolvedRow) {
-      output.facts.push({
-        fact_type: "milestone",
-        extracted_text: "Next-week formula row",
-        original_value: "Next-week formula row",
-        confidence: 0.8,
-        source_id: unresolvedRow.source_id,
-      });
-    }
-    const riskReference = references.find(
-      (reference) =>
-        reference.source_location?.sheetName === "Issue Risk & Change" &&
-        reference.source_location?.cellRangeStart === "A4" &&
-        reference.text.includes("R-SB01-001"),
-    );
-    if (riskReference) {
-      output.assurance_observations.risk_snapshots.push({
-        risk_id: "R-SB01-001",
-        name: null,
-        description: null,
-        status: null,
-        rating_label: null,
-        rating_value: null,
-        scale_label: null,
-        owner: null,
-        mitigation: null,
-        mitigation_due_date: null,
-        raw_mitigation_due_date: null,
-        wbs: null,
-        period_label: null,
-        as_of_date: null,
-        raw_value: "R-SB01-001",
-        excerpt: "R-SB01-001",
-        source_id: riskReference.source_id,
-      });
-    }
-    return modelResponse(output);
+    return modelResponse(alarmGroupResponse(prompt, spec));
   };
 }
 
-test("the real W4/W5 workbooks replay parser to validated provenance from model-visible text", async () => {
+test("the real W4/W5 workbooks link a dated actual to its row, column, and subject", async () => {
   const outcomes = [];
   for (const spec of CASES) {
     const buffer = alarmBuffer(spec.session);
@@ -367,19 +319,27 @@ test("the real W4/W5 workbooks replay parser to validated provenance from model-
         );
       }
     }
+    // The workbook declares exactly one subject, and the Weekly Report sheet
+    // states it in its own title block.
+    assert.deepEqual(parsed.parserMetadata.subjects, [SUBJECT]);
+    assert.match(parsed.parserMetadata.sheetTitles[WEEKLY], new RegExp(SUBJECT, "i"));
 
-    const store = memoryGroupStore();
-    const mock = modelForCase(spec);
+    const mock = alarmFetchMock(spec);
     const jobResult = await withLocalOllama(mock, async () =>
-      await processDocumentJob(job(buffer), store),
+      await processDocumentJob(job(buffer), memoryGroupStore()),
     );
     assert.equal(jobResult.status, "completed", jobResult.processing_error);
     assert.equal(jobResult.processing_status, "needs_review");
-    assert.equal(jobResult.parser_version, "document-parser/10");
+    assert.equal(jobResult.parser_version, "document-parser/11");
     assert.match(jobResult.processing_error ?? "", /Formula results are unavailable/);
 
     const extraction = await withLocalOllama(mock, async () =>
-      await extractDocumentGroups(job(buffer), parsed.chunks, parsed.parserMetadata, store),
+      await extractDocumentGroups(
+        job(buffer),
+        parsed.chunks,
+        parsed.parserMetadata,
+        memoryGroupStore(),
+      ),
     );
     assert.equal(extraction.ok, true, extraction.ok ? undefined : extraction.errorMessage);
     outcomes.push({ spec, jobResult, extraction: extraction.extraction });
@@ -388,41 +348,29 @@ test("the real W4/W5 workbooks replay parser to validated provenance from model-
   for (const { spec, jobResult, extraction } of outcomes) {
     const warnings = extraction.quality_warnings.join(" ");
 
-    // The per-cell literal survives; a date claimed from the multi-cell row is
-    // not attributable and stays a gap.
+    // One dated actual survives, linked to the cited row.
     assert.equal(extraction.assurance_observations.progress.length, 1, warnings);
     const actual = extraction.assurance_observations.progress[0];
     assert.equal(actual.percent, spec.percent);
-    assert.equal(actual.as_of_date, null);
-    assert.equal(actual.period_label, null);
-    assert.equal(actual.scope_level, "unknown");
-    assert.equal(actual.scope_label, null);
+    assert.equal(actual.as_of_date, spec.cutOff);
+    assert.equal(actual.period_label, spec.week);
+    assert.equal(actual.scope_level, "wbs");
+    assert.equal(actual.scope_label, SUBJECT);
     assert.equal(actual.source_location.sheetName, WEEKLY);
-    assert.equal(actual.source_location.cellRangeStart, spec.actualCell);
-    assert.equal(actual.source_location.cellRangeEnd, spec.actualCell);
     assert.equal(actual.source_location.rowStart, spec.actualRow);
+    assert.equal(actual.source_location.rowEnd, spec.actualRow);
+    assert.equal(actual.source_location.cellRangeStart, `A${spec.actualRow}`);
     assert.ok(actual.excerpt.includes(`${spec.percent}%`));
+    assert.ok(actual.excerpt.includes(spec.cutOff));
+    assert.ok(jobResult.chunks[actual.evidence_chunk_index].chunk_text.includes(actual.excerpt));
+
+    // The due date and the unknown scope are excluded with a precise reason.
     assert.match(
       warnings,
-      /progress\[\d+\]\.as_of_date spans more than one cell, so its date cannot be attributed to a column/,
+      /\.as_of_date is \d{4}-\d{2}-\d{2}, but the cited row's "[^"]*" column states \d{4}-\d{2}-\d{2}/,
     );
     assert.match(warnings, /scope_label is not present in the cited excerpt/);
     assert.match(warnings, /source_id must reference a supplied source/);
-
-    // The cut-off is only accepted from the single cell that states it, so the
-    // dated observation keeps a provable column.
-    assert.equal(extraction.assurance_observations.milestones.length, 1, warnings);
-    const cutOff = extraction.assurance_observations.milestones[0];
-    assert.equal(cutOff.date, spec.cutOff);
-    assert.equal(cutOff.as_of_date, null);
-    assert.equal(cutOff.source_location.sheetName, WEEKLY);
-    assert.equal(cutOff.source_location.cellRangeStart, spec.cutOffCell);
-    assert.equal(cutOff.source_location.cellRangeEnd, spec.cutOffCell);
-
-    // The cited excerpt is stored verbatim inside the persisted chunk text, and
-    // the observation carries the parser-authored locator of its source.
-    const chunk = jobResult.chunks[actual.evidence_chunk_index];
-    assert.ok(chunk.chunk_text.includes(actual.excerpt));
 
     // The literal per-cell fact keeps its exact cell locator; the unresolved
     // formula citations never become evidence and no zero is invented.
@@ -433,6 +381,12 @@ test("the real W4/W5 workbooks replay parser to validated provenance from model-
     assert.match(extraction.facts[0].excerpt, /\[raw value: 0\.\d+; number format: 0%\]/);
     assert.match(warnings, /formula_result_unavailable/);
     assert.equal(extraction.assurance_observations.progress.some((item) => item.percent === 0), false);
+
+    // The single cut-off cell keeps its own dated observation.
+    assert.equal(extraction.assurance_observations.milestones.length, 1, warnings);
+    const cutOff = extraction.assurance_observations.milestones[0];
+    assert.equal(cutOff.date, spec.cutOff);
+    assert.equal(cutOff.source_location.cellRangeStart, spec.cutOffCell);
 
     // An unresolved formula still keeps every evidence domain open.
     assert.deepEqual(
@@ -458,51 +412,106 @@ test("the real W4/W5 workbooks replay parser to validated provenance from model-
 
   const [w4, w5] = outcomes;
   // Same filename, different content: distinct source versions, no cross-session mix.
-  assert.notEqual(
-    w4.jobResult.source_content_hash,
-    w5.jobResult.source_content_hash,
-  );
+  assert.notEqual(w4.jobResult.source_content_hash, w5.jobResult.source_content_hash);
   assert.equal(w4.jobResult.parser_version, w5.jobResult.parser_version);
-  assert.equal(w4.extraction.assurance_observations.risk_snapshots.length, 0);
-  assert.ok(
-    w5.extraction.assurance_observations.risk_snapshots.some(
-      (risk) => risk.risk_id === "R-SB01-001",
-    ),
-  );
+  assert.notEqual(w4.extraction.assurance_observations.progress[0].as_of_date, w5.extraction.assurance_observations.progress[0].as_of_date);
 });
 
-test("a same-row due date is not accepted as the record date", async () => {
-  const rowText = "Cut-off Date: 2026-10-16 | Actual %: 20.4% | Due Date: 2026-10-23";
-  const location = {
-    kind: "xlsx",
+test("row metadata separates the record date, an unrelated due date, and a duplicate column", async () => {
+  const cell = (sheetRow, column, label, value, rawValue, dateIso) => ({
     sheetName: WEEKLY,
-    tableNumber: 0,
-    rowStart: 8,
-    rowEnd: 8,
-    cellRangeStart: "A8",
-    cellRangeEnd: "C8",
-  };
-  const cell = (sourceId, column, text) => ({
-    sourceId,
-    chunkIndex: 0,
-    text,
-    modelText: text,
-    sourceLocation: { ...location, cellRangeStart: `${column}8`, cellRangeEnd: `${column}8` },
+    row: sheetRow,
+    column,
+    cell: `${column}${sheetRow}`,
+    label,
+    value,
+    rawValue,
+    dateIso,
   });
-  const chunks = [
+  const rows = [
     {
-      chunkIndex: 0,
-      chunkText: rowText,
-      sectionLabel: WEEKLY,
-      sourceLocation: location,
-      sourceReferences: [
-        { sourceId: "c0s0", chunkIndex: 0, text: rowText, modelText: rowText, sourceLocation: location },
-        cell("c0s1", "A", "Cut-off Date: 2026-10-16"),
-        cell("c0s2", "B", "Actual %: 20.4%"),
-        cell("c0s3", "C", "Due Date: 2026-10-23"),
+      sourceId: "row-8",
+      text: "Cut-off Date: 2026-10-16 | Actual %: 20.4% | Due Date: 2026-10-23",
+      row: 8,
+      cells: [
+        cell(8, "A", "Cut-off Date", "2026-10-16", "46311", "2026-10-16"),
+        cell(8, "B", "Actual %", "20.4%", "0.204", null),
+        cell(8, "C", "Due Date", "2026-10-23", "46318", "2026-10-23"),
+      ],
+    },
+    {
+      sourceId: "row-9",
+      text: "Due Date: 2026-10-30 | Actual %: 25%",
+      row: 9,
+      cells: [
+        cell(9, "A", "Due Date", "2026-10-30", "46325", "2026-10-30"),
+        cell(9, "B", "Actual %", "25%", "0.25", null),
+      ],
+    },
+    {
+      sourceId: "row-10",
+      text: "Report Date: 2026-10-31 | Cut-off Date: 2026-10-30 | Actual %: 30%",
+      row: 10,
+      cells: [
+        cell(10, "A", "Report Date", "2026-10-31", "46326", "2026-10-31"),
+        cell(10, "B", "Cut-off Date", "2026-10-30", "46325", "2026-10-30"),
+        cell(10, "C", "Actual %", "30%", "0.3", null),
       ],
     },
   ];
+  const chunks = [
+    {
+      chunkIndex: 0,
+      chunkText: rows.map((row) => row.text).join("\n"),
+      sectionLabel: WEEKLY,
+      sourceReferences: [
+        ...rows.map((row) => ({
+          sourceId: row.sourceId,
+          chunkIndex: 0,
+          text: row.text,
+          modelText: row.text,
+          sourceLocation: {
+            kind: "xlsx",
+            sheetName: WEEKLY,
+            tableNumber: 0,
+            rowStart: row.row,
+            rowEnd: row.row,
+            cellRangeStart: `A${row.row}`,
+            cellRangeEnd: `${row.cells[row.cells.length - 1].column}${row.row}`,
+          },
+          rowCells: row.cells,
+        })),
+        // One cell whose own label is a due date.
+        {
+          sourceId: "cell-due",
+          chunkIndex: 0,
+          text: "Due Date: 2026-10-30",
+          modelText: "Due Date: 2026-10-30",
+          sourceLocation: {
+            kind: "xlsx",
+            sheetName: WEEKLY,
+            tableNumber: 0,
+            rowStart: 9,
+            rowEnd: 9,
+            cellRangeStart: "A9",
+            cellRangeEnd: "A9",
+          },
+          cell: cell(9, "A", "Due Date", "2026-10-30", "46325", "2026-10-30"),
+        },
+      ],
+    },
+  ];
+  const progress = (rawValue, percent, asOfDate, sourceId) => ({
+    raw_value: rawValue,
+    percent,
+    scope_level: "unknown",
+    scope_label: null,
+    period_label: null,
+    as_of_date: asOfDate,
+    excerpt: rows.find((row) => row.sourceId === sourceId).text,
+    source_id: sourceId,
+  });
+
   await withLocalOllama(async (_url, init) => {
     const prompt = JSON.parse(init.body).messages[1].content;
     if (isExecutiveSummaryPrompt(prompt)) {
@@ -513,68 +522,60 @@ test("a same-row due date is not accepted as the record date", async () => {
     if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
     const output = baseGroupOutput(references);
     output.assurance_observations.progress = [
-      // The due date is verbatim in the cited excerpt, but the citation spans the
-      // whole row, so the date cannot be attributed to the percentage's column.
-      {
-        raw_value: "20.4%",
-        percent: 20.4,
-        scope_level: "unknown",
-        scope_label: null,
-        period_label: null,
-        as_of_date: "2026-10-23",
-        excerpt: rowText,
-        source_id: "c0s0",
-      },
-      // The one cell that states the percentage states no date.
-      {
-        raw_value: "20.4%",
-        percent: 20.4,
-        scope_level: "unknown",
-        scope_label: null,
-        period_label: null,
-        as_of_date: null,
-        excerpt: "Actual %: 20.4%",
-        source_id: "c0s2",
-      },
+      // A due date claimed where the row states a cut-off column.
+      progress("20.4%", 20.4, "2026-10-23", "row-8"),
+      // A row whose only date column is a due date.
+      progress("25%", 25, "2026-10-30", "row-9"),
+      // Two candidate record-date columns.
+      progress("30%", 30, "2026-10-31", "row-10"),
+      // The row's own cut-off column, which the structure proves.
+      progress("20.4%", 20.4, "2026-10-16", "row-8"),
     ];
     output.assurance_observations.milestones = [
-      // A single cell states the date and its own label, so that column is proved.
+      // Even a single cited cell cannot present a due date as a record date.
       {
-        label: "Cut-off Date",
-        raw_date: "2026-10-16",
-        date: "2026-10-16",
+        label: "Due Date",
+        raw_date: "2026-10-30",
+        date: "2026-10-30",
         scope_level: "unknown",
         scope_label: null,
         period_label: null,
         as_of_date: null,
-        excerpt: "Cut-off Date: 2026-10-16",
-        source_id: "c0s1",
+        excerpt: "Due Date: 2026-10-30",
+        source_id: "cell-due",
       },
     ];
     return modelResponse(output);
   }, async () => {
     const result = await extractDocumentGroups(
-      job(rowText, { fileName: "weekly.txt" }),
+      job("weekly.txt"),
       chunks,
-      { parserVersion: "document-parser/10" },
+      { parserVersion: "document-parser/11" },
       memoryGroupStore(),
     );
     assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
-    const progress = result.extraction.assurance_observations.progress;
-    assert.equal(progress.length, 1);
-    assert.equal(progress[0].as_of_date, null);
-    assert.equal(progress[0].source_location.cellRangeStart, "B8");
+    const accepted = result.extraction.assurance_observations.progress;
+    assert.equal(accepted.length, 1);
+    assert.equal(accepted[0].as_of_date, "2026-10-16");
+    assert.equal(accepted[0].source_location.rowStart, 8);
+    assert.equal(result.extraction.assurance_observations.milestones.length, 0);
     const warnings = result.extraction.quality_warnings.join(" ");
     assert.match(
       warnings,
-      /progress\[0\]\.as_of_date spans more than one cell, so its date cannot be attributed to a column/,
+      /progress\[0\]\.as_of_date is 2026-10-23, but the cited row's "Cut-off Date" column states 2026-10-16/,
     );
-    assert.doesNotMatch(warnings, /2026-10-23/);
-    const milestones = result.extraction.assurance_observations.milestones;
-    assert.equal(milestones.length, 1);
-    assert.equal(milestones[0].date, "2026-10-16");
-    assert.equal(milestones[0].source_location.cellRangeStart, "A8");
-    assert.equal(milestones[0].source_location.cellRangeEnd, "A8");
+    assert.match(
+      warnings,
+      /progress\[1\]\.as_of_date is the value of the cited row's "Due Date" column, not a cut-off or period date/,
+    );
+    assert.match(
+      warnings,
+      /progress\[2\]\.as_of_date is ambiguous: the cited row has more than one cut-off or period date column \(Report Date, Cut-off Date\)/,
+    );
+    assert.match(
+      warnings,
+      /milestones\[0\]\.date is the value of the cited source's "Due Date" column, not a cut-off or period date/,
+    );
   });
 });
 
@@ -646,7 +647,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
       ),
     );
 
-  const cold = await runOnce("document-parser/10");
+  const cold = await runOnce("document-parser/11");
   assert.equal(cold.ok, true, cold.ok ? undefined : cold.errorMessage);
   assert.equal(calls, 1);
   assert.equal(cold.extraction.assurance_observations.progress[0].percent, 42);
@@ -658,8 +659,8 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // Every completed row records the parser and validation versions that produced
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
-  assert.equal(cached.parserVersion, "document-parser/10");
-  assert.equal(cached.schemaVersion, "phase6-document-extraction/17");
+  assert.equal(cached.parserVersion, "document-parser/11");
+  assert.equal(cached.schemaVersion, "phase6-document-extraction/18");
 
   // A cache hit re-derives the location from the live chunk instead of trusting
   // a stored payload that dropped it.
@@ -667,7 +668,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   delete withoutLocation.assurance_observations.progress[0].source_location;
   store.rows.set(cached.groupKey, { ...cached, result: withoutLocation });
   calls = 0;
-  const warm = await runOnce("document-parser/10");
+  const warm = await runOnce("document-parser/11");
   assert.equal(warm.ok, true, warm.ok ? undefined : warm.errorMessage);
   assert.equal(calls, 0, "the completed group is reused without a model call");
   assert.deepEqual(
@@ -675,11 +676,11 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
     location,
   );
 
-  // A row written by the previous parser version produces a different group key,
-  // so the stale payload is neither selected nor trusted.
+  // A row written by an older parser version produces a different group key, so
+  // the stale payload is neither selected nor trusted.
   calls = 0;
   marker = "Progress: 42%";
-  const stale = await runOnce("document-parser/9");
+  const stale = await runOnce("document-parser/10");
   assert.equal(stale.ok, true, stale.ok ? undefined : stale.errorMessage);
   assert.equal(calls, 1, "the stale cached group is re-extracted");
   assert.equal(stale.extraction.facts[0].extracted_text, "Progress: 42%");
