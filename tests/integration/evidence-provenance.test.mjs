@@ -582,7 +582,8 @@ test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived 
         (reference) =>
           reference.sourceLocation?.sheetName === sheetName &&
           reference.sourceLocation?.cellRangeStart === cell &&
-          reference.sourceLocation?.cellRangeEnd === cell,
+          reference.sourceLocation?.cellRangeEnd === cell &&
+          reference.cell?.cell === cell,
       );
     const keySource = sourceAtCell(subjectFixture.sheetName, subjectFixture.keyCell);
     const valueSource = sourceAtCell(subjectFixture.sheetName, subjectFixture.valueCell);
