@@ -11,12 +11,12 @@ create or replace function public.assurance_observation_fingerprint(
   p_observation jsonb, p_chunk_index integer, p_excerpt text, p_source_location jsonb
 )
 returns text language sql immutable as $$
-  select encode(extensions.digest(convert_to(jsonb_build_object(
+  select encode(sha256(convert_to(jsonb_build_object(
     'observation', p_observation,
     'evidence_chunk_index', p_chunk_index,
     'excerpt', p_excerpt,
     'source_location', p_source_location
-  )::text, 'UTF8'), 'sha256'), 'hex');
+  )::text, 'UTF8')), 'hex');
 $$;
 
 create or replace function public.assurance_cost_observation_fingerprint(
@@ -24,13 +24,13 @@ create or replace function public.assurance_cost_observation_fingerprint(
   p_scope_level text, p_scope_label text, p_chunk_index integer, p_excerpt text, p_source_location jsonb
 )
 returns text language sql immutable as $$
-  select encode(extensions.digest(convert_to(jsonb_build_object(
+  select encode(sha256(convert_to(jsonb_build_object(
     'measure', p_measure, 'source_value', p_source_value,
     'normalized_amount', p_normalized_amount, 'currency', p_currency,
     'scope_level', p_scope_level, 'scope_label', p_scope_label,
     'evidence_chunk_index', p_chunk_index, 'excerpt', p_excerpt,
     'source_location', p_source_location
-  )::text, 'UTF8'), 'sha256'), 'hex');
+  )::text, 'UTF8')), 'hex');
 $$;
 
 alter table public.cost_observations
@@ -43,18 +43,6 @@ alter table public.assurance_observations
   generated always as
     (public.assurance_observation_fingerprint(observation, evidence_chunk_index, excerpt, source_location)) stored;
 
-alter table public.assurance_observation_decisions
-  add column if not exists target_type text not null default 'assurance';
-do $$
-begin
-  if not exists (
-    select 1 from pg_constraint where conname = 'assurance_observation_decisions_decision_check'
-      and conrelid = 'public.assurance_observation_decisions'::regclass
-  ) then
-    alter table public.assurance_observation_decisions
-      drop constraint if exists assurance_observation_decisions_decision_check;
-  end if;
-end $$;
 create table if not exists public.assurance_observation_decisions (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null references public.projects(id) on delete cascade,
@@ -71,7 +59,11 @@ create table if not exists public.assurance_observation_decisions (
   decided_at timestamptz not null default clock_timestamp(),
   unique (document_id, source_content_hash, parser_version, contract_version, target_type, observation_fingerprint)
 );
--- Widen the unique key on tables created by earlier drafts of this migration.
+-- Upgrade a table created by an earlier draft of this migration: add the
+-- discriminator column and widen its unique key. Guards keep this a no-op on
+-- fresh installs, where the create above already produced the final shape.
+alter table public.assurance_observation_decisions
+  add column if not exists target_type text not null default 'assurance';
 do $$
 begin
   if not exists (
