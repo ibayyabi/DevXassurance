@@ -165,7 +165,30 @@ export type ObservationReviewRow = {
   sourceLocation: Record<string, string | number> | null;
 };
 
+export type CostObservationReviewRow = {
+  id: string;
+  documentId: string;
+  measure: string;
+  sourceValue: string;
+  normalizedAmount: number | string | null;
+  currency: string | null;
+  scopeLevel: string;
+  scopeLabel: string | null;
+  scopeProvenance: {
+    kind: string;
+    sourceId: string;
+    sheetName: string;
+    cellReference: string;
+    excerpt: string;
+  }[] | null;
+  excerpt: string;
+  pageNumber: number | null;
+  sectionLabel: string | null;
+  observationFingerprint: string;
+};
+
 export type ObservationReviewDecisionRow = {
+  targetType: "assurance" | "cost";
   observationFingerprint: string;
   decision: "accepted" | "corrected" | "rejected";
   correctedObservation: Record<string, unknown> | null;
@@ -195,6 +218,7 @@ export type ObservationReviewDocument = {
 export type AssuranceObservationReview = {
   documents: ObservationReviewDocument[];
   observations: ObservationReviewRow[];
+  costObservations: CostObservationReviewRow[];
   decisions: ObservationReviewDecisionRow[];
 };
 
@@ -213,7 +237,7 @@ export async function getAssuranceObservationReview(
 ): Promise<AssuranceObservationReview> {
   const { supabase } = await requireProjectMembership(projectId);
 
-  const [linksResult, reviewResult] = await Promise.all([
+  const [linksResult, reviewResult, documentsResult] = await Promise.all([
     supabase
       .from("assurance_review_documents")
       .select("document_id, evidence_role")
@@ -225,28 +249,43 @@ export async function getAssuranceObservationReview(
       .eq("id", reviewId)
       .eq("project_id", projectId)
       .maybeSingle(),
-  ]);
-  if (linksResult.error) throw new Error(linksResult.error.message);
-  if (reviewResult.error) throw new Error(reviewResult.error.message);
-  if (!reviewResult.data) throw new Error("Assurance review was not found in this project.");
-
-  const links = (linksResult.data ?? []) as {
-    document_id: string;
-    evidence_role: "baseline" | "current";
-  }[];
-  const documentIds = [...new Set(links.map((link) => link.document_id))];
-  if (documentIds.length === 0) {
-    return { documents: [], observations: [], decisions: [] };
-  }
-
-  const [documentsResult, observationsResult, coverageResult, decisionsResult] = await Promise.all([
+    // Reviewable evidence is every project document whose processing allows
+    // review, independent of review linkage: a PMO with one needs-review file
+    // and no approved baseline can still inspect and decide its observations.
     supabase
       .from("documents")
       .select(
         "id, title, processing_status, processing_error, content_hash, assurance_observation_parser_version, assurance_observation_contract_version",
       )
       .eq("project_id", projectId)
-      .in("id", documentIds),
+      .in("processing_status", ["completed", "needs_review"]),
+  ]);
+  if (linksResult.error) throw new Error(linksResult.error.message);
+  if (reviewResult.error) throw new Error(reviewResult.error.message);
+  if (documentsResult.error) throw new Error(documentsResult.error.message);
+  if (!reviewResult.data) throw new Error("Assurance review was not found in this project.");
+
+  const links = (linksResult.data ?? []) as {
+    document_id: string;
+    evidence_role: "baseline" | "current";
+  }[];
+  type DocumentVersionRow = {
+    id: string;
+    title: string;
+    processing_status: string;
+    processing_error: string | null;
+    content_hash: string | null;
+    assurance_observation_parser_version: string | null;
+    assurance_observation_contract_version: string | null;
+  };
+  const documentRows = (documentsResult.data ?? []) as DocumentVersionRow[];
+  const roleByDocument = new Map(links.map((link) => [link.document_id, link.evidence_role]));
+  const documentIds = documentRows.map((row) => row.id);
+  if (documentIds.length === 0) {
+    return { documents: [], observations: [], costObservations: [], decisions: [] };
+  }
+
+  const [observationsResult, costResult, coverageResult, decisionsResult] = await Promise.all([
     supabase
       .from("assurance_observations")
       .select(
@@ -259,6 +298,16 @@ export async function getAssuranceObservationReview(
       .order("evidence_chunk_index")
       .order("id"),
     supabase
+      .from("cost_observations")
+      .select(
+        "id, document_id, source_content_hash, parser_version, contract_version, measure, source_value, normalized_amount, currency, scope_level, scope_label, scope_provenance, evidence_chunk_index, excerpt, page_number, section_label, observation_fingerprint",
+      )
+      .eq("project_id", projectId)
+      .in("document_id", documentIds)
+      .order("measure")
+      .order("evidence_chunk_index")
+      .order("id"),
+    supabase
       .from("assurance_observation_coverage")
       .select(
         "document_id, source_content_hash, parser_version, contract_version, domain, state, total_groups, processed_groups, reason",
@@ -268,27 +317,17 @@ export async function getAssuranceObservationReview(
     supabase
       .from("assurance_observation_decisions")
       .select(
-        "document_id, source_content_hash, parser_version, contract_version, observation_fingerprint, decision, corrected_observation, reason, decided_by, decided_at",
+        "target_type, document_id, source_content_hash, parser_version, contract_version, observation_fingerprint, decision, corrected_observation, reason, decided_by, decided_at",
       )
       .eq("project_id", projectId)
       .in("document_id", documentIds)
       .order("decided_at"),
   ]);
-  if (documentsResult.error) throw new Error(documentsResult.error.message);
   if (observationsResult.error) throw new Error(observationsResult.error.message);
+  if (costResult.error) throw new Error(costResult.error.message);
   if (coverageResult.error) throw new Error(coverageResult.error.message);
   if (decisionsResult.error) throw new Error(decisionsResult.error.message);
 
-  type DocumentVersionRow = {
-    id: string;
-    title: string;
-    processing_status: string;
-    processing_error: string | null;
-    content_hash: string | null;
-    assurance_observation_parser_version: string | null;
-    assurance_observation_contract_version: string | null;
-  };
-  const documentRows = (documentsResult.data ?? []) as DocumentVersionRow[];
   const versionKey = (row: {
     content_hash: string | null;
     assurance_observation_parser_version: string | null;
@@ -300,13 +339,13 @@ export async function getAssuranceObservationReview(
       row.assurance_observation_contract_version,
     ]);
   const currentVersion = new Map(documentRows.map((row) => [row.id, versionKey(row)]));
-  const roleByDocument = new Map(links.map((link) => [link.document_id, link.evidence_role]));
 
   const documents: ObservationReviewDocument[] = documentRows
-    .filter((row) => roleByDocument.has(row.id))
     .map((row) => ({
       documentId: row.id,
       title: row.title,
+      // Display-only default for not-yet-linked documents; nothing is saved or
+      // promoted by viewing it.
       role: roleByDocument.get(row.id) ?? "current",
       processingStatus: row.processing_status,
       processingError: row.processing_error,
@@ -380,8 +419,59 @@ export async function getAssuranceObservationReview(
       sourceLocation: sourceLocationRecord(row.source_location),
     }));
 
+  const costObservations: CostObservationReviewRow[] = ((costResult.data ?? []) as {
+    id: string;
+    document_id: string;
+    source_content_hash: string;
+    parser_version: string;
+    contract_version: string;
+    measure: string;
+    source_value: string;
+    normalized_amount: number | string | null;
+    currency: string | null;
+    scope_level: string;
+    scope_label: string | null;
+    scope_provenance: {
+      kind: string;
+      source_id: string;
+      sheet_name: string;
+      cell_reference: string;
+      excerpt: string;
+    }[] | null;
+    excerpt: string;
+    page_number: number | null;
+    section_label: string | null;
+    observation_fingerprint: string;
+  }[])
+    .filter((row) =>
+      currentVersion.get(row.document_id) ===
+        JSON.stringify([row.source_content_hash, row.parser_version, row.contract_version]))
+    .map((row) => ({
+      id: row.id,
+      documentId: row.document_id,
+      measure: row.measure,
+      sourceValue: row.source_value,
+      normalizedAmount: row.normalized_amount,
+      currency: row.currency,
+      scopeLevel: row.scope_level,
+      scopeLabel: row.scope_label,
+      scopeProvenance: row.scope_provenance?.map((item) => ({
+        kind: item.kind,
+        sourceId: item.source_id,
+        sheetName: item.sheet_name,
+        cellReference: item.cell_reference,
+        excerpt: item.excerpt,
+      })) ?? null,
+      excerpt: row.excerpt,
+      pageNumber: row.page_number,
+      sectionLabel: row.section_label,
+      observationFingerprint: row.observation_fingerprint,
+    }));
+
   const observationFingerprints = new Set(observations.map((row) => row.observationFingerprint));
+  const costFingerprints = new Set(costObservations.map((row) => row.observationFingerprint));
   const decisions: ObservationReviewDecisionRow[] = ((decisionsResult.data ?? []) as {
+    target_type: "assurance" | "cost";
     document_id: string;
     source_content_hash: string;
     parser_version: string;
@@ -396,8 +486,11 @@ export async function getAssuranceObservationReview(
     .filter((row) =>
       currentVersion.get(row.document_id) ===
         JSON.stringify([row.source_content_hash, row.parser_version, row.contract_version]) &&
-      observationFingerprints.has(row.observation_fingerprint))
+      (row.target_type === "assurance"
+        ? observationFingerprints.has(row.observation_fingerprint)
+        : costFingerprints.has(row.observation_fingerprint)))
     .map((row) => ({
+      targetType: row.target_type,
       observationFingerprint: row.observation_fingerprint,
       decision: row.decision,
       correctedObservation: row.corrected_observation,
@@ -406,7 +499,7 @@ export async function getAssuranceObservationReview(
       decidedAt: row.decided_at,
     }));
 
-  return { documents, observations, decisions };
+  return { documents, observations, costObservations, decisions };
 }
 
 function sourceLocationRecord(value: Record<string, unknown> | null): Record<string, string | number> | null {

@@ -6,7 +6,7 @@
 --   psql -v ON_ERROR_STOP=1 -f supabase/tests/partial_evidence_review.test.sql
 
 begin;
-select extensions.plan(29);
+select extensions.plan(41);
 
 insert into auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, created_at, updated_at)
 values
@@ -133,7 +133,7 @@ select set_config('request.jwt.claims', '', true);
 -- ---------------------------------------------------------------------------
 select set_config('request.jwt.claims', '{"sub":"50000000-0000-4000-8000-000000000001","role":"authenticated"}', true);
 select throws_ok(
-  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000004'', ''50000000-0000-4000-8000-000000000011''::uuid, repeat(''d'', 64), ''accepted'', ''cross-project attempt'', null)'),
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000004'', ''assurance'', ''50000000-0000-4000-8000-000000000011''::uuid, repeat(''d'', 64), ''accepted'', ''cross-project attempt'', null::jsonb)'),
   'P0001',
   'Observation is not current evidence in this project.',
   'an observation of another project cannot be decided through a project the reviewer belongs to'
@@ -143,25 +143,25 @@ select throws_ok(
 -- Decision validation and staleness
 -- ---------------------------------------------------------------------------
 select throws_ok(
-  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), repeat(''0'', 64), ''accepted'', ''ok'', null)'),
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''assurance'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), repeat(''0'', 64), ''accepted'', ''ok'', null::jsonb)'),
   'P0001',
   'The observation changed since it was displayed. Refresh and review the current version.',
   'a stale displayed fingerprint is rejected'
 );
 select throws_ok(
-  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), ''corrected'', ''no value'', null::numeric)'),
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''assurance'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), ''corrected'', ''no value'', null::jsonb)'),
   'P0001',
-  'A corrected progress percentage between 0 and 100 is required.',
+  'A corrected decision requires a corrected value object.',
   'a correction without a value is rejected'
 );
 select throws_ok(
-  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), ''corrected'', ''too high'', 140::numeric)'),
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''assurance'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), ''corrected'', ''too high'', ''{"percent":140}'::jsonb)'),
   'P0001',
   'A corrected progress percentage between 0 and 100 is required.',
   'a correction above 100 is rejected'
 );
 select throws_ok(
-  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), ''corrected'', ''not progress'', 30::numeric)'),
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''assurance'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), ''corrected'', ''not progress'', ''{"date":"2026-06-30"}'::jsonb)'),
   'P0001',
   'Only progress observations support a corrected value here.',
   'a milestone cannot be value-corrected'
@@ -169,7 +169,7 @@ select throws_ok(
 
 select set_config('request.jwt.claims', '{"sub":"50000000-0000-4000-8000-000000000006","role":"authenticated"}', true);
 select throws_ok(
-  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), ''accepted'', ''sponsor attempt'', null)'),
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''assurance'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), ''accepted'', ''sponsor attempt'', null::jsonb)'),
   'P0001',
   'Your project role cannot review assurance evidence.',
   'sponsor cannot review observations'
@@ -178,7 +178,7 @@ select throws_ok(
 -- The pmo_reviewer decides with the fingerprint the UI displays.
 select set_config('request.jwt.claims', '{"sub":"50000000-0000-4000-8000-000000000001","role":"authenticated"}', true);
 select lives_ok(
-  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), ''accepted'', ''Nilai 12,5 persen terbaca jelas dari sel D7.'', null)'),
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''assurance'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), ''accepted'', ''Nilai 12,5 persen terbaca jelas dari sel D7.'', null::jsonb)'),
   'pmo_reviewer accepts a supported observation with its displayed fingerprint'
 );
 
@@ -196,7 +196,7 @@ select is(
 -- Correction replaces the decision; rejection of the milestone observation
 -- ---------------------------------------------------------------------------
 select lives_ok(
-  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), ''corrected'', ''Sel D7 terbaca 13,5 setelah konfirmasi lapangan.'', 13.5::numeric)'),
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''assurance'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), ''corrected'', ''Sel D7 terbaca 13,5 setelah konfirmasi lapangan.'', ''{"percent":13.5}'::jsonb)'),
   're-deciding the same observation replaces the decision with a correction'
 );
 select is(
@@ -216,7 +216,7 @@ select is(
   '12.5', 'correction never rewrites the stored observation'
 );
 select lives_ok(
-  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), ''rejected'', ''Tanggal tidak didukung konteks baris.'', null)'),
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''assurance'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), ''rejected'', ''Tanggal tidak didukung konteks baris.'', null::jsonb)'),
   'reviewer rejects an unsupported milestone observation'
 );
 
@@ -229,7 +229,7 @@ select is(pg_temp.review_fingerprint(), pg_temp.review_fingerprint(),
 select ok(pg_temp.review_fingerprint() is not null, 'the review fingerprint is computable');
 
 select lives_ok(
-  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), ''rejected'', ''Koreksi ditarik; nilai tidak didukung.'', null)'),
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''assurance'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), ''rejected'', ''Koreksi ditarik; nilai tidak didukung.'', null::jsonb)'),
   'a decision can be changed later with a new reason'
 );
 select is(pg_temp.decision_count()::int, 2, 'one decision per observation after re-decision');
@@ -280,6 +280,85 @@ select throws_ok(
   'P0001',
   'A needs-review document is selectable only with observation coverage for its current source version.',
   'stale needs_review document loses its selectability'
+);
+
+-- ---------------------------------------------------------------------------
+-- All-domain corrections: milestone date, risk fields, cost observations
+-- ---------------------------------------------------------------------------
+select lives_ok(
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''assurance'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), ''corrected'', ''Tanggal kontrak direvisi ke 15 Juli.'', ''{"date":"2026-07-15"}'::jsonb)'),
+  'a milestone date correction is accepted'
+);
+select is(
+  (select corrected_observation->>'date' from public.assurance_observation_decisions d
+    where d.target_type = 'assurance'
+      and d.observation_fingerprint = (select observation_fingerprint from public.assurance_observations where project_id = '50000000-0000-4000-8000-000000000003' and observation_type = 'milestone' limit 1)),
+  '2026-07-15', 'the milestone correction stores its corrected date'
+);
+select throws_ok(
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''assurance'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), ''corrected'', ''bukan progres'', ''{"percent":50}'::jsonb)'),
+  'P0001',
+  'A milestone correction requires a date value.',
+  'a milestone correction cannot carry a percent field'
+);
+select throws_ok(
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''assurance'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and observation_type = ''milestone'' limit 1), ''corrected'', ''tanggal buruk'', ''{"date":"Juli"}'::jsonb)'),
+  'P0001',
+  'A corrected milestone date must be a valid YYYY-MM-DD date.',
+  'a malformed correction date is rejected'
+);
+select throws_ok(
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''assurance'', (select id from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), (select observation_fingerprint from public.assurance_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and domain = ''progress'' limit 1), ''corrected'', 'bidang asing'', ''{"owner":"seseorang"}'::jsonb)'),
+  'P0001',
+  'Correction supports only progress percent, milestone date, risk status, and risk rating fields.',
+  'an unknown correction field is rejected'
+);
+
+-- Cost observation decision: insert one current-version cost observation.
+insert into public.cost_observations
+  (project_id, document_id, measure, source_value, normalized_amount, currency,
+   scope_level, scope_label, evidence_chunk_index, excerpt, page_number, section_label,
+   source_location, provider, model, source_content_hash, parser_version, contract_version)
+values
+  ('50000000-0000-4000-8000-000000000003', '50000000-0000-4000-8000-000000000012', 'eac',
+   'USD 2.000', 2000, 'USD', 'wbs', 'Alarm Kebencanaan', 0, 'EAC USD 2.000 untuk Alarm', 1,
+   'Weekly Report', jsonb_build_object('sheet_name', 'Weekly Report', 'cell_reference', 'C2'),
+   'fixture', 'fixture', repeat('b', 64), 'document-parser/6', 'pmo-assurance-observations/1');
+
+select is(
+  (select observation_fingerprint is not null from public.cost_observations
+    where project_id = '50000000-0000-4000-8000-000000000003' and measure = 'eac'),
+  true, 'cost observations expose a per-row fingerprint'
+);
+select lives_ok(
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''cost'', (select id from public.cost_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and measure = ''eac'' limit 1), (select observation_fingerprint from public.cost_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and measure = ''eac'' limit 1), ''corrected'', ''Skala ribuan salah baca.'', ''{"normalized_amount":2100,"currency":"USD"}'::jsonb)'),
+  'a cost observation amount and currency correction is accepted'
+);
+select is(
+  (select corrected_observation->>'normalized_amount' from public.assurance_observation_decisions where target_type = 'cost'),
+  '2100', 'the cost correction stores its corrected amount'
+);
+select is(
+  (select normalized_amount::text from public.cost_observations where measure = 'eac'),
+  '2000', 'the stored cost observation keeps its original amount'
+);
+select throws_ok(
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''cost'', (select id from public.cost_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and measure = ''eac'' limit 1), (select observation_fingerprint from public.cost_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and measure = ''eac'' limit 1), ''corrected'', ''bidang asing'', ''{"owner":"x"}'::jsonb)'),
+  'P0001',
+  'A cost correction supports only amount, currency, and WBS scope label.',
+  'an unknown cost correction field is rejected'
+);
+select throws_ok(
+  format('select public.save_assurance_observation_decision(''50000000-0000-4000-8000-000000000003'', ''cost'', (select id from public.cost_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and measure = ''eac'' limit 1), (select observation_fingerprint from public.cost_observations where project_id = ''50000000-0000-4000-8000-000000000003'' and measure = ''eac'' limit 1), ''corrected'', 'mata uang buruk'', ''{"currency":"RUPIAH"}'::jsonb)'),
+  'P0001',
+  'A corrected currency must be a three-letter code.',
+  'a bad corrected currency is rejected'
+);
+
+-- Cost decisions enter the review fingerprint and cost consumers see them.
+select is(
+  (select jsonb_array_length(public.assurance_source_snapshot('50000000-0000-4000-8000-000000000003', '50000000-0000-4000-8000-000000000021')->'observation_decisions')),
+  3, 'assurance and cost decisions both appear in the snapshot'
 );
 
 select set_config('request.jwt.claims', '', true);

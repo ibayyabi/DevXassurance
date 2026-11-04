@@ -19,14 +19,46 @@ returns text language sql immutable as $$
   )::text, 'UTF8'), 'sha256'), 'hex');
 $$;
 
+create or replace function public.assurance_cost_observation_fingerprint(
+  p_measure text, p_source_value text, p_normalized_amount numeric, p_currency text,
+  p_scope_level text, p_scope_label text, p_chunk_index integer, p_excerpt text, p_source_location jsonb
+)
+returns text language sql immutable as $$
+  select encode(extensions.digest(convert_to(jsonb_build_object(
+    'measure', p_measure, 'source_value', p_source_value,
+    'normalized_amount', p_normalized_amount, 'currency', p_currency,
+    'scope_level', p_scope_level, 'scope_label', p_scope_label,
+    'evidence_chunk_index', p_chunk_index, 'excerpt', p_excerpt,
+    'source_location', p_source_location
+  )::text, 'UTF8'), 'sha256'), 'hex');
+$$;
+
+alter table public.cost_observations
+  add column if not exists observation_fingerprint text
+  generated always as
+    (public.assurance_cost_observation_fingerprint(measure, source_value, normalized_amount, currency, scope_level, scope_label, evidence_chunk_index, excerpt, source_location)) stored;
+
 alter table public.assurance_observations
   add column if not exists observation_fingerprint text
   generated always as
     (public.assurance_observation_fingerprint(observation, evidence_chunk_index, excerpt, source_location)) stored;
 
+alter table public.assurance_observation_decisions
+  add column if not exists target_type text not null default 'assurance';
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'assurance_observation_decisions_decision_check'
+      and conrelid = 'public.assurance_observation_decisions'::regclass
+  ) then
+    alter table public.assurance_observation_decisions
+      drop constraint if exists assurance_observation_decisions_decision_check;
+  end if;
+end $$;
 create table if not exists public.assurance_observation_decisions (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null references public.projects(id) on delete cascade,
+  target_type text not null default 'assurance' check (target_type in ('assurance', 'cost')),
   document_id uuid not null references public.documents(id) on delete cascade,
   source_content_hash text not null check (source_content_hash ~ '^[0-9a-f]{64}$'),
   parser_version text not null check (length(parser_version) between 1 and 100),
@@ -37,8 +69,23 @@ create table if not exists public.assurance_observation_decisions (
   reason text not null check (length(btrim(reason)) between 1 and 1000),
   decided_by uuid not null references public.profiles(id) on delete restrict,
   decided_at timestamptz not null default clock_timestamp(),
-  unique (document_id, source_content_hash, parser_version, contract_version, observation_fingerprint)
+  unique (document_id, source_content_hash, parser_version, contract_version, target_type, observation_fingerprint)
 );
+-- Widen the unique key on tables created by earlier drafts of this migration.
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'assurance_observation_decisions_observation_unique'
+      and conrelid = 'public.assurance_observation_decisions'::regclass
+  ) then
+    alter table public.assurance_observation_decisions
+      drop constraint if exists assurance_observation_decisions_document_id_source_content_hash_parser_v_key;
+    alter table public.assurance_observation_decisions
+      add constraint assurance_observation_decisions_observation_unique
+      unique (document_id, source_content_hash, parser_version, contract_version, target_type, observation_fingerprint);
+  end if;
+end $$;
 
 create index if not exists assurance_observation_decisions_document_idx
   on public.assurance_observation_decisions (project_id, document_id, decided_at, id);
@@ -71,7 +118,7 @@ returns jsonb language plpgsql security definer set search_path = '' as $$
 declare decisions jsonb;
 begin
   with matched as (
-    select d.id, d.document_id, d.source_content_hash, d.parser_version, d.contract_version,
+    select d.id, d.target_type, d.document_id, d.source_content_hash, d.parser_version, d.contract_version,
       d.observation_fingerprint, d.decision, d.corrected_observation, d.reason,
       d.decided_by, d.decided_at,
       (select coalesce(jsonb_agg(o.id order by o.id), '[]'::jsonb)
@@ -80,7 +127,14 @@ begin
         and o.source_content_hash = d.source_content_hash
         and o.parser_version = d.parser_version
         and o.contract_version = d.contract_version
-        and o.observation_fingerprint = d.observation_fingerprint) as observation_ids
+        and o.observation_fingerprint = d.observation_fingerprint) as observation_ids,
+      (select coalesce(jsonb_agg(c.id order by c.id), '[]'::jsonb)
+      from public.cost_observations c
+      where c.project_id = d.project_id and c.document_id = d.document_id
+        and c.source_content_hash = d.source_content_hash
+        and c.parser_version = d.parser_version
+        and c.contract_version = d.contract_version
+        and c.observation_fingerprint = d.observation_fingerprint) as cost_observation_ids
     from public.assurance_observation_decisions d
     where d.project_id = p_project_id
       and exists (
@@ -101,6 +155,7 @@ begin
   )
   select coalesce(jsonb_agg(jsonb_build_object(
     'id', m.id,
+    'target_type', m.target_type,
     'document_id', m.document_id,
     'source_content_hash', m.source_content_hash,
     'parser_version', m.parser_version,
@@ -111,11 +166,12 @@ begin
     'reason', m.reason,
     'decided_by', m.decided_by,
     'decided_at', m.decided_at,
-    'observation_ids', m.observation_ids
-  ) order by m.document_id, m.observation_fingerprint, m.id), '[]'::jsonb)
+    'observation_ids', m.observation_ids,
+    'cost_observation_ids', m.cost_observation_ids
+  ) order by m.document_id, m.target_type, m.observation_fingerprint, m.id), '[]'::jsonb)
   into decisions
   from matched m
-  where jsonb_array_length(m.observation_ids) > 0;
+  where jsonb_array_length(m.observation_ids) > 0 or jsonb_array_length(m.cost_observation_ids) > 0;
 
   return jsonb_build_object(
     'fingerprint', encode(sha256(convert_to(decisions::text, 'UTF8')), 'hex'),
@@ -159,75 +215,172 @@ revoke all on function public.assurance_source_snapshot(uuid, uuid) from public,
 -- not only in the UI. The original observation row is never updated.
 create or replace function public.save_assurance_observation_decision(
   p_project_id uuid,
+  p_target_type text,
   p_observation_id uuid,
   p_observation_fingerprint text,
   p_decision text,
   p_reason text,
-  p_corrected_percent numeric default null
+  p_corrected jsonb default null
 )
 returns uuid language plpgsql security definer set search_path = '' as $$
 declare
   observation public.assurance_observations%rowtype;
+  cost_row public.cost_observations%rowtype;
   previous public.assurance_observation_decisions%rowtype;
   corrected jsonb;
   decision_id uuid;
+  v_document_id uuid;
+  v_source_hash text;
+  v_parser_version text;
+  v_contract_version text;
+  v_stored_fingerprint text;
+  v_cost_measure text;
+  v_cost_scope_level text;
 begin
   if auth.uid() is null or not public.can_upload_project_evidence(p_project_id) then
     raise exception 'Your project role cannot review assurance evidence.';
   end if;
   if p_observation_id is null
+    or p_target_type is null or p_target_type not in ('assurance', 'cost')
     or p_observation_fingerprint is null or p_observation_fingerprint !~ '^[0-9a-f]{64}$'
     or p_decision is null or p_decision not in ('accepted', 'corrected', 'rejected')
     or p_reason is null or length(btrim(p_reason)) not between 1 and 1000 then
     raise exception 'A supported observation, its displayed fingerprint, a decision, and a reason are required.';
   end if;
-  if p_decision = 'corrected' and (p_corrected_percent is null
-      or p_corrected_percent < 0 or p_corrected_percent > 100) then
-    raise exception 'A corrected progress percentage between 0 and 100 is required.';
+  if p_decision = 'corrected' and (p_corrected is null or jsonb_typeof(p_corrected) <> 'object') then
+    raise exception 'A corrected decision requires a corrected value object.';
   end if;
-  if p_decision <> 'corrected' and p_corrected_percent is not null then
-    raise exception 'Only a corrected decision carries a corrected percentage.';
+  if p_decision <> 'corrected' and p_corrected is not null then
+    raise exception 'Only a corrected decision carries a corrected value.';
   end if;
 
-  select o.* into observation
-  from public.assurance_observations o
-  join public.documents d on d.id = o.document_id and d.project_id = p_project_id
-  where o.id = p_observation_id and o.project_id = p_project_id
-    and d.processing_status in ('completed', 'needs_review')
-    and o.source_content_hash = d.content_hash
-    and o.parser_version = d.assurance_observation_parser_version
-    and o.contract_version = d.assurance_observation_contract_version
-  for share of o;
-  if not found then
-    raise exception 'Observation is not current evidence in this project.';
+  if p_decision = 'corrected' and p_target_type = 'assurance' then
+    if p_corrected ? 'percent' and (jsonb_typeof(p_corrected->'percent') <> 'number'
+        or (p_corrected->>'percent')::numeric < 0 or (p_corrected->>'percent')::numeric > 100) then
+      raise exception 'A corrected progress percentage between 0 and 100 is required.';
+    end if;
+    if p_corrected ? 'date' and (jsonb_typeof(p_corrected->'date') <> 'string'
+        or (p_corrected->>'date') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+        or (p_corrected->>'date')::date is null) then
+      raise exception 'A corrected milestone date must be a valid YYYY-MM-DD date.';
+    end if;
+    if exists (
+      select 1 from jsonb_object_keys(p_corrected) as correction_key(key)
+      where correction_key.key not in ('percent', 'date', 'status', 'rating_label', 'rating_value')
+    ) then
+      raise exception 'Correction supports only progress percent, milestone date, risk status, and risk rating fields.';
+    end if;
+    if p_corrected ? 'rating_value' and jsonb_typeof(p_corrected->'rating_value') <> 'number' then
+      raise exception 'A corrected risk rating value must be a number.';
+    end if;
+    if p_corrected ? 'status' and coalesce(nullif(p_corrected->>'status', ''), '') = '' then
+      raise exception 'A corrected risk status cannot be empty.';
+    end if;
   end if;
-  if observation.observation_fingerprint <> p_observation_fingerprint then
+  if p_decision = 'corrected' and p_target_type = 'cost' then
+    if exists (
+      select 1 from jsonb_object_keys(p_corrected) as correction_key(key)
+      where correction_key.key not in ('normalized_amount', 'currency', 'scope_label')
+    ) then
+      raise exception 'A cost correction supports only amount, currency, and WBS scope label.';
+    end if;
+    if p_corrected ? 'normalized_amount' and (jsonb_typeof(p_corrected->'normalized_amount') <> 'number') then
+      raise exception 'A corrected cost amount must be a number.';
+    end if;
+    if p_corrected ? 'currency' and coalesce(p_corrected->>'currency', '') !~ '^[A-Z]{3}$' then
+      raise exception 'A corrected currency must be a three-letter code.';
+    end if;
+    if p_corrected ? 'scope_label' and coalesce(nullif(p_corrected->>'scope_label', ''), '') = '' then
+      raise exception 'A corrected WBS scope label cannot be empty.';
+    end if;
+  end if;
+
+  if p_target_type = 'assurance' then
+    select o.* into observation
+    from public.assurance_observations o
+    join public.documents d on d.id = o.document_id and d.project_id = p_project_id
+    where o.id = p_observation_id and o.project_id = p_project_id
+      and d.processing_status in ('completed', 'needs_review')
+      and o.source_content_hash = d.content_hash
+      and o.parser_version = d.assurance_observation_parser_version
+      and o.contract_version = d.assurance_observation_contract_version
+    for share of o;
+    if not found then
+      raise exception 'Observation is not current evidence in this project.';
+    end if;
+    v_document_id := observation.document_id;
+    v_source_hash := observation.source_content_hash;
+    v_parser_version := observation.parser_version;
+    v_contract_version := observation.contract_version;
+    v_stored_fingerprint := observation.observation_fingerprint;
+    if p_decision = 'corrected' then
+      if observation.observation_type = 'progress' then
+        if not p_corrected ? 'percent' then
+          raise exception 'A progress correction requires a percent value.';
+        end if;
+      elsif observation.observation_type = 'milestone' then
+        if not p_corrected ? 'date' then
+          raise exception 'A milestone correction requires a date value.';
+        end if;
+      elsif observation.observation_type = 'risk_snapshot' then
+        if not (p_corrected ? 'status' or p_corrected ? 'rating_label' or p_corrected ? 'rating_value') then
+          raise exception 'A risk correction requires a status or rating field.';
+        end if;
+      else
+        raise exception 'Risk register statements are verbatim source claims; they can be accepted or rejected, not corrected.';
+      end if;
+    end if;
+  else
+    select c.* into cost_row
+    from public.cost_observations c
+    join public.documents d on d.id = c.document_id and d.project_id = p_project_id
+    where c.id = p_observation_id and c.project_id = p_project_id
+      and d.processing_status in ('completed', 'needs_review')
+      and c.source_content_hash = d.content_hash
+      and c.parser_version = d.assurance_observation_parser_version
+      and c.contract_version = d.assurance_observation_contract_version
+    for share of c;
+    if not found then
+      raise exception 'Observation is not current evidence in this project.';
+    end if;
+    v_document_id := cost_row.document_id;
+    v_source_hash := cost_row.source_content_hash;
+    v_parser_version := cost_row.parser_version;
+    v_contract_version := cost_row.contract_version;
+    v_stored_fingerprint := cost_row.observation_fingerprint;
+    v_cost_measure := cost_row.measure;
+    v_cost_scope_level := cost_row.scope_level;
+    if p_decision = 'corrected' and p_corrected ? 'scope_label'
+      and coalesce(v_cost_scope_level, 'project') <> 'wbs' then
+      raise exception 'Only a WBS-scoped cost observation can have its scope label corrected; project scope stays as extracted.';
+    end if;
+    if p_decision = 'corrected' and v_cost_measure = 'approved_baseline' then
+      raise exception 'Accept an approved baseline through baseline acceptance, which already records your own decision and note; a correction cannot pre-edit its amount.';
+    end if;
+  end if;
+  if v_stored_fingerprint <> p_observation_fingerprint then
     raise exception 'The observation changed since it was displayed. Refresh and review the current version.';
   end if;
-  if p_decision = 'corrected' then
-    if observation.observation_type <> 'progress' then
-      raise exception 'Only progress observations support a corrected value here.';
-    end if;
-    corrected := observation.observation || jsonb_build_object('percent', p_corrected_percent);
-  end if;
+  corrected := p_corrected;
 
   select * into previous from public.assurance_observation_decisions
-  where project_id = p_project_id and document_id = observation.document_id
-    and source_content_hash = observation.source_content_hash
-    and parser_version = observation.parser_version
-    and contract_version = observation.contract_version
-    and observation_fingerprint = observation.observation_fingerprint
+  where project_id = p_project_id and document_id = v_document_id
+    and source_content_hash = v_source_hash
+    and parser_version = v_parser_version
+    and contract_version = v_contract_version
+    and target_type = p_target_type
+    and observation_fingerprint = v_stored_fingerprint
   for update;
 
   insert into public.assurance_observation_decisions (
-    project_id, document_id, source_content_hash, parser_version, contract_version,
+    project_id, target_type, document_id, source_content_hash, parser_version, contract_version,
     observation_fingerprint, decision, corrected_observation, reason, decided_by
   ) values (
-    p_project_id, observation.document_id, observation.source_content_hash,
-    observation.parser_version, observation.contract_version,
-    observation.observation_fingerprint, p_decision, corrected, btrim(p_reason), auth.uid()
+    p_project_id, p_target_type, v_document_id, v_source_hash,
+    v_parser_version, v_contract_version,
+    v_stored_fingerprint, p_decision, corrected, btrim(p_reason), auth.uid()
   )
-  on conflict (document_id, source_content_hash, parser_version, contract_version, observation_fingerprint)
+  on conflict (document_id, source_content_hash, parser_version, contract_version, target_type, observation_fingerprint)
   do update set decision = excluded.decision,
     corrected_observation = excluded.corrected_observation,
     reason = excluded.reason,
@@ -237,24 +390,26 @@ begin
 
   insert into public.audit_events(project_id, actor_id, event_type, entity_type, entity_id, before_state, after_state)
   values (
-    p_project_id, auth.uid(), 'assurance_observation_reviewed', 'assurance_observation', observation.id,
-    coalesce(to_jsonb(previous), jsonb_build_object(
-      'observation', observation.observation, 'decision_state', 'unreviewed')),
+    p_project_id, auth.uid(), 'assurance_observation_reviewed',
+    case when p_target_type = 'assurance' then 'assurance_observation' else 'cost_observation' end,
+    p_observation_id,
+    coalesce(to_jsonb(previous), jsonb_build_object('decision_state', 'unreviewed')),
     jsonb_build_object(
+      'target_type', p_target_type,
       'decision', p_decision,
       'corrected_observation', corrected,
-      'observation_fingerprint', observation.observation_fingerprint,
-      'source_content_hash', observation.source_content_hash,
-      'parser_version', observation.parser_version,
-      'contract_version', observation.contract_version,
+      'observation_fingerprint', v_stored_fingerprint,
+      'source_content_hash', v_source_hash,
+      'parser_version', v_parser_version,
+      'contract_version', v_contract_version,
       'reason', btrim(p_reason), 'decided_by', auth.uid())
   );
   return decision_id;
 end;
 $$;
-revoke all on function public.save_assurance_observation_decision(uuid, uuid, text, text, text, numeric)
+revoke all on function public.save_assurance_observation_decision(uuid, text, uuid, text, text, text, jsonb)
   from public, anon;
-grant execute on function public.save_assurance_observation_decision(uuid, uuid, text, text, text, numeric)
+grant execute on function public.save_assurance_observation_decision(uuid, text, uuid, text, text, text, jsonb)
   to authenticated;
 
 -- Selection boundary: a needs-review document is admissible only when its

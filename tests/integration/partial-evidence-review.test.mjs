@@ -289,11 +289,12 @@ test("reviewAssuranceObservation sends the fingerprint and corrected value to th
   const call = f.calls.find((item) => item.name === "save_assurance_observation_decision");
   assert.deepEqual(call.input, {
     p_project_id: "project-1",
+    p_target_type: "assurance",
     p_observation_id: "obs-1",
     p_observation_fingerprint: "a".repeat(64),
     p_decision: "corrected",
-    p_corrected_percent: 13.5,
     p_reason: "konfirmasi lapangan",
+    p_corrected: { percent: 13.5 },
   });
   await assert.rejects(
     () => fixture({ rpc: (name) => name === "save_assurance_observation_decision"
@@ -304,6 +305,115 @@ test("reviewAssuranceObservation sends the fingerprint and corrected value to th
     /changed since it was displayed/,
     "a stale-fingerprint rejection from the database propagates to the reviewer",
   );
+});
+
+test("milestone date and risk corrections reach the RPC with typed fields", async () => {
+  const f = fixture();
+  await f.assurance.reviewAssuranceObservation(form({
+    observationId: "m-1", observationFingerprint: "b".repeat(64), decision: "corrected",
+    correctedDate: "2026-07-15", reason: "tanggal kontrak direvisi",
+  }));
+  const milestone = f.calls.find((item) => item.name === "save_assurance_observation_decision");
+  assert.deepEqual(milestone.input.p_corrected, { date: "2026-07-15" });
+  await assert.rejects(
+    () => f.assurance.reviewAssuranceObservation(form({
+      observationId: "m-1", observationFingerprint: "b".repeat(64), decision: "corrected",
+      correctedDate: "Juli", reason: "x",
+    })),
+    /YYYY-MM-DD/,
+  );
+  const g = fixture();
+  await g.assurance.reviewAssuranceObservation(form({
+    observationId: "r-1", observationFingerprint: "c".repeat(64), decision: "corrected",
+    correctedStatus: "Closed", correctedRatingLabel: "Sedang", correctedRatingValue: "3", reason: "mitigasi selesai",
+  }));
+  const risk = g.calls.find((item) => item.name === "save_assurance_observation_decision");
+  assert.deepEqual(risk.input.p_corrected, { status: "Closed", rating_label: "Sedang", rating_value: 3 });
+  // The action passes percent through for any assurance observation; the RPC
+  // is the boundary that rejects a percent on a non-progress observation.
+  const h = fixture({ rpc: (name) => name === "save_assurance_observation_decision"
+    ? { error: { message: "Correction supports only progress percent, milestone date, risk status, and risk rating fields." } }
+    : null });
+  await assert.rejects(
+    () => h.assurance.reviewAssuranceObservation(form({
+      observationId: "r-1", observationFingerprint: "c".repeat(64), decision: "corrected",
+      correctedStatus: "Terbuka", correctedPercent: "50", reason: "bukan progres",
+    })),
+    /risk rating fields/,
+    "a risk correction cannot smuggle a percent field past the RPC",
+  );
+});
+
+test("cost observation corrections flow to the RPC with amount, currency, and scope", async () => {
+  const f = fixture();
+  await f.assurance.reviewAssuranceObservation(form({
+    targetType: "cost", observationId: "c-1", observationFingerprint: "d".repeat(64),
+    decision: "corrected", correctedAmount: "1.250.000", correctedCurrency: "idr",
+    correctedScopeLabel: "Alarm Kebencanaan", reason: "skala ribuan salah baca",
+  }));
+  const call = f.calls.find((item) => item.name === "save_assurance_observation_decision");
+  assert.deepEqual(call.input.p_corrected, {
+    normalized_amount: 1250000, currency: "IDR", scope_label: "Alarm Kebencanaan",
+  });
+  assert.equal(call.input.p_target_type, "cost");
+  await assert.rejects(
+    () => f.assurance.reviewAssuranceObservation(form({
+      targetType: "cost", observationId: "c-1", observationFingerprint: "d".repeat(64),
+      decision: "corrected", correctedCurrency: "RUPIAH", reason: "x",
+    })),
+    /three-letter code/,
+  );
+  await assert.rejects(
+    () => f.assurance.reviewAssuranceObservation(form({
+      targetType: "cost", observationId: "c-1", observationFingerprint: "d".repeat(64),
+      decision: "corrected", reason: "no fields",
+    })),
+    /Enter the corrected value/,
+  );
+});
+
+test("cost decisions replace comparison values while source rows keep originals", async () => {
+  const costRow = (id, amount, currency, scopeLabel) => ({
+    id, document_id: "current", measure: "eac", source_value: `${currency} ${amount}`,
+    normalized_amount: amount, currency, scope_level: "wbs", scope_label: scopeLabel,
+    scope_source_id: null, scope_provenance: null, wbs_code: null, wbs_parent_code: null,
+    wbs_name: null, scope_description: null, period_label: null, as_of_date: null,
+    status_label: null, evidence_chunk_index: 0, excerpt: "EAC 20,4", page_number: 1,
+    section_label: "Weekly", source_location: null, documents: null,
+  });
+  const f = fixture({
+    currentObservations: [progressObservation("p-cur", 20.4)],
+    decisions: [
+      { id: "d1", target_type: "cost", document_id: "current", observation_fingerprint: "e".repeat(64),
+        decision: "corrected", corrected_observation: { normalized_amount: 2100, currency: "USD" },
+        reason: "kurs dikonfirmasi", decided_by: "user-1", decided_at: "2026-11-05T00:00:00Z",
+        observation_ids: [], cost_observation_ids: ["c-1"] },
+    ],
+  });
+  const costRows = [costRow("c-1", "2000", "USD", "Alarm"), costRow("c-2", "3000", "USD", "Gempa")];
+  const sources = [
+    source("base", "baseline", "Baseline W4", "a".repeat(64), [], allProcessed),
+    source("current", "current", "Current W5", "b".repeat(64), [progressObservation("p-cur", 20.4)], allProcessed),
+  ];
+  sources[1].cost_observations = costRows;
+  const replacement = fixture({
+    currentObservations: [progressObservation("p-cur", 20.4)],
+    claim: {
+      attempt_id: "attempt-1", sources,
+      observation_decisions: [
+        { id: "d1", target_type: "cost", document_id: "current", observation_fingerprint: "e".repeat(64),
+          decision: "corrected", corrected_observation: { normalized_amount: 2100, currency: "USD" },
+          reason: "kurs dikonfirmasi", decided_by: "user-1", decided_at: "2026-11-05T00:00:00Z",
+          observation_ids: [], cost_observation_ids: ["c-1"] },
+      ],
+    },
+  });
+  await replacement.assurance.runAssuranceAnalysis(form());
+  const publication = replacement.calls.find((call) => call.name === "finish_assurance_analysis_with_results");
+  assert.ok(publication, "analysis publishes with cost decisions applied");
+  const summary = publication.input.p_metadata.observation_review_summary;
+  assert.equal(summary.reviewed, 1);
+  assert.equal(summary.corrected, 1);
 });
 
 test("restricted roles cannot review observations or select evidence", async () => {
