@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Evidence provenance dan reproduksi lokal.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Baca [rencana dan kontrak bersama](../plan.md), termasuk baseline, source version, coverage, permission dan larangan memanggil provider live.
 
@@ -20,3 +20,5 @@ Baca [rencana dan kontrak bersama](../plan.md), termasuk baseline, source versio
 - UI membatasi dokumen `needs_review` pada coverage versi terkini; `save_assurance_evidence` pada baseline belum menerapkan syarat coverage yang sama di RPC. Periksa dan tegakkan invariant pada boundary server, bukan hanya UI.
 - Gunakan pola keputusan assurance yang sudah ada sebagai rujukan, termasuk otorisasi, invalidasi hasil/fingerprint, dan konflik versi. Evaluasi ulang setelah kontrak tiket 01 terintegrasi; `scope_provenance` harus bisa diperiksa reviewer.
 - `processDocumentJob` membatasi `processing_error` dokumen hingga 1.000 karakter; banyak warning dapat memotong alasan domain berikutnya. Jangan jadikan string itu satu-satunya sumber penjelasan gap per domain; pastikan alasan yang relevan tetap terlihat.
+
+- Tiket 01 terintegrasi dan diverifikasi secara deterministik; gunakan kontrak sumber, coverage, dan `scope_provenance` yang sekarang ada. Reviewer tetap harus melihat warning dan mengambil keputusan per observasi.
