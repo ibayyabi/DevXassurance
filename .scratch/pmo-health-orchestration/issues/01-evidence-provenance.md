@@ -16,6 +16,17 @@ Baca [rencana dan kontrak bersama](../plan.md), khususnya constraint model dan k
 
 ## Comments
 
+**Handoff 8 — subjek/scope kini source-cited di input model.**
+
+Temuan: replay masih memakai konstanta `SUBJECT`; grup Weekly Report tidak memuat teks subjek, dan `buildExtractionPrompt` hanya mengirim sumber grup, sehingga model nyata tidak mungkin mengetahui subjek WBS itu. Sekarang:
+
+- `buildChunkGroups` membangun `contextSources` per grup: deklarasi subjek workbook dan blok judul sheet grup, masing-masing dengan `sourceId` nyata, chunk, sheet, dan lokasi sel persis. Subjek hanya ditawarkan bila **judul salah satu sheet di grup itu** menyebutnya (tidak ada atribusi lintas sheet/workbook).
+- Prompt grup menyertakan `DOCUMENT_CONTEXT_REFERENCES_JSON` (source_id, kind, sheet, cell, text) dengan aturan: gunakan hanya untuk scope, salin kata persis, sitasi di `scope_source_id`; jangan untuk nilai/tanggal/fakta.
+- Validasi: scope WBS diterima dari (a) kolom scope berlabel pada baris yang dikutip, atau (b) subjek yang **disitasi model** lewat `scope_source_id`, yang harus resolve ke context source `declared_subject` dengan nilai sama, dan judul sheet pengutip harus menyebut subjek itu. Tanpa sitasi → gap. `scope_provenance` (lokasi deklarasi + judul) dan `scope_source_id` ikut dipersist di JSON observation (jsonb); read model/UI belum membacanya (tiket 03).
+- `EXTRACTION_SCHEMA_VERSION` → `phase6-document-extraction/22` (prompt + validasi + bentuk observation berubah); `PARSER_VERSION` tetap `document-parser/12`.
+
+Test replay sekarang **menurunkan** subjek dari prompt: mock membaca `DOCUMENT_CONTEXT_REFERENCES_JSON`, mengambil `declared_subject`, menyalin nilainya ke `scope_label` dan men-sitasi `source_id`-nya; tidak ada konstanta subjek. Harapan diambil dari metadata parser (`subjects[0]`, `sheetTitles[WEEKLY]`). Assert baru: model memang melihat konteks itu (`capture.subject`), `scope_source_id` = id yang disitasi, dan `scope_provenance` cocok dengan sel deklarasi + sel judul. Negatif baru: nilai subjek yang benar **tanpa** sitasi ditolak sebagai gap. Test extraction yang ada memakai chunk sintetis tanpa metadata sehingga perilakunya tidak berubah.
+
 **Handoff 7 — kontradiksi unlabelled XLSX diperbaiki.**
 
 Laporan handoff 6 menyebut tanggal XLSX tanpa label menjadi gap, tetapi kode untuk **sel tunggal** masih menerima (return null) saat kolom tidak terbukti. Sekarang: untuk sumber `kind: "xlsx"`, tanggal hanya diterima bila kolomnya terbukti — `as_of_date` butuh kolom record (cut-off/periode), `date`/`mitigation_due_date` butuh kolom due/target/plan/baseline/actual; sel tanpa label, sel berlabel tak relevan, baris tanpa metadata sel (baris terpecah / payload lama) menjadi **gap** (ditolak dengan alasan eksplisit), bukan tanggal tervalidasi. Sumber non-spreadsheet tetap memakai aturan excerpt seperti sebelumnya. `EXTRACTION_SCHEMA_VERSION` → `phase6-document-extraction/21`; `PARSER_VERSION` tetap `document-parser/12`.

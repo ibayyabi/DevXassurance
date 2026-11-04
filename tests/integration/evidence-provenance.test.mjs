@@ -24,10 +24,9 @@ const { parseDocumentBuffer, extractDocumentGroups, processDocumentJob } =
 
 const ALARM_FILE = "01_Alarm_Kebencanaan_Subcontractor_Weekly.xlsx";
 const WEEKLY = "Weekly Report";
-// Declared by the workbook (`Subsystem / Scope` key-value rows) and stated by the
-// Weekly Report sheet title, both of which the prompt exposes through the file
-// name and source text.
-const SUBJECT = "Alarm Kebencanaan";
+// The workbook's subject is not hardcoded here: the controlled model response
+// reads it from the document-context references the prompt supplies, and the
+// expectations are taken from the parse result.
 const DIMENSIONS = ["overall", "schedule", "cost", "risk", "governance", "audit_readiness"];
 
 // Each row's own due date is a legitimate milestone date (a due column), while
@@ -70,6 +69,11 @@ function documentContextFromPrompt(prompt) {
   const match = prompt.match(/^SOURCE_REFERENCES_JSON=(.+)$/m);
   assert.ok(match, "the model request carries source references");
   return JSON.parse(match[1]);
+}
+
+function documentContextReferencesFromPrompt(prompt) {
+  const match = prompt.match(/^DOCUMENT_CONTEXT_REFERENCES_JSON=(.+)$/m);
+  return match ? JSON.parse(match[1]) : [];
 }
 
 const isClassificationPrompt = (prompt) => prompt.startsWith("Classify the entire document");
@@ -174,9 +178,16 @@ function executiveSummaryOutput(input) {
 }
 
 // One group response for the real workbooks, built only from the prompt.
-function alarmGroupResponse(prompt, spec) {
+function alarmGroupResponse(prompt, spec, capture) {
   const references = documentContextFromPrompt(prompt);
   if (isClassificationPrompt(prompt)) return classificationOutput(references);
+  const contextReferences = documentContextReferencesFromPrompt(prompt);
+  const subjectReference = contextReferences.find((entry) => entry.kind === "declared_subject");
+  // The subject wording is read off the prompt context, exactly as a model would.
+  const subjectValue = subjectReference
+    ? /^[^:]+:\s*(.+)$/.exec(subjectReference.text ?? "")?.[1]?.trim() ?? null
+    : null;
+  if (subjectValue) capture.subject = { ...subjectReference, value: subjectValue };
   const output = baseGroupOutput(references);
   const rowSource = references.find(
     (reference) =>
@@ -200,8 +211,9 @@ function alarmGroupResponse(prompt, spec) {
       {
         raw_value: `${spec.percent}%`,
         percent: spec.percent,
-        scope_level: "wbs",
-        scope_label: SUBJECT,
+        scope_level: subjectValue ? "wbs" : "unknown",
+        scope_label: subjectValue,
+        scope_source_id: subjectValue ? subjectReference.source_id : null,
         period_label: spec.week,
         as_of_date: spec.cutOff,
         excerpt: rowExcerpt,
@@ -213,8 +225,9 @@ function alarmGroupResponse(prompt, spec) {
         ? [{
             raw_value: `${spec.percent}%`,
             percent: spec.percent,
-            scope_level: "wbs",
-            scope_label: SUBJECT,
+            scope_level: subjectValue ? "wbs" : "unknown",
+            scope_label: subjectValue,
+            scope_source_id: subjectValue ? subjectReference.source_id : null,
             period_label: spec.week,
             as_of_date: dueDate,
             excerpt: rowSource.text,
@@ -232,6 +245,20 @@ function alarmGroupResponse(prompt, spec) {
         excerpt: rowExcerpt,
         source_id: rowSource.source_id,
       },
+      // The right subject wording without a citation is not proved either.
+      ...(subjectValue
+        ? [{
+            raw_value: `${spec.percent}%`,
+            percent: spec.percent,
+            scope_level: "wbs",
+            scope_label: subjectValue,
+            scope_source_id: null,
+            period_label: null,
+            as_of_date: null,
+            excerpt: rowExcerpt,
+            source_id: rowSource.source_id,
+          }]
+        : []),
       // A fabricated source ID never resolves.
       {
         raw_value: `${spec.percent}%`,
@@ -297,14 +324,14 @@ function alarmGroupResponse(prompt, spec) {
   return output;
 }
 
-function alarmFetchMock(spec) {
+function alarmFetchMock(spec, capture) {
   return async (_url, init) => {
     const prompt = JSON.parse(init.body).messages[1].content;
     if (isExecutiveSummaryPrompt(prompt)) {
       const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
       return modelResponse(executiveSummaryOutput(input));
     }
-    return modelResponse(alarmGroupResponse(prompt, spec));
+    return modelResponse(alarmGroupResponse(prompt, spec, capture));
   };
 }
 
@@ -327,9 +354,12 @@ test("the real W4/W5 workbooks link a dated actual to its row, column, and subje
     }
     // The workbook declares exactly one subject (twice, with an exact locator),
     // and the Weekly Report sheet states it in its own title block.
-    assert.deepEqual(
-      [...new Set(parsed.parserMetadata.subjects.map((subject) => subject.value))],
-      [SUBJECT],
+    const subjectFixture = parsed.parserMetadata.subjects[0];
+    assert.ok(subjectFixture, `${spec.session} declares a subject`);
+    assert.equal(
+      new Set(parsed.parserMetadata.subjects.map((subject) => subject.value)).size,
+      1,
+      `${spec.session} declares exactly one subject value`,
     );
     assert.ok(
       parsed.parserMetadata.subjects.every(
@@ -339,8 +369,12 @@ test("the real W4/W5 workbooks link a dated actual to its row, column, and subje
           /^[A-Z]+\d+$/.test(subject.valueCell),
       ),
     );
-    assert.match(parsed.parserMetadata.sheetTitles[WEEKLY].text, new RegExp(SUBJECT, "i"));
-    assert.match(parsed.parserMetadata.sheetTitles[WEEKLY].cell, /^[A-Z]+\d+$/);
+    const titleFixture = parsed.parserMetadata.sheetTitles[WEEKLY];
+    assert.ok(
+      titleFixture.text.toLocaleLowerCase().includes(subjectFixture.value.toLocaleLowerCase()),
+      `${spec.session} sheet title states the declared subject`,
+    );
+    assert.match(titleFixture.cell, /^[A-Z]+\d+$/);
     // The milestone date comes from a plan/due date column, not a record date.
     const milestoneReference = parsed.chunks
       .flatMap((chunk) => chunk.sourceReferences ?? [])
@@ -357,7 +391,8 @@ test("the real W4/W5 workbooks link a dated actual to its row, column, and subje
     const milestoneCell = milestoneReference.sourceLocation?.cellRangeStart;
     assert.equal(typeof milestoneCell, "string");
 
-    const mock = alarmFetchMock(spec);
+    const capture = {};
+    const mock = alarmFetchMock(spec, capture);
     const jobResult = await withLocalOllama(mock, async () =>
       await processDocumentJob(job(buffer), memoryGroupStore()),
     );
@@ -382,10 +417,23 @@ test("the real W4/W5 workbooks link a dated actual to its row, column, and subje
       milestoneDate,
       milestoneLabel,
       milestoneCell,
+      capture,
+      subjectFixture,
+      titleFixture,
     });
   }
 
-  for (const { spec, jobResult, extraction, milestoneDate, milestoneLabel, milestoneCell } of outcomes) {
+  for (const {
+    spec,
+    jobResult,
+    extraction,
+    milestoneDate,
+    milestoneLabel,
+    milestoneCell,
+    capture,
+    subjectFixture,
+    titleFixture,
+  } of outcomes) {
     const warnings = extraction.quality_warnings.join(" ");
 
     // One dated actual survives, linked to the cited row.
@@ -395,7 +443,7 @@ test("the real W4/W5 workbooks link a dated actual to its row, column, and subje
     assert.equal(actual.as_of_date, spec.cutOff);
     assert.equal(actual.period_label, spec.week);
     assert.equal(actual.scope_level, "wbs");
-    assert.equal(actual.scope_label, SUBJECT);
+    assert.equal(actual.scope_label, subjectFixture.value);
     assert.equal(actual.source_location.sheetName, WEEKLY);
     assert.equal(actual.source_location.rowStart, spec.actualRow);
     assert.equal(actual.source_location.rowEnd, spec.actualRow);
@@ -408,11 +456,21 @@ test("the real W4/W5 workbooks link a dated actual to its row, column, and subje
       actual.scope_provenance.map((entry) => entry.kind),
       ["declared_subject", "sheet_title"],
     );
-    assert.equal(actual.scope_provenance[0].excerpt, SUBJECT);
-    assert.match(actual.scope_provenance[0].cell_reference, /^[A-Z]+\d+$/);
+    assert.equal(actual.scope_provenance[0].sheet_name, subjectFixture.sheetName);
+    assert.equal(actual.scope_provenance[0].cell_reference, subjectFixture.valueCell);
+    assert.ok(actual.scope_provenance[0].excerpt.includes(subjectFixture.value));
     assert.equal(actual.scope_provenance[1].sheet_name, WEEKLY);
-    assert.match(actual.scope_provenance[1].cell_reference, /^[A-Z]+\d+$/);
-    assert.match(actual.scope_provenance[1].excerpt, new RegExp(SUBJECT, "i"));
+    assert.equal(actual.scope_provenance[1].cell_reference, titleFixture.cell);
+    assert.ok(
+      actual.scope_provenance[1].excerpt
+        .toLocaleLowerCase()
+        .includes(subjectFixture.value.toLocaleLowerCase()),
+    );
+    // The model could only know the subject from the prompt's context references
+    // and had to cite the one it used.
+    assert.equal(capture.subject?.kind, "declared_subject");
+    assert.ok(capture.subject.text.includes(subjectFixture.value));
+    assert.equal(actual.scope_source_id, capture.subject.source_id);
 
     // The due date and the unknown scope are excluded with a precise reason.
     assert.match(
@@ -850,7 +908,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
   assert.equal(cached.parserVersion, "document-parser/12");
-  assert.equal(cached.schemaVersion, "phase6-document-extraction/21");
+  assert.equal(cached.schemaVersion, "phase6-document-extraction/22");
 
   // A cache hit re-derives the location from the live chunk instead of trusting
   // a stored payload that dropped it.

@@ -135,6 +135,7 @@ export type ExtractedMilestoneObservation = {
   scope_level: "project" | "wbs" | "unknown";
   scope_label: string | null;
   scope_provenance?: ObservationScopeProvenance[];
+  scope_source_id?: string;
   period_label: string | null;
   as_of_date: string | null;
   evidence_chunk_index: number;
@@ -148,6 +149,7 @@ export type ExtractedProgressObservation = {
   scope_level: "project" | "wbs" | "unknown";
   scope_label: string | null;
   scope_provenance?: ObservationScopeProvenance[];
+  scope_source_id?: string;
   period_label: string | null;
   as_of_date: string | null;
   evidence_chunk_index: number;
@@ -340,6 +342,21 @@ type GroupExtraction = {
 };
 type WorkbookSubject = { value: string; key: string; sheetName: string; valueCell: string };
 type SheetTitle = { text: string; cell: string };
+/**
+ * A parser-authored workbook declaration the model may cite for a work-package
+ * scope: the declared subject, or the title block of a sheet in this group.
+ * Both carry a real source id and an exact cell locator, so a scope claim stays
+ * traceable instead of resting on an uncited parser string.
+ */
+type GroupContextSource = {
+  sourceId: string;
+  chunkIndex: number;
+  kind: "declared_subject" | "sheet_title";
+  sheetName: string;
+  cellReference: string;
+  text: string;
+  subjectValue: string | null;
+};
 type ChunkGroup = {
   groupIndex: number;
   chunkStartIndex: number;
@@ -347,8 +364,7 @@ type ChunkGroup = {
   groupKey: string;
   chunks: ParsedChunk[];
   candidateInterpretation: string[];
-  subjects: WorkbookSubject[];
-  sheetTitles: Record<string, SheetTitle>;
+  contextSources: GroupContextSource[];
 };
 type ModelProvider = {
   provider: "ollama" | "ollama_cloud" | "openai-compatible" | "gemini" | "groq";
@@ -368,7 +384,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/21";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/22";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -707,6 +723,23 @@ function buildChunkGroups(
       }),
   );
 
+  const allReferences = chunks.flatMap((chunk) => chunk.sourceReferences ?? []);
+  const referenceAt = (sheetName: string, cell: string) =>
+    allReferences.find(
+      (reference) =>
+        reference.sourceLocation?.sheetName === sheetName &&
+        reference.sourceLocation?.cellRangeStart === cell,
+    );
+  // Only the subjects a sheet in this group itself states may be offered to the
+  // model; a subject that only another sheet states would be a cross-sheet guess.
+  const statedSubjects = (groupSheets: Set<string>) =>
+    subjects.filter((subject) =>
+      [...groupSheets].some((sheetName) =>
+        (sheetTitles[sheetName]?.text ?? "").toLocaleLowerCase()
+          .includes(subject.value.toLocaleLowerCase()),
+      ),
+    );
+
   const flush = () => {
     if (!current.length) return;
     const groupIndex = groups.length;
@@ -732,6 +765,44 @@ function buildChunkGroups(
       }))))
       .digest("hex");
     const candidateInterpretation = collectCandidateInterpretation(current, parserMetadata);
+    const groupSheets = new Set(
+      current
+        .map((chunk) => chunk.sourceLocation?.sheetName)
+        .filter((sheetName): sheetName is string => typeof sheetName === "string"),
+    );
+    const contextSources = [
+      ...statedSubjects(groupSheets).flatMap((subject): GroupContextSource[] => {
+        const reference = referenceAt(subject.sheetName, subject.valueCell);
+        return reference
+          ? [{
+              sourceId: reference.sourceId,
+              chunkIndex: reference.chunkIndex,
+              kind: "declared_subject",
+              sheetName: subject.sheetName,
+              cellReference: subject.valueCell,
+              text: `${subject.key}: ${subject.value}`.slice(0, 300),
+              subjectValue: subject.value,
+            }]
+          : [];
+      }),
+      ...[...groupSheets].flatMap((sheetName): GroupContextSource[] => {
+        const title = sheetTitles[sheetName];
+        const reference = title ? referenceAt(sheetName, title.cell) : undefined;
+        return title && reference
+          ? [{
+              sourceId: reference.sourceId,
+              chunkIndex: reference.chunkIndex,
+              kind: "sheet_title",
+              sheetName,
+              cellReference: title.cell,
+              text: reference.modelText.slice(0, 300),
+              subjectValue: null,
+            }]
+          : [];
+      }),
+    ].filter(
+      (entry, index, all) => all.findIndex((other) => other.sourceId === entry.sourceId) === index,
+    ).slice(0, 6);
     groups.push({
       groupIndex,
       chunkStartIndex,
@@ -739,8 +810,7 @@ function buildChunkGroups(
       groupKey,
       chunks: current,
       candidateInterpretation,
-      subjects,
-      sheetTitles,
+      contextSources,
     });
     current = [];
     currentLength = 0;
@@ -1310,6 +1380,14 @@ ${group.candidateInterpretation.length ? `\nCandidate sheet interpretation (pars
 
 SOURCE_REFERENCES_JSON=${JSON.stringify(sourceReferences)}
 
+${group.contextSources.length ? `DOCUMENT_CONTEXT_REFERENCES_JSON=${JSON.stringify(group.contextSources.map((context) => ({
+  source_id: context.sourceId,
+  kind: context.kind,
+  sheet_name: context.sheetName,
+  cell: context.cellReference,
+  text: context.text,
+})))}
+` : ""}
 Required JSON schema:
 {
   "facts": [{"fact_type":"risk|issue|milestone|decision|owner_action","extracted_text":"...","original_value":"...","confidence":0.0,"source_id":"..."}],
@@ -1319,8 +1397,8 @@ Required JSON schema:
   "actions": [{"title":"...","owner_name":null,"priority":"low|medium|high","status":"open","source_id":"..."}],
   "cost_observations": [{"measure":"approved_baseline|actual_to_date|committed|eac","source_value":"exact source text of the amount","scope_level":"project|wbs","scope_label":null,"wbs_code":null,"wbs_parent_code":null,"wbs_name":null,"scope_description":null,"period_label":null,"as_of_date":null,"status_label":null,"source_id":"..."}],
   "assurance_observations": {
-    "milestones": [{"label":"exact event label","raw_date":null,"date":null,"scope_level":"project|wbs|unknown","scope_label":null,"period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}],
-    "progress": [{"raw_value":"exact percentage wording","percent":0,"scope_level":"project|wbs|unknown","scope_label":null,"period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}],
+    "milestones": [{"label":"exact event label","raw_date":null,"date":null,"scope_level":"project|wbs|unknown","scope_label":null,"scope_source_id":null,"period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}],
+    "progress": [{"raw_value":"exact percentage wording","percent":0,"scope_level":"project|wbs|unknown","scope_label":null,"scope_source_id":null,"period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}],
     "risk_snapshots": [{"risk_id":null,"name":null,"description":null,"status":null,"rating_label":null,"rating_value":null,"scale_label":null,"owner":null,"mitigation":null,"mitigation_due_date":null,"raw_mitigation_due_date":null,"wbs":null,"period_label":null,"as_of_date":null,"raw_value":"verbatim source text","excerpt":"verbatim source excerpt","source_id":"..."}],
     "risk_register_statements": [{"state":"no_open_high_or_critical|open_risk_reported","raw_value":"verbatim source text","period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}]
   },
@@ -1334,6 +1412,7 @@ Health status_text and source_summary fields must each be nonempty strings no lo
 Group metadata suggestions are limited to document date, reporting period, and workstream. Every non-null suggestion requires a valid source_id.
 For cost observations, source_value must be text present in the cited source and scope_level "wbs" requires the work-package code or name in scope_label. For a WBS value, also capture the work package's stated identity from the source: wbs_code (its own code), wbs_parent_code (its parent's code), wbs_name (its name), and scope_description (its stated deliverable or scope). Leave any of these null when the source does not state it, and never invent a code or a canonical identity. For a project-total value leave all four null. Report as_of_date as YYYY-MM-DD and leave period_label as the source's own wording. Return [] when these sources state no cost value.
 - Every assurance observation requires an excerpt and citation source_id from this group. Each non-null raw value, label, status, rating, owner, mitigation, WBS, and normalized date/number must be supported by that excerpt. Use null rather than interpreting a formula without a stored cache. Return all four arrays even when empty.
+- DOCUMENT_CONTEXT_REFERENCES_JSON lists parser-authored workbook declarations for this artifact: a declared subject and the title block of a sheet in this group. Use them only for a work-package scope: copy the exact subject wording into scope_label and cite that subject reference in scope_source_id. Never cite them for values, dates, facts, or summaries, and never invent a scope the supplied references do not state.
 Report document dates as YYYY-MM-DD and reporting periods as their first day YYYY-MM-01.
 sheet_interpretation is candidate-only and may appear only for parser-flagged ambiguous XLSX groups. Never invent cells, sheets, headers, cached values, dates, owners, or formula results. Cite each header, column role, and observation with source_ids from this group. The worker resolves those IDs to parser-authored sheet/cell/range locators; never provide locators yourself. Each header label and observation raw_value must be exact text present in its cited source. Normalized values remain candidates and must not replace raw evidence. If the group is not flagged ambiguous, omit the field.${correction}`;
 }
@@ -1699,9 +1778,13 @@ function validateGroupExtraction(
   };
   // Where a proven scope came from, or null when the cited source cannot prove
   // it. Every returned location is exact and is persisted with the observation.
+  // The document-context branch requires the model to cite the declared subject
+  // itself (scope_source_id) and that a sheet in this group titles that subject,
+  // so neither an uncited parser string nor another sheet's scope can be used.
   const scopeProvenance = (
     citation: SourceCitation | null,
     scopeLabel: string,
+    scopeSourceId: string | null,
   ): ObservationScopeProvenance[] | null => {
     const reference = referenceForCitation(citation);
     const rowColumn = reference?.rowCells?.find(
@@ -1718,31 +1801,39 @@ function validateGroupExtraction(
         excerpt: rowColumn.value,
       }];
     }
-    if (new Set(group.subjects.map((entry) => entry.value.toLocaleLowerCase())).size !== 1) {
+    const subject = scopeSourceId
+      ? group.contextSources.find((context) => context.sourceId === scopeSourceId)
+      : undefined;
+    if (
+      !subject ||
+      subject.kind !== "declared_subject" ||
+      subject.subjectValue === null ||
+      subject.subjectValue.toLocaleLowerCase() !== scopeLabel.toLocaleLowerCase()
+    ) {
       return null;
     }
-    const subject = group.subjects.find(
-      (entry) => entry.value.toLocaleLowerCase() === scopeLabel.toLocaleLowerCase(),
-    );
-    if (!subject) return null;
+    const subjectValue = subject.subjectValue;
     const sheetName = reference?.sourceLocation?.sheetName;
     if (typeof sheetName !== "string") return null;
-    const title = group.sheetTitles[sheetName];
-    if (!title || !title.text.toLocaleLowerCase().includes(subject.value.toLocaleLowerCase())) {
-      return null;
-    }
+    const title = group.contextSources.find(
+      (context) =>
+        context.kind === "sheet_title" &&
+        context.sheetName === sheetName &&
+        context.text.toLocaleLowerCase().includes(subjectValue.toLocaleLowerCase()),
+    );
+    if (!title) return null;
     return [
       {
         kind: "declared_subject",
         sheet_name: subject.sheetName,
-        cell_reference: subject.valueCell,
-        excerpt: subject.value,
+        cell_reference: subject.cellReference,
+        excerpt: subject.text,
       },
       {
         kind: "sheet_title",
-        sheet_name: sheetName,
-        cell_reference: title.cell,
-        excerpt: title.text.slice(0, 300),
+        sheet_name: title.sheetName,
+        cell_reference: title.cellReference,
+        excerpt: title.text,
       },
     ];
   };
@@ -2163,7 +2254,15 @@ function validateGroupExtraction(
     if (rawDate && !excerpt?.includes(rawDate)) rowErrors.push(`${path}.raw_date is not present in the cited excerpt`);
     if (date && rawDate !== date) rowErrors.push(`${path}.date can only normalize an exact ISO raw_date`);
     if (!textIsCited(label, excerpt)) rowErrors.push(`${path}.label is not present in the cited excerpt`);
-    const scopeEvidence = scopeLabel ? scopeProvenance(citation, scopeLabel) : null;
+    const scopeSourceId = nullableBoundedString(
+      item.scope_source_id ?? null,
+      `${path}.scope_source_id`,
+      rowErrors,
+      200,
+    );
+    const scopeEvidence = scopeLabel
+      ? scopeProvenance(citation, scopeLabel, scopeSourceId)
+      : null;
     if (scopeLabel && !textIsCited(scopeLabel, excerpt) && !scopeEvidence) {
       rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
     }
@@ -2180,6 +2279,7 @@ function validateGroupExtraction(
       scope_level: scopeLevel as ExtractedMilestoneObservation["scope_level"],
       scope_label: scopeLabel!,
       ...(scopeEvidence ? { scope_provenance: scopeEvidence } : {}),
+      ...(scopeEvidence && scopeSourceId ? { scope_source_id: scopeSourceId } : {}),
       period_label: periodLabel!,
       as_of_date: asOfDate ?? null,
       evidence_chunk_index: citation!.evidence_chunk_index,
@@ -2212,7 +2312,15 @@ function validateGroupExtraction(
       !citedTextSupportsNumericValue(`${percentValue}%`, rawValue ?? "")) {
       rowErrors.push(`${path}.percent does not match a percentage in the cited excerpt`);
     }
-    const scopeEvidence = scopeLabel ? scopeProvenance(citation, scopeLabel) : null;
+    const scopeSourceId = nullableBoundedString(
+      item.scope_source_id ?? null,
+      `${path}.scope_source_id`,
+      rowErrors,
+      200,
+    );
+    const scopeEvidence = scopeLabel
+      ? scopeProvenance(citation, scopeLabel, scopeSourceId)
+      : null;
     if (scopeLabel && !textIsCited(scopeLabel, excerpt) && !scopeEvidence) {
       rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
     }
@@ -2229,6 +2337,7 @@ function validateGroupExtraction(
       scope_level: scopeLevel as ExtractedProgressObservation["scope_level"],
       scope_label: scopeLabel!,
       ...(scopeEvidence ? { scope_provenance: scopeEvidence } : {}),
+      ...(scopeEvidence && scopeSourceId ? { scope_source_id: scopeSourceId } : {}),
       period_label: periodLabel!,
       as_of_date: asOfDate ?? null,
       evidence_chunk_index: citation!.evidence_chunk_index,
