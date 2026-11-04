@@ -1297,6 +1297,7 @@ function citedProgressValueHasRiskContext(
   citation: SourceCitation | null,
   rawValue: string,
 ): boolean {
+  if (!citation) return false;
   const cited = citedReference(group, citation);
   if (!cited) return false;
   const location = cited.reference.sourceLocation;
