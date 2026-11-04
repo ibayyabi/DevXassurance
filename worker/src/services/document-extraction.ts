@@ -393,7 +393,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/24";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/25";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -760,13 +760,14 @@ function buildChunkGroups(
       (reference) =>
         reference.sourceLocation?.sheetName === sheetName &&
         reference.sourceLocation?.cellRangeStart === cell &&
-        reference.sourceLocation?.cellRangeEnd === cell,
+        reference.sourceLocation?.cellRangeEnd === cell &&
+        reference.cell?.cell === cell,
     );
-  // Only one distinct key/value association may match this group's exact
-  // sheet title. Repeated identical declarations are redundant; conflicting
-  // matches are ambiguous and provide no scope context.
+  // Repeated declarations of the same value are equivalent; distinct values
+  // matching the sheet title are ambiguous. Try equivalent pairs in source
+  // order and use the first one with exact, citable key/value cells.
   const statedSubjects = (groupSheets: Set<string>) => {
-    const associations = new Map<string, WorkbookSubject>();
+    const associations = new Map<string, WorkbookSubject[]>();
     for (const subject of subjects) {
       const statedByGroupTitle = [...groupSheets].some((sheetName) => {
         const title = sheetTitles[sheetName];
@@ -774,10 +775,12 @@ function buildChunkGroups(
         return reference && containsSourcePhrase(reference.modelText, subject.value);
       });
       if (!statedByGroupTitle) continue;
-      const key = `${subject.key.trim().toLocaleLowerCase()}\0${subject.value.trim().toLocaleLowerCase()}`;
-      if (!associations.has(key)) associations.set(key, subject);
+      const key = subject.value.trim().toLocaleLowerCase();
+      const equivalent = associations.get(key) ?? [];
+      equivalent.push(subject);
+      associations.set(key, equivalent);
     }
-    return associations.size === 1 ? [...associations.values()] : [];
+    return associations.size === 1 ? [...associations.values()][0] : [];
   };
 
 
@@ -869,7 +872,11 @@ function buildChunkGroups(
       const additions = [keyContext, valueContext, title].filter(
         (context) => !contextSources.some((entry) => entry.sourceId === context.sourceId),
       );
-      if (contextSources.length + additions.length <= 6) contextSources.push(...additions);
+
+      if (contextSources.length + additions.length <= 6) {
+        contextSources.push(...additions);
+        break;
+      }
     }
     for (const title of titleContexts) {
       if (contextSources.length >= 6) break;

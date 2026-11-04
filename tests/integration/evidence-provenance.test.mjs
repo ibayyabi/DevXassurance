@@ -905,6 +905,8 @@ test("ambiguous or foreign workbook scope declarations are not offered or accept
     projectCell("alpha-value", 2, "B", "Project Alpha"),
     projectCell("beta-key", 3, "A", "Subsystem / Scope"),
     projectCell("beta-value", 3, "B", "Project Beta"),
+    projectCell("repeated-alpha-key", 4, "A", "Subsystem"),
+    projectCell("repeated-alpha-value", 4, "B", "Project Alpha"),
   ];
   const weeklyChunk = {
     chunkIndex: 0,
@@ -923,16 +925,16 @@ test("ambiguous or foreign workbook scope declarations are not offered or accept
   };
   const projectChunk = {
     chunkIndex: 1,
-    chunkText: "Project information\nSubsystem / Scope: Project Alpha\nSubsystem / Scope: Project Beta",
+    chunkText: "Project information\nSubsystem / Scope: Project Alpha\nSubsystem / Scope: Project Beta\nSubsystem: Project Alpha",
     sectionLabel: "Project Info",
     sourceLocation: {
       kind: "xlsx",
       sheetName: "Project Info",
       tableNumber: 0,
       rowStart: 1,
-      rowEnd: 3,
+      rowEnd: 4,
       cellRangeStart: "A1",
-      cellRangeEnd: "B3",
+      cellRangeEnd: "B4",
     },
     sourceReferences: projectReferences,
   };
@@ -956,6 +958,13 @@ test("ambiguous or foreign workbook scope declarations are not offered or accept
         sheetName: "Project Info",
         keyCell: "A3",
         valueCell: "B3",
+      },
+      {
+        key: "Subsystem",
+        value: "Project Alpha",
+        sheetName: "Project Info",
+        keyCell: "A4",
+        valueCell: "B4",
       },
     ],
     sheetTitles: allSheetTitles,
@@ -1022,6 +1031,111 @@ test("ambiguous or foreign workbook scope declarations are not offered or accept
     ambiguous.extraction.quality_warnings.join(" "),
     /scope_source_id must cite the matching declared subject value cell/,
   );
+  const singleTitleText = "Weekly status for Project Alpha";
+  const singleTitleReference = {
+    ...titleReference,
+    text: singleTitleText,
+    modelText: singleTitleText,
+    cell: {
+      ...titleReference.cell,
+      value: singleTitleText,
+      rawValue: singleTitleText,
+    },
+  };
+  const shadowTitleRowText = `${singleTitleText} ${"Merged title context ".repeat(20)}`;
+  const shadowTitleRowReference = {
+    sourceId: "weekly-title-row",
+    chunkIndex: 0,
+    text: shadowTitleRowText,
+    modelText: shadowTitleRowText,
+    sourceLocation: titleLocation,
+  };
+  const singleTitleWeeklyChunk = {
+    ...weeklyChunk,
+    chunkText: `${singleTitleText}\n${rowText}`,
+    sourceReferences: [shadowTitleRowReference, singleTitleReference, rowReference],
+  };
+  const singleSubjectMetadata = {
+    parserVersion: "duplicate-same-value-scope-test-v1",
+    subjects: [
+      {
+        key: "Subsystem / Scope",
+        value: "Project Alpha",
+        sheetName: "Project Info",
+        keyCell: "A2",
+        valueCell: "B2",
+      },
+      {
+        key: "Subsystem",
+        value: "Project Alpha",
+        sheetName: "Project Info",
+        keyCell: "A4",
+        valueCell: "B4",
+      },
+    ],
+    sheetTitles: {
+      ...allSheetTitles,
+      Weekly: { text: singleTitleText, cell: "A1" },
+    },
+  };
+  const repeatedSameValue = await run(
+    [singleTitleWeeklyChunk, projectChunk],
+    singleSubjectMetadata,
+    "alpha-value",
+  );
+  const repeatedKey = repeatedSameValue.context.find((entry) => entry.kind === "declared_subject_key");
+  const repeatedValue = repeatedSameValue.context.find((entry) => entry.kind === "declared_subject");
+  assert.equal(repeatedKey?.source_id, "alpha-key");
+  assert.equal(repeatedValue?.source_id, "alpha-value");
+  assert.equal(repeatedKey?.paired_source_id, repeatedValue?.source_id);
+  assert.equal(repeatedValue?.paired_source_id, repeatedKey?.source_id);
+  assert.equal(
+    repeatedSameValue.context.filter((entry) => entry.kind === "declared_subject").length,
+    1,
+    "equivalent values expose one exact parser-authored key/value pair",
+  );
+  assert.equal(repeatedSameValue.extraction.assurance_observations.progress.length, 1);
+  assert.deepEqual(
+    repeatedSameValue.extraction.assurance_observations.progress[0].scope_provenance.map(
+      ({ kind, source_id, cell_reference }) => [kind, source_id, cell_reference],
+    ),
+    [
+      ["declared_subject_key", "alpha-key", "A2"],
+      ["declared_subject", "alpha-value", "B2"],
+      ["sheet_title", "weekly-title", "A1"],
+    ],
+  );
+
+  const rangeOnlyTitleReference = {
+    ...singleTitleReference,
+    sourceLocation: titleLocation,
+    cell: undefined,
+  };
+  const rangeOnlyTitle = await run(
+    [
+      {
+        ...singleTitleWeeklyChunk,
+        sourceReferences: [rangeOnlyTitleReference, rowReference],
+      },
+      projectChunk,
+    ],
+    singleSubjectMetadata,
+    "alpha-value",
+  );
+  assert.equal(
+    rangeOnlyTitle.context.some((entry) =>
+      ["declared_subject_key", "declared_subject"].includes(entry.kind),
+    ),
+    false,
+    "a row/range reference cannot substitute for the parser-authored title cell",
+  );
+  assert.equal(
+    rangeOnlyTitle.context.some((entry) => entry.kind === "sheet_title"),
+    false,
+    "a row-level reference is not exposed as an exact title-cell citation",
+  );
+  assert.equal(rangeOnlyTitle.extraction.assurance_observations.progress.length, 0);
+
 
   const foreign = await run(
     [weeklyChunk],
@@ -1493,7 +1607,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
   assert.equal(cached.parserVersion, "document-parser/15");
-  assert.equal(cached.schemaVersion, "phase6-document-extraction/24");
+  assert.equal(cached.schemaVersion, "phase6-document-extraction/25");
 
   assert.equal(cached.status, "completed");
   assert.deepEqual(
