@@ -2349,6 +2349,8 @@ test("narrative progress needs explicit progress wording tied to its percentage"
     "risk-and-other-progress": "Risk likelihood is 25%; Project progress: 30%",
     "progress-only": "Project progress: 25%",
     "realisasi-only": "Realisasi: 25%",
+    "complete-suffix": "25% complete",
+    "actual-prefix": "Actual progress: 25%",
     "unclear-percent": "Budget utilization: 25%",
   };
   const chunks = [{
@@ -2398,6 +2400,8 @@ test("narrative progress needs explicit progress wording tied to its percentage"
       row("progress-only", "25%"),
       row("realisasi-only", "25%"),
       row("unclear-percent", "25%"),
+      row("complete-suffix", "25% complete"),
+      row("actual-prefix", "25%"),
     ];
     return modelResponse(output);
   }, async () =>
@@ -2418,6 +2422,8 @@ test("narrative progress needs explicit progress wording tied to its percentage"
       ["30%", 30, sources["risk-and-other-progress"]],
       ["25%", 25, sources["progress-only"]],
       ["25%", 25, sources["realisasi-only"]],
+      ["25% complete", 25, sources["complete-suffix"]],
+      ["25%", 25, sources["actual-prefix"]],
     ],
   );
   const warnings = result.extraction.quality_warnings.join(" ");
