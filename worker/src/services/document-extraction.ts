@@ -1311,7 +1311,30 @@ function percentTokenMatchesValue(token: string, percentValue: number): boolean 
 }
 
 const NARRATIVE_METRIC_WORD_PATTERN =
-  "(?:likelihood|likelihoods|probability|probabilities|probabilitas|rating|ratings|impact|impacts|dampak|severity|risk|risks|risked|risiko|utilization|utilizations|spent|budget|budgets|budgeted|anggaran|invoice|invoices|payment|payments|pembayaran|pembayarans|termin|termins|paid|dibayar|kontrak|contracts|contract|penyerapan|absorption|absorptions|cost|costs|biaya|expenditure|expenditures|slippage|slippages|delay|delays|keterlambatan|penyimpangan)";
+  "(?:likelihood|likelihoods|probability|probabilities|probabilitas|rating|ratings|impact|impacts|dampak|severity|risk|risks|risked|risiko|utilization|utilizations|spent|budget|budgets|budgeted|anggaran|invoice|invoices|payment|payments|pembayaran|pembayarans|termin|termins|paid|dibayar|penyerapan|absorption|absorptions|cost|costs|biaya|expenditure|expenditures|slippage|slippages|delay|delays|keterlambatan|penyimpangan|contract value|contract price|contract amount|nilai kontrak|harga kontrak)";
+// A negation word inside the value's own field means the progress claim is
+// denied, not observed; negation in a separately delimited field may belong
+// to another claim and does not veto this one.
+const NARRATIVE_NEGATION_PATTERN =
+  "(?:not|never|no|nothing|neither|nor|cannot|isn't|aren't|wasn't|weren't|hasn't|haven't|didn't|doesn't|don't|won't|can't|couldn't|belum|tidak|bukan|tanpa|gagal|failed)";
+
+function clauseIsNegated(clause: string): boolean {
+  return new RegExp(
+    `(?:^|[^\\p{L}\\p{N}])(?:${NARRATIVE_NEGATION_PATTERN})(?=$|[^\\p{L}\\p{N}])`,
+    "iu",
+  ).test(clause);
+}
+
+// True when the negation sits in the same comma-delimited field as the
+// value ("Progress not reached 25%", "25% belum tercapai") and false when
+// it belongs to another field ("Risk: not started, Project progress: 25%").
+function occurrenceIsNegated(clause: string, start: number, end: number): boolean {
+  const before = clause.slice(0, start);
+  const fieldStart = Math.max(before.lastIndexOf(","), 0);
+  const nextComma = clause.indexOf(",", end);
+  const field = clause.slice(fieldStart, nextComma >= 0 ? nextComma : clause.length);
+  return clauseIsNegated(field);
+}
 
 // Clause/field-level negative linkage: when the clause holding the
 // percentage names a risk or financial metric anywhere, the value stays a
@@ -1393,6 +1416,7 @@ function narrativeProgressPercentIsSourceLinked(
       for (const token of percentTokens) {
         const start = valueIndex + (token.index ?? 0);
         const end = start + token[0].length;
+        if (occurrenceIsNegated(text, start, end)) continue;
         if (occurrenceIsClaimedByConflictingMetric(text, start, end)) continue;
         if (
           progressBefore.test(text.slice(0, start)) ||

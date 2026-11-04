@@ -2370,6 +2370,14 @@ test("narrative progress needs explicit progress wording tied to its percentage"
     "risk-progress-label": "Risk progress: 25%",
     "pembayaran-long": "Pembayaran dari penyedia proyek yang sudah selesai 80% dari nilai kontrak",
     "risk-comma-progress": "Risk: high, Project progress: 25%",
+    "progres-belum": "Progres belum mencapai 25%",
+    "realisasi-tidak": "Realisasi tidak mencapai 25%",
+    "progress-not-reached": "Progress not reached 25%",
+    "progress-did-not-reach": "Progress did not reach 25%",
+    "belum-suffix": "25% belum tercapai",
+    "not-achieved-suffix": "25% not achieved",
+    "negation-other-field": "Risk: not started, Project progress: 25%",
+    "contract-progress": "Contract progress: 25%",
   };
   const chunks = [{
     chunkIndex: 0,
@@ -2500,6 +2508,17 @@ test("plural metrics and delimiter-to-value wording claim the percentage", async
     "progress-equals-paid": "Progress = paid 30%",
     // The same guard must not reject a clearly delimited progress field.
     "risk-comma-progress": "Risk: high, Project progress: 25%",
+    // Negated progress claims stay gaps however the negation is phrased.
+    "progres-belum": "Progres belum mencapai 25%",
+    "realisasi-tidak": "Realisasi tidak mencapai 25%",
+    "progress-not-reached": "Progress not reached 25%",
+    "progress-did-not-reach": "Progress did not reach 25%",
+    "belum-suffix": "25% belum tercapai",
+    "not-achieved-suffix": "25% not achieved",
+    // Negation in a separately delimited field may belong to another claim.
+    "negation-other-field": "Risk: not started, Project progress: 25%",
+    // A contract scope label is not a cost term by itself.
+    "contract-progress": "Contract progress: 25%",
   };
   const chunks = [{
     chunkIndex: 0,
@@ -2544,6 +2563,17 @@ test("plural metrics and delimiter-to-value wording claim the percentage", async
       row("progress-equals-paid", "30%", 30),
       // A clearly delimited progress field beside a risk field still counts.
       row("risk-comma-progress", "25%"),
+      // A negation word in the value's own field denies the claim.
+      row("progres-belum", "25%"),
+      row("realisasi-tidak", "25%"),
+      row("progress-not-reached", "25%"),
+      row("progress-did-not-reach", "25%"),
+      row("belum-suffix", "25%"),
+      row("not-achieved-suffix", "25%"),
+      // Negation in a separately delimited field may belong to another claim.
+      row("negation-other-field", "25%"),
+      // A contract scope label is not a cost term by itself.
+      row("contract-progress", "25%"),
     ];
     return modelResponse(output);
   }, async () =>
@@ -2559,10 +2589,14 @@ test("plural metrics and delimiter-to-value wording claim the percentage", async
     result.extraction.assurance_observations.progress.map(
       ({ raw_value, percent, excerpt }) => [raw_value, percent, excerpt],
     ),
-    [["25%", 25, sources["risk-comma-progress"]]],
+    [
+      ["25%", 25, sources["risk-comma-progress"]],
+      ["25%", 25, sources["negation-other-field"]],
+      ["25%", 25, sources["contract-progress"]],
+    ],
   );
   const warnings = result.extraction.quality_warnings.join(" ");
-  for (const index of [0, 1, 2, 3, 4, 5, 6, 7, 8]) {
+  for (const index of [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15]) {
     assert.match(
       warnings,
       new RegExp(`progress\\[${index}\\].*not linked to explicit progress`),
