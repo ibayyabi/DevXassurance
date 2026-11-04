@@ -296,7 +296,13 @@ test("XLSX normalizes recognized dates using workbook epoch and flags invalid or
     .find((source) => source.sourceLocation?.cellRangeStart === "B2");
   assert.equal(cachedDateCell?.cell?.dateIso, "1900-03-01");
   assert.match(legacyText, /45292.*number format: 0\.00/);
-  assert.doesNotMatch(legacyText, /45292.*ISO date/);
+  // The custom 0.00 cell is not normalized as a date; assert its own structured
+  // metadata rather than a cross-cell ordering of chunk text.
+  const ambiguousCell = legacy.chunks
+    .flatMap((chunk) => chunk.sourceReferences ?? [])
+    .find((source) => source.sourceLocation?.cellRangeStart === "C2");
+  assert.equal(ambiguousCell?.cell?.dateIso, null);
+  assert.equal(ambiguousCell?.cell?.value, "45292");
 
   const modern = await parseDocumentBuffer(
     "modern.xlsx",
