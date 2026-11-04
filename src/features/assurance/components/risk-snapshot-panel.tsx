@@ -10,6 +10,7 @@ import type { RiskMapping } from "@/features/assurance/lib/risk-comparison";
 import type { AssuranceReview } from "@/features/assurance/lib/queries";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SectionCard } from "@/components/ui/section-card";
 
 type RiskSnapshot = {
   sourceId: string | null;
@@ -48,6 +49,8 @@ type RiskItemFinding = {
 
 type UnidentifiedRisk = { role: "baseline" | "current"; snapshot: RiskSnapshot };
 
+const roleLabels: Record<string, string> = { baseline: "Baseline", current: "Periode Berjalan" };
+
 export function RiskSnapshotPanel({
   projectId,
   review,
@@ -70,28 +73,17 @@ export function RiskSnapshotPanel({
   const acceptedScale = scaleMappings.filter((mapping) => mapping.state === "accepted");
 
   return (
-    <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
-      <div className="flex items-center gap-2">
-        <ShieldAlert className="h-4 w-4 text-ink-muted" />
-        <p className="text-sm font-medium text-ink-muted">Risk snapshots</p>
-      </div>
-      <h2 className="mt-1 text-lg font-semibold text-ink">
-        Compare risk items only when their identity is established
-      </h2>
-      <p className="mt-2 max-w-3xl text-sm leading-6 text-ink-muted">
-        Risks match only by exact ID or a reviewer-accepted mapping — a similar
-        name is not identity. “New” and “increased” appear only with a matched
-        identity and a comparable earlier snapshot. Ratings compare only within
-        the same scale or an accepted scale mapping. No project Risk score is
-        produced.
-      </p>
-
+    <SectionCard
+      icon={ShieldAlert}
+      title="Potret risiko — bandingkan item risiko hanya jika identitasnya terpasti"
+      subtitle="Risiko dicocokkan hanya melalui ID yang sama persis atau pemetaan yang disetujui peninjau — nama yang mirip bukan identitas. “Baru” dan “meningkat” hanya muncul bila identitasnya cocok dan ada potret sebelumnya yang dapat dibandingkan. Peringkat hanya dibandingkan dalam skala yang sama atau pemetaan skala yang disetujui. Tidak ada skor Risiko total proyek yang dihasilkan."
+    >
       {/* Item-level risk findings */}
-      <h3 className="mt-5 text-sm font-semibold text-ink">Item-level risk findings</h3>
+      <h3 className="text-sm font-semibold text-ink">Temuan risiko per item</h3>
       {items.length === 0 ? (
         <p className="mt-2 rounded-xl border border-dashed border-ui-border p-4 text-sm text-ink-muted">
-          No comparable risk items yet. Run the analysis with risk evidence that
-          states risk IDs across periods.
+          Belum ada item risiko yang dapat dibandingkan. Jalankan analisis
+          dengan bukti risiko yang menyebutkan ID risiko antarperiode.
         </p>
       ) : (
         <ul className="mt-2 space-y-3">
@@ -121,18 +113,18 @@ export function RiskSnapshotPanel({
       {unidentified.length > 0 && (
         <>
           <h3 className="mt-6 text-sm font-semibold text-ink">
-            Risks without an established identity
+            Risiko tanpa identitas yang terpasti
           </h3>
           <ul className="mt-2 space-y-2">
             {unidentified.map((entry, index) => (
               <li key={`${entry.role}-${index}`} className="rounded-xl border border-ui-border p-3 text-sm">
-                <span className="text-xs font-semibold uppercase text-ink-muted">{entry.role}</span>
+                <span className="text-xs font-semibold uppercase text-ink-muted">{roleLabels[entry.role] ?? entry.role}</span>
                 <p className="mt-1 text-ink">
-                  {entry.snapshot.name ?? entry.snapshot.description ?? "Unnamed risk"}
+                  {entry.snapshot.name ?? entry.snapshot.description ?? "Risiko tanpa nama"}
                   {entry.snapshot.ratingLabel && ` · ${entry.snapshot.ratingLabel}`}
                 </p>
                 <p className="mt-1 text-xs text-ink-muted">
-                  No source risk ID stated, so this item is not compared. Map a source ID to compare it.
+                  Tidak ada ID risiko sumber yang disebutkan, sehingga item ini tidak dibandingkan. Petakan ID sumber untuk membandingkannya.
                 </p>
               </li>
             ))}
@@ -142,8 +134,8 @@ export function RiskSnapshotPanel({
 
       {/* Identity mappings */}
       <MappingBlock
-        title="Accepted risk ID mappings"
-        emptyText="None accepted. Differing-ID risks stay separate until a reviewer maps them."
+        title="Pemetaan ID risiko yang disetujui"
+        emptyText="Belum ada yang disetujui. Risiko ber-ID berbeda tetap terpisah sampai peninjau memetakannya."
         mappings={acceptedIdentity}
         canApprove={canApprove}
         projectId={projectId}
@@ -151,15 +143,15 @@ export function RiskSnapshotPanel({
         acceptAction={acceptRiskIdentityMapping}
         datalistId="risk-source-ids"
         options={sourceIds}
-        sourcePlaceholder="e.g. R-12"
-        canonicalPlaceholder="e.g. RISK-012"
-        notePlaceholder="Why these are the same risk"
+        sourcePlaceholder="mis. R-12"
+        canonicalPlaceholder="mis. RISK-012"
+        notePlaceholder="Alasan keduanya adalah risiko yang sama"
       />
 
       {/* Scale mappings */}
       <MappingBlock
-        title="Accepted rating scale mappings"
-        emptyText="None accepted. Ratings on differing scales are preserved but not compared."
+        title="Pemetaan skala peringkat yang disetujui"
+        emptyText="Belum ada yang disetujui. Peringkat pada skala berbeda tetap disimpan tetapi tidak dibandingkan."
         mappings={acceptedScale}
         canApprove={canApprove}
         projectId={projectId}
@@ -167,11 +159,11 @@ export function RiskSnapshotPanel({
         acceptAction={acceptRiskScaleMapping}
         datalistId="risk-source-scales"
         options={sourceScales}
-        sourcePlaceholder="e.g. Low/Med/High"
-        canonicalPlaceholder="e.g. 1-5"
-        notePlaceholder="How these scales align"
+        sourcePlaceholder="mis. Rendah/Sedang/Tinggi"
+        canonicalPlaceholder="mis. 1-5"
+        notePlaceholder="Cara skala ini saling berkorespondensi"
       />
-    </section>
+    </SectionCard>
   );
 }
 
@@ -223,7 +215,7 @@ function MappingBlock({
                   <input type="hidden" name="mappingId" value={mapping.id} />
                   <Button type="submit" size="sm" variant="outline">
                     <Trash2 className="h-4 w-4" />
-                    Remove
+                    Hapus
                   </Button>
                 </form>
               )}
@@ -235,7 +227,7 @@ function MappingBlock({
         <form action={acceptAction} className="mt-3 grid gap-3 rounded-xl border border-ui-border p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
           <input type="hidden" name="projectId" value={projectId} />
           <label className="text-xs font-medium text-ink-muted">
-            Source (from evidence)
+            Sumber (dari bukti)
             <Input name="sourceLabel" list={datalistId} required placeholder={sourcePlaceholder} className="mt-1" />
             <datalist id={datalistId}>
               {options.map((option) => (
@@ -244,15 +236,15 @@ function MappingBlock({
             </datalist>
           </label>
           <label className="text-xs font-medium text-ink-muted">
-            Canonical
+            Kanonik
             <Input name="canonicalLabel" required placeholder={canonicalPlaceholder} className="mt-1" />
           </label>
           <Button type="submit" variant="outline">
             <GitMerge className="h-4 w-4" />
-            Accept mapping
+            Setujui pemetaan
           </Button>
           <label className="text-xs font-medium text-ink-muted sm:col-span-3">
-            Note (optional)
+            Catatan (opsional)
             <Input name="note" placeholder={notePlaceholder} className="mt-1" />
           </label>
         </form>
@@ -270,7 +262,7 @@ function RiskSources({
 }) {
   const lines = [
     baseline?.excerpt ? { role: "Baseline", snapshot: baseline } : null,
-    current?.excerpt ? { role: "Current", snapshot: current } : null,
+    current?.excerpt ? { role: "Periode Berjalan", snapshot: current } : null,
   ].filter((line): line is { role: string; snapshot: RiskSnapshot } => line !== null);
   if (lines.length === 0) return null;
   return (
@@ -279,7 +271,7 @@ function RiskSources({
         <li key={line.role}>
           <span className="font-medium text-ink">{line.role}:</span> “{line.snapshot.excerpt}”
           {line.snapshot.periodLabel && ` — ${line.snapshot.periodLabel}`}
-          {line.snapshot.asOfDate && ` (as of ${line.snapshot.asOfDate})`}
+          {line.snapshot.asOfDate && ` (per ${line.snapshot.asOfDate})`}
         </li>
       ))}
     </ul>
@@ -291,36 +283,36 @@ function describeChange(item: RiskItemFinding) {
     snapshot?.ratingLabel ?? (snapshot?.ratingValue !== null && snapshot?.ratingValue !== undefined ? String(snapshot.ratingValue) : "—");
   switch (item.changeType) {
     case "new":
-      return `First reported this period at ${rating(item.current)}${scaleSuffix(item.current)}.`;
+      return `Pertama dilaporkan pada periode ini di ${rating(item.current)}${scaleSuffix(item.current)}.`;
     case "resolved":
-      return `In the earlier snapshot (${rating(item.baseline)}${scaleSuffix(item.baseline)}), not reported now.`;
+      return `Ada di potret sebelumnya (${rating(item.baseline)}${scaleSuffix(item.baseline)}), tidak dilaporkan kini.`;
     case "increased":
     case "decreased":
     case "unchanged":
-      return `Rating ${rating(item.baseline)} → ${rating(item.current)}${scaleSuffix(item.current)}${item.ratingDelta !== null ? ` (${item.ratingDelta >= 0 ? "+" : ""}${item.ratingDelta})` : ""}.`;
+      return `Peringkat ${rating(item.baseline)} → ${rating(item.current)}${scaleSuffix(item.current)}${item.ratingDelta !== null ? ` (${item.ratingDelta >= 0 ? "+" : ""}${item.ratingDelta})` : ""}.`;
     case "rating_changed":
-      return `Rating changed ${rating(item.baseline)} → ${rating(item.current)}; direction not determinable without numeric values.`;
+      return `Peringkat berubah ${rating(item.baseline)} → ${rating(item.current)}; arah tidak dapat dipastikan tanpa nilai numerik.`;
     case "rating_not_comparable":
-      return `Present in both, but ratings use different scales (${item.baseline?.scaleLabel ?? "—"} vs ${item.current?.scaleLabel ?? "—"}) with no accepted scale mapping.`;
+      return `Ada di keduanya, tetapi peringkat memakai skala berbeda (${item.baseline?.scaleLabel ?? "—"} vs ${item.current?.scaleLabel ?? "—"}) tanpa pemetaan skala yang disetujui.`;
     default:
-      return "Present in both snapshots; no rating available to compare.";
+      return "Ada di kedua potret; tidak ada peringkat yang dapat dibandingkan.";
   }
 }
 
 function scaleSuffix(snapshot: RiskSnapshot | null) {
-  return snapshot?.scaleLabel ? ` on ${snapshot.scaleLabel}` : "";
+  return snapshot?.scaleLabel ? ` pada skala ${snapshot.scaleLabel}` : "";
 }
 
 function changeLabel(change: RiskChangeType) {
   const labels: Record<RiskChangeType, string> = {
-    new: "New",
-    increased: "Increased",
-    decreased: "Decreased",
-    unchanged: "Unchanged",
-    rating_changed: "Rating changed",
-    rating_not_comparable: "Not comparable",
-    present: "Present",
-    resolved: "No longer reported",
+    new: "Baru",
+    increased: "Meningkat",
+    decreased: "Menurun",
+    unchanged: "Tidak berubah",
+    rating_changed: "Peringkat berubah",
+    rating_not_comparable: "Tidak dapat dibandingkan",
+    present: "Ada",
+    resolved: "Tidak dilaporkan lagi",
   };
   return labels[change];
 }

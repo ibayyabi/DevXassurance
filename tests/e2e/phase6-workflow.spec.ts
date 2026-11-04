@@ -55,12 +55,13 @@ type WorkerPayload = {
     section_label: string | null;
     parser_metadata: Record<string, unknown>;
   }>;
-  facts?: unknown[];
-  summary?: unknown;
-  summary_sources?: unknown[];
-  health_snapshots?: unknown[];
-  alerts?: unknown[];
-  actions?: unknown[];
+  facts?: Array<Record<string, unknown>>;
+  summary?: Record<string, unknown> | null;
+  summary_sources?: Array<Record<string, unknown>>;
+  health_snapshots?: Array<Record<string, unknown>>;
+  alerts?: Array<Record<string, unknown>>;
+  actions?: Array<Record<string, unknown>>;
+  anomalies?: Array<Record<string, unknown>>;
   document_suggestions?: Record<string, unknown>;
   parser_metadata?: Record<string, unknown>;
   errorCode?: string;
@@ -593,34 +594,14 @@ async function waitForAssuranceAnalysis(projectId: string, reviewId: string) {
 async function processUploadedDocument(projectId: string, fileName: string) {
   const document = await getDocument(projectId, fileName);
   const job = await waitForJob(projectId, fileName);
-  const now = new Date().toISOString();
-  const leaseUntil = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-  const { data: claimedJob, error: claimError } = await db().from("ai_jobs")
-    .update({ status: "processing", claimed_at: now, lease_expires_at: leaseUntil, updated_at: now })
-    .eq("id", job.id)
-    .eq("project_id", projectId)
-    .eq("document_id", document.id)
-    .eq("status", "queued")
-    .select("id")
-    .maybeSingle();
+  const { data: claimedJobs, error: claimError } = await db().rpc(
+    "claim_document_job",
+    { p_job_id: job.id },
+  );
   if (claimError) throw new Error(`Could not claim the E2E parse job for ${fileName}.`);
-  if (!claimedJob) return { ...(await waitForPersistedResult(projectId, document.id, fileName)), jobId: job.id };
-
-  const { data: processingDocument, error: documentError } = await db().from("documents")
-    .update({ processing_status: "processing", processing_error: null, updated_at: now })
-    .eq("id", document.id)
-    .eq("project_id", projectId)
-    .select("id")
-    .maybeSingle();
-  if (documentError || !processingDocument) {
-    const { data: resetJob, error: resetError } = await db().from("ai_jobs")
-      .update({ status: "queued", claimed_at: null, lease_expires_at: null })
-      .eq("id", job.id)
-      .eq("project_id", projectId)
-      .select("id")
-      .maybeSingle();
-    if (resetError || !resetJob) throw new Error(`Could not release the E2E parse job for ${fileName}.`);
-    throw new Error(`Could not set the E2E document ${fileName} to processing.`);
+  const claimedJob = Array.isArray(claimedJobs) ? claimedJobs[0] : claimedJobs;
+  if (!claimedJob?.claim_token) {
+    return { ...(await waitForPersistedResult(projectId, document.id, fileName)), jobId: job.id };
   }
 
   const response = await fetch(`${APP_ORIGIN}/api/workers/parse-document`, {
@@ -629,38 +610,46 @@ async function processUploadedDocument(projectId: string, fileName: string) {
       "content-type": "application/json",
       "x-xass-worker-secret": process.env.XASS_WORKER_SECRET ?? "",
     },
-    body: JSON.stringify({ job_id: job.id, project_id: projectId, document_id: document.id }),
+    body: JSON.stringify({
+      job_id: job.id,
+      claim_token: claimedJob.claim_token,
+      project_id: projectId,
+      document_id: document.id,
+    }),
   });
   const payload = await response.json() as WorkerPayload;
-  if (!response.ok || payload.ok !== true) return { ok: false, status: response.status, payload, documentId: document.id, jobId: job.id };
+  if (!response.ok || payload.ok !== true) {
+    return { ok: false, status: response.status, payload, documentId: document.id, jobId: job.id };
+  }
   if (!Array.isArray(payload.chunks) || payload.chunks.length === 0) {
     throw new Error(`The actual parser worker returned no source chunks for ${fileName}.`);
   }
-  const { error: runError } = await db().from("extraction_runs").insert({
-    project_id: projectId,
-    document_id: document.id,
-    ai_job_id: job.id,
-    status: "completed",
-    metadata: { parser_metadata: payload.parser_metadata ?? {}, source: "phase6-e2e-worker-result" },
-  });
-  if (runError) throw new Error(`Could not persist the completed worker run for ${fileName}.`);
-  const rows = payload.chunks.map((chunk) => ({
-    project_id: projectId,
-    document_id: document.id,
-    chunk_index: chunk.chunk_index,
-    chunk_text: chunk.chunk_text,
-    page_number: chunk.page_number,
-    section_label: chunk.section_label,
-    parser_metadata: chunk.parser_metadata ?? {},
+
+  const result = JSON.parse(JSON.stringify({
+    worker: payload.worker ?? "next_document_worker",
+    processing_status: payload.processing_status === "needs_review" ? "needs_review" : "completed",
+    processing_error: payload.processing_error ?? null,
+    facts: payload.facts ?? [],
+    summary: payload.summary ?? null,
+    summary_sources: (payload.summary_sources ?? []).map((source) => ({
+      chunk_index: source.evidence_chunk_index,
+      excerpt: source.excerpt,
+      confidence: source.confidence,
+    })),
+    health_snapshots: (payload.health_snapshots ?? []).filter(
+      (snapshot) => snapshot.snapshot_date !== null && snapshot.snapshot_date !== undefined,
+    ),
+    alerts: payload.alerts ?? [],
+    actions: payload.actions ?? [],
+    anomalies: payload.anomalies ?? [],
+    extraction_run_metadata: { parser_metadata: payload.parser_metadata ?? {}, chunk_count: payload.chunks.length },
   }));
-  const { error: chunkError } = await db().from("document_chunks").upsert(rows, { onConflict: "document_id,chunk_index" });
-  if (chunkError) throw new Error(`Could not persist the worker source chunks for ${fileName}.`);
-  const finishedAt = new Date().toISOString();
-  const [{ data: completedJob, error: jobError }, { data: resultDocument, error: resultDocumentError }] = await Promise.all([
-    db().from("ai_jobs").update({ status: "completed", error_code: null, error_message: null, completed_at: finishedAt, claimed_at: null, lease_expires_at: null, updated_at: finishedAt }).eq("id", job.id).eq("project_id", projectId).select("id").maybeSingle(),
-    db().from("documents").update({ processing_status: payload.processing_status ?? "needs_review", processing_error: payload.processing_error ?? null, updated_at: finishedAt }).eq("id", document.id).eq("project_id", projectId).select("id").maybeSingle(),
-  ]);
-  if (jobError || resultDocumentError || !completedJob || !resultDocument) throw new Error(`Could not apply the worker result to ${fileName}.`);
+  const { error: publishError } = await db().rpc("complete_document_job", {
+    p_job_id: job.id,
+    p_claim_token: claimedJob.claim_token,
+    p_result: result,
+  });
+  if (publishError) throw new Error(`Could not publish the worker result for ${fileName}.`);
   return { ok: true, status: response.status, payload, documentId: document.id, jobId: job.id };
 }
 

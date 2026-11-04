@@ -296,6 +296,15 @@ export type ParseResult =
       errorMessage: string;
     };
 
+// One spreadsheet cell's own evidence: label context, exact cell locator, and
+// the cell's literal text. A formula cell keeps its formula/cache disclaimer, so
+// a cell reference never presents a formula as a literal value.
+type SourceCellReference = {
+  text: string;
+  modelText: string;
+  location: ParsedSourceLocation;
+};
+
 type SourceBlock = {
   text: string;
   kind: "heading" | "paragraph" | "table-header" | "table-row";
@@ -305,6 +314,7 @@ type SourceBlock = {
   continuation?: string;
   modelText?: string;
   formulaCells?: FormulaCell[];
+  cellReferences?: SourceCellReference[];
 };
 
 type FormulaCell = {
@@ -324,8 +334,13 @@ type ZipTextReader = {
   files: Record<string, unknown>;
 };
 
-const PARSER_VERSION = "document-parser/8";
+const PARSER_VERSION = "document-parser/9";
 const MAX_CHUNK_LENGTH = 4000;
+// Growth ceiling per chunk: retained row references always fit, then cell
+// references are added row by row. Cells left uncovered stay citable through
+// their row reference, which keeps the conservative row+column guard in play.
+// ponytail: fixed cap; make it adaptive per group if prompt size ever binds.
+const MAX_SOURCE_REFERENCES_PER_CHUNK = 120;
 const PARAGRAPH_OVERLAP = 160;
 const CHUNK_CONTEXT_BUDGET = 900;
 const MAX_SOURCE_BLOCK_PART_LENGTH = MAX_CHUNK_LENGTH - CHUNK_CONTEXT_BUDGET;
@@ -750,20 +765,30 @@ async function parseXlsxDocument(
           if (row.cells.some((cell) => cell.dateFormat)) {
             warnings.push(`Sheet "${sheet.name}" contains date-formatted raw values; recognized dates are normalized and invalid or unavailable values need review.`);
           }
+          const rowLocation: ParsedSourceLocation = {
+            kind: "xlsx",
+            sheetName: sheet.name,
+            tableNumber: tableIndex,
+            rowStart: row.number,
+            rowEnd: row.number,
+            cellRangeStart: row.cells[0].reference,
+            cellRangeEnd: row.cells[row.cells.length - 1].reference,
+          };
           blocks.push({
             text,
             modelText,
             kind: "table-row",
             formulaCells: formulaCellsForRow(row),
-            location: {
-              kind: "xlsx",
-              sheetName: sheet.name,
-              tableNumber: tableIndex,
-              rowStart: row.number,
-              rowEnd: row.number,
-              cellRangeStart: row.cells[0].reference,
-              cellRangeEnd: row.cells[row.cells.length - 1].reference,
-            },
+            location: rowLocation,
+            cellReferences: row.cells.map((cell, cellIndex) => ({
+              text: cells[cellIndex].text,
+              modelText: cells[cellIndex].modelText,
+              location: {
+                ...rowLocation,
+                cellRangeStart: cell.reference,
+                cellRangeEnd: cell.reference,
+              },
+            })),
             groupKey: `sheet:${sheet.name}:table:${tableIndex}`,
             sectionLabel: sheet.name,
           });
@@ -1609,6 +1634,32 @@ function chunkBlockGroup(blocks: SourceBlock[]): ParsedChunk[] {
   const flush = () => {
     if (!text || !sourceBlocks.length) return;
     const sourceLocation = mergeSourceLocations(sourceBlocks);
+    const sourceReferences: ParsedSourceReference[] = [];
+    const addReference = (
+      reference: Pick<ParsedSourceReference, "text" | "modelText" | "sourceLocation">,
+    ) => {
+      sourceReferences.push({
+        sourceId: `s${chunks.length}s${sourceReferences.length}`,
+        chunkIndex: chunks.length,
+        ...reference,
+      });
+    };
+    for (const block of sourceBlocks) {
+      // The row/table reference is retained first so row-level relations and
+      // range citations keep working; per-cell references follow.
+      addReference({
+        text: block.text,
+        modelText: block.modelText ?? block.text,
+        sourceLocation: block.location,
+      });
+      const cellReferences = block.cellReferences ?? [];
+      if (sourceReferences.length + cellReferences.length > MAX_SOURCE_REFERENCES_PER_CHUNK) {
+        continue;
+      }
+      for (const cell of cellReferences) {
+        addReference({ text: cell.text, modelText: cell.modelText, sourceLocation: cell.location });
+      }
+    }
     chunks.push({
       chunkIndex: chunks.length,
       chunkText: text.trim(),
@@ -1619,13 +1670,7 @@ function chunkBlockGroup(blocks: SourceBlock[]): ParsedChunk[] {
       sectionLabel,
       sourceLocation,
       formulaCells: sourceBlocks.flatMap((block) => block.formulaCells ?? []),
-      sourceReferences: sourceBlocks.map((block, sourceIndex) => ({
-        sourceId: `s${chunks.length}s${sourceIndex}`,
-        chunkIndex: chunks.length,
-        text: block.text,
-        modelText: block.modelText ?? block.text,
-        sourceLocation: block.location,
-      })),
+      sourceReferences,
     });
     text = "";
     sourceBlocks = [];
@@ -1704,17 +1749,22 @@ function splitSourceBlock(block: SourceBlock): SourceBlock[] {
   const modelText = block.text.length > MAX_SOURCE_BLOCK_PART_LENGTH
     ? undefined
     : block.modelText;
+  // A split part no longer contains the whole row, so its per-cell locators would
+  // not describe that part; keep only the retained row reference for such rows.
+  const cellReferences = remaining.length > MAX_SOURCE_BLOCK_PART_LENGTH
+    ? undefined
+    : block.cellReferences;
 
   while (remaining.length > MAX_SOURCE_BLOCK_PART_LENGTH) {
     let splitAt = remaining.lastIndexOf(" ", MAX_SOURCE_BLOCK_PART_LENGTH);
     if (splitAt < 1) splitAt = MAX_SOURCE_BLOCK_PART_LENGTH;
     const part = remaining.slice(0, splitAt).trimEnd();
-    parts.push({ ...block, text: part, modelText, continuation });
+    parts.push({ ...block, text: part, modelText, cellReferences, continuation });
     continuation =
       block.kind === "paragraph" ? part.slice(-PARAGRAPH_OVERLAP) : undefined;
     remaining = remaining.slice(splitAt).trimStart();
   }
-  if (remaining) parts.push({ ...block, text: remaining, modelText, continuation });
+  if (remaining) parts.push({ ...block, text: remaining, modelText, cellReferences, continuation });
   return parts;
 }
 

@@ -1,0 +1,1619 @@
+{
+  "pack": "smart-building-itb",
+  "project": "Smart Building DKST ITB",
+  "currency": "IDR",
+  "baseline": {
+    "approved_date": "2026-09-18",
+    "contract_value": 6802375321,
+    "hardware_baseline_total": 1309670793.0,
+    "purchase_request_total": 1375170793.0,
+    "purchase_request_note": "Pengajuan 2-Okt tidak memuat SB11-01; SB11-01 masuk pengadaan gelombang 2 (MoM 30-Okt). SB12-05 Workstation hanya ada di Pengajuan 16-Okt.",
+    "milestones": [
+      {
+        "id": "M3",
+        "name": "Minimum 60% progress",
+        "date": "2026-10-31"
+      },
+      {
+        "id": "M4",
+        "name": "Minimum 80% progress",
+        "date": "2026-11-30"
+      },
+      {
+        "id": "M5",
+        "name": "Technical readiness 100%",
+        "date": "2026-12-04"
+      },
+      {
+        "id": "M6",
+        "name": "Final BA / handover documentation",
+        "date": "2026-12-18"
+      },
+      {
+        "id": "M7",
+        "name": "Administrative closeout",
+        "date": "2026-12-31"
+      }
+    ],
+    "note": "Baseline 18-Sep-2026 tetap berlaku untuk semua sesi; laporan mingguan tidak menggantikan baseline."
+  },
+  "report_filenames": [
+    "01_Alarm_Kebencanaan_Subcontractor_Weekly.xlsx",
+    "02_Kamera_Pengawasan_Subcontractor_Weekly.xlsx",
+    "03_Kontrol_Akses_Subcontractor_Weekly.xlsx",
+    "04_Kelistrikan_Subcontractor_Weekly.xlsx",
+    "06_Pengkondisian_Udara_Subcontractor_Weekly.xlsx",
+    "09_Pengelolaan_Sampah_Subcontractor_Weekly.xlsx",
+    "05_Pencahayaan_Subcontractor_Weekly.xlsx",
+    "07_Air_Bersih_Subcontractor_Weekly.xlsx",
+    "08_Air_Limbah_Subcontractor_Weekly.xlsx",
+    "10_Ventilasi_Subcontractor_Weekly.xlsx",
+    "11_Pengelolaan_Utilitas_Subcontractor_Weekly.xlsx",
+    "12_BISMA_Subcontractor_Weekly.xlsx"
+  ],
+  "reupload_flow": "file dengan nama sama di-upload ulang di setiap sesi; periode dibedakan oleh Cut-off Date pada sheet Weekly Report dan Reporting Cut-off pada PM Summary",
+  "rag_rules": "variance <= -10% Red; -10% < variance <= -5% Amber; else Green (mengikuti rumus Weekly Report)",
+  "sessions": [
+    {
+      "session": "2026-10-09_w4",
+      "cut_off": "2026-10-09",
+      "week": 4,
+      "mom_file": "MoM_2026-10-09_Diskusi_Teknis.docx",
+      "components": {
+        "SB01": {
+          "name": "Alarm Kebencanaan",
+          "report_file": "01_Alarm_Kebencanaan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.1145,
+          "actual_percent": 0.125,
+          "variance_percent": 0.0105,
+          "rag": "Green",
+          "overall_weighted_progress": 0.125,
+          "wbs_percent_complete": [
+            1.0,
+            0.8125,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.2 Dokumen desain teknis disetujui - 16-Oct-2026"
+        },
+        "SB02": {
+          "name": "Kamera Pengawasan",
+          "report_file": "02_Kamera_Pengawasan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.1009,
+          "actual_percent": 0.045,
+          "variance_percent": -0.0559,
+          "rag": "Amber",
+          "overall_weighted_progress": 0.045,
+          "wbs_percent_complete": [
+            0.75,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.1 Titik pemasangan disetujui (dokumen Konsep) - 09-Oct-2026"
+        },
+        "SB03": {
+          "name": "Kontrol Akses",
+          "report_file": "03_Kontrol_Akses_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.1084,
+          "actual_percent": 0.055,
+          "variance_percent": -0.0534,
+          "rag": "Amber",
+          "overall_weighted_progress": 0.055,
+          "wbs_percent_complete": [
+            0.6875,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB03-001"
+          ],
+          "new_risks": [
+            "R-SB03-001"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.1 Titik reader disetujui; izin tertulis - 16-Oct-2026"
+        },
+        "SB04": {
+          "name": "Kelistrikan",
+          "report_file": "04_Kelistrikan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.0075,
+          "actual_percent": 0.03,
+          "variance_percent": 0.0225,
+          "rag": "Green",
+          "overall_weighted_progress": 0.03,
+          "wbs_percent_complete": [
+            0.5,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.1 Daftar titik dan SLD terverifikasi - 16-Oct-2026"
+        },
+        "SB05": {
+          "name": "Pengkondisian Udara",
+          "report_file": "06_Pengkondisian_Udara_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.0053,
+          "actual_percent": 0.028,
+          "variance_percent": 0.0227,
+          "rag": "Green",
+          "overall_weighted_progress": 0.028,
+          "wbs_percent_complete": [
+            0.35,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB05-001"
+          ],
+          "new_risks": [
+            "R-SB05-001"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.1 Lingkup disepakati PPK - 23-Oct-2026"
+        },
+        "SB06": {
+          "name": "Pengelolaan Sampah",
+          "report_file": "09_Pengelolaan_Sampah_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.0607,
+          "actual_percent": 0.062,
+          "variance_percent": 0.0013,
+          "rag": "Green",
+          "overall_weighted_progress": 0.062,
+          "wbs_percent_complete": [
+            0.775,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.1 Keputusan hardware dan titik pemasangan - 16-Oct-2026"
+        },
+        "SB07": {
+          "name": "Pencahayaan",
+          "report_file": "05_Pencahayaan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.18,
+          "actual_percent": 0.125,
+          "variance_percent": -0.055,
+          "rag": "Amber",
+          "overall_weighted_progress": 0.125,
+          "wbs_percent_complete": [
+            1.0,
+            0.45,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB07-001"
+          ],
+          "new_risks": [
+            "R-SB07-001"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "2.1 Dokumen desain disetujui - 09-Oct-2026"
+        },
+        "SB08": {
+          "name": "Air Bersih",
+          "report_file": "07_Air_Bersih_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.18,
+          "actual_percent": 0.14,
+          "variance_percent": -0.04,
+          "rag": "Green",
+          "overall_weighted_progress": 0.14,
+          "wbs_percent_complete": [
+            1.0,
+            0.6,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB08-001"
+          ],
+          "new_risks": [
+            "R-SB08-001"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "2.1 Dokumen desain disetujui - 09-Oct-2026"
+        },
+        "SB09": {
+          "name": "Air Limbah",
+          "report_file": "08_Air_Limbah_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.18,
+          "actual_percent": 0.19,
+          "variance_percent": 0.01,
+          "rag": "Green",
+          "overall_weighted_progress": 0.19,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            0.0667,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB09-001",
+            "R-SB09-002"
+          ],
+          "new_risks": [
+            "R-SB09-001",
+            "R-SB09-002"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Barang diterima (delivery note) - 30-Oct-2026"
+        },
+        "SB10": {
+          "name": "Ventilasi",
+          "report_file": "10_Ventilasi_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.18,
+          "actual_percent": 0.005,
+          "variance_percent": -0.175,
+          "rag": "Red",
+          "overall_weighted_progress": 0.005,
+          "wbs_percent_complete": [
+            0.0625,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB10-001"
+          ],
+          "new_risks": [
+            "R-SB10-001"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "2.1 Dokumen desain disetujui - 09-Oct-2026"
+        },
+        "SB11": {
+          "name": "Pengelolaan Utilitas",
+          "report_file": "11_Pengelolaan_Utilitas_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.18,
+          "actual_percent": 0.01,
+          "variance_percent": -0.17,
+          "rag": "Red",
+          "overall_weighted_progress": 0.01,
+          "wbs_percent_complete": [
+            0.125,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB11-001"
+          ],
+          "new_risks": [
+            "R-SB11-001"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "2.1 Design approved - 09-Oct-2026"
+        },
+        "SB12": {
+          "name": "BISMA",
+          "report_file": "12_BISMA_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.18,
+          "actual_percent": 0.34,
+          "variance_percent": 0.16,
+          "rag": "Green",
+          "overall_weighted_progress": 0.34,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            0.6807,
+            0.2632,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB12-001"
+          ],
+          "new_risks": [
+            "R-SB12-001"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Environment ready - 16-Oct-2026"
+        }
+      },
+      "project_rollup": {
+        "note": "rata-rata sama-bobot 12 komponen; sistem tidak boleh menghitung skor gabungan tanpa menandai sumber",
+        "average_actual_percent": 0.0963,
+        "on_track": [
+          "SB01",
+          "SB04",
+          "SB05",
+          "SB06",
+          "SB08",
+          "SB09",
+          "SB12"
+        ],
+        "needs_attention": [
+          "SB02",
+          "SB03",
+          "SB07"
+        ],
+        "critical": [
+          "SB10",
+          "SB11"
+        ]
+      },
+      "risk_summary": {
+        "open_total": 9,
+        "new_this_week": [
+          "R-SB03-001",
+          "R-SB05-001",
+          "R-SB07-001",
+          "R-SB08-001",
+          "R-SB09-001",
+          "R-SB09-002",
+          "R-SB10-001",
+          "R-SB11-001",
+          "R-SB12-001"
+        ],
+        "closed_this_week": [],
+        "priority_changed_this_week": []
+      }
+    },
+    {
+      "session": "2026-10-16_w5",
+      "cut_off": "2026-10-16",
+      "week": 5,
+      "mom_file": "MoM_2026-10-16_Diskusi_Teknis.docx",
+      "components": {
+        "SB01": {
+          "name": "Alarm Kebencanaan",
+          "report_file": "01_Alarm_Kebencanaan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.1813,
+          "actual_percent": 0.204,
+          "variance_percent": 0.0227,
+          "rag": "Green",
+          "overall_weighted_progress": 0.204,
+          "wbs_percent_complete": [
+            0.8,
+            0.95,
+            0.8,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB01-001",
+            "R-SB01-002"
+          ],
+          "new_risks": [
+            "R-SB01-001",
+            "R-SB01-002"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.2 Dokumen desain teknis disetujui - 16-Oct-2026"
+        },
+        "SB02": {
+          "name": "Kamera Pengawasan",
+          "report_file": "02_Kamera_Pengawasan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.1425,
+          "actual_percent": 0.06,
+          "variance_percent": -0.0825,
+          "rag": "Amber",
+          "overall_weighted_progress": 0.06,
+          "wbs_percent_complete": [
+            1,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB02-001",
+            "R-SB02-002"
+          ],
+          "new_risks": [
+            "R-SB02-001",
+            "R-SB02-002"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.2 Dokumen desain teknis disetujui - 16-Oct-2026"
+        },
+        "SB03": {
+          "name": "Kontrol Akses",
+          "report_file": "03_Kontrol_Akses_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.1725,
+          "actual_percent": 0.08,
+          "variance_percent": -0.0925,
+          "rag": "Amber",
+          "overall_weighted_progress": 0.08,
+          "wbs_percent_complete": [
+            1,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB03-001",
+            "R-SB03-002",
+            "R-SB03-003"
+          ],
+          "new_risks": [
+            "R-SB03-002",
+            "R-SB03-003"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.2 Dokumen desain teknis disetujui - 16-Oct-2026"
+        },
+        "SB04": {
+          "name": "Kelistrikan",
+          "report_file": "04_Kelistrikan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.0968,
+          "actual_percent": 0.051,
+          "variance_percent": -0.0458,
+          "rag": "Green",
+          "overall_weighted_progress": 0.051,
+          "wbs_percent_complete": [
+            0.85,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB04-001",
+            "R-SB04-002",
+            "R-SB04-003",
+            "R-SB04-004",
+            "R-SB04-005"
+          ],
+          "new_risks": [
+            "R-SB04-001",
+            "R-SB04-002",
+            "R-SB04-003",
+            "R-SB04-004",
+            "R-SB04-005"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.1 Daftar titik dan SLD terverifikasi - 16-Oct-2026"
+        },
+        "SB05": {
+          "name": "Pengkondisian Udara",
+          "report_file": "06_Pengkondisian_Udara_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.069,
+          "actual_percent": 0.13,
+          "variance_percent": 0.061,
+          "rag": "Green",
+          "overall_weighted_progress": 0.13,
+          "wbs_percent_complete": [
+            1,
+            0.5,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB05-001",
+            "R-SB05-002",
+            "R-SB05-003"
+          ],
+          "new_risks": [
+            "R-SB05-002",
+            "R-SB05-003"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.2 Cara pengambilan data terdokumentasi - 30-Oct-2026"
+        },
+        "SB06": {
+          "name": "Pengelolaan Sampah",
+          "report_file": "09_Pengelolaan_Sampah_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.1012,
+          "actual_percent": 0.102,
+          "variance_percent": 0.0008,
+          "rag": "Green",
+          "overall_weighted_progress": 0.102,
+          "wbs_percent_complete": [
+            1,
+            0.1,
+            0.1,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB06-001",
+            "R-SB06-002"
+          ],
+          "new_risks": [
+            "R-SB06-001",
+            "R-SB06-002"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.2 Prototipe lolos uji fungsi - 30-Oct-2026"
+        },
+        "SB07": {
+          "name": "Pencahayaan",
+          "report_file": "05_Pencahayaan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.2195,
+          "actual_percent": 0.165,
+          "variance_percent": -0.0545,
+          "rag": "Amber",
+          "overall_weighted_progress": 0.165,
+          "wbs_percent_complete": [
+            1.0,
+            0.85,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB07-001",
+            "R-SB07-002"
+          ],
+          "new_risks": [
+            "R-SB07-002"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Barang diterima (delivery note) - 30-Oct-2026"
+        },
+        "SB08": {
+          "name": "Air Bersih",
+          "report_file": "07_Air_Bersih_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.2195,
+          "actual_percent": 0.18,
+          "variance_percent": -0.0395,
+          "rag": "Green",
+          "overall_weighted_progress": 0.18,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB08-001",
+            "R-SB08-002"
+          ],
+          "new_risks": [
+            "R-SB08-002"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Barang diterima (delivery note) - 30-Oct-2026"
+        },
+        "SB09": {
+          "name": "Air Limbah",
+          "report_file": "08_Air_Limbah_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.2195,
+          "actual_percent": 0.23,
+          "variance_percent": 0.0105,
+          "rag": "Green",
+          "overall_weighted_progress": 0.23,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            0.3333,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB09-001",
+            "R-SB09-002"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Barang diterima (delivery note) - 30-Oct-2026"
+        },
+        "SB10": {
+          "name": "Ventilasi",
+          "report_file": "10_Ventilasi_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.2195,
+          "actual_percent": 0.012,
+          "variance_percent": -0.2075,
+          "rag": "Red",
+          "overall_weighted_progress": 0.012,
+          "wbs_percent_complete": [
+            0.15,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB10-001"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Barang diterima (delivery note) - 30-Oct-2026"
+        },
+        "SB11": {
+          "name": "Pengelolaan Utilitas",
+          "report_file": "11_Pengelolaan_Utilitas_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.2195,
+          "actual_percent": 0.035,
+          "variance_percent": -0.1845,
+          "rag": "Red",
+          "overall_weighted_progress": 0.035,
+          "wbs_percent_complete": [
+            0.4375,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB11-001",
+            "R-SB11-002"
+          ],
+          "new_risks": [
+            "R-SB11-002"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Platform/material ready - 30-Oct-2026"
+        },
+        "SB12": {
+          "name": "BISMA",
+          "report_file": "12_BISMA_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.25,
+          "actual_percent": 0.48,
+          "variance_percent": 0.23,
+          "rag": "Green",
+          "overall_weighted_progress": 0.48,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            1.0,
+            0.6818,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB12-001",
+            "R-SB12-002"
+          ],
+          "new_risks": [
+            "R-SB12-002"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "4.1 Connector installed - 23-Oct-2026"
+        }
+      },
+      "project_rollup": {
+        "note": "rata-rata sama-bobot 12 komponen; sistem tidak boleh menghitung skor gabungan tanpa menandai sumber",
+        "average_actual_percent": 0.1441,
+        "on_track": [
+          "SB01",
+          "SB04",
+          "SB05",
+          "SB06",
+          "SB08",
+          "SB09",
+          "SB12"
+        ],
+        "needs_attention": [
+          "SB02",
+          "SB03",
+          "SB07"
+        ],
+        "critical": [
+          "SB10",
+          "SB11"
+        ]
+      },
+      "risk_summary": {
+        "open_total": 28,
+        "new_this_week": [
+          "R-SB01-001",
+          "R-SB01-002",
+          "R-SB02-001",
+          "R-SB02-002",
+          "R-SB03-002",
+          "R-SB03-003",
+          "R-SB04-001",
+          "R-SB04-002",
+          "R-SB04-003",
+          "R-SB04-004",
+          "R-SB04-005",
+          "R-SB05-002",
+          "R-SB05-003",
+          "R-SB06-001",
+          "R-SB06-002",
+          "R-SB07-002",
+          "R-SB08-002",
+          "R-SB11-002",
+          "R-SB12-002"
+        ],
+        "closed_this_week": [],
+        "priority_changed_this_week": []
+      }
+    },
+    {
+      "session": "2026-10-23_w6",
+      "cut_off": "2026-10-23",
+      "week": 6,
+      "mom_file": "MoM_2026-10-23_Weekly_Meeting_ke-6.docx",
+      "components": {
+        "SB01": {
+          "name": "Alarm Kebencanaan",
+          "report_file": "01_Alarm_Kebencanaan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.2707,
+          "actual_percent": 0.283,
+          "variance_percent": 0.0123,
+          "rag": "Green",
+          "overall_weighted_progress": 0.283,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            0.8,
+            0.4167,
+            0.0,
+            0.0,
+            0.0929,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB01-001",
+            "R-SB01-002"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.3 Desain papan lolos review - 30-Oct-2026"
+        },
+        "SB02": {
+          "name": "Kamera Pengawasan",
+          "report_file": "02_Kamera_Pengawasan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.195,
+          "actual_percent": 0.078,
+          "variance_percent": -0.117,
+          "rag": "Red",
+          "overall_weighted_progress": 0.078,
+          "wbs_percent_complete": [
+            1.0,
+            0.3,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB02-001",
+            "R-SB02-002",
+            "R-SB02-003"
+          ],
+          "new_risks": [
+            "R-SB02-003"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "2.1 Barang diterima (delivery note) - 06-Nov-2026"
+        },
+        "SB03": {
+          "name": "Kontrol Akses",
+          "report_file": "03_Kontrol_Akses_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.225,
+          "actual_percent": 0.145,
+          "variance_percent": -0.08,
+          "rag": "Amber",
+          "overall_weighted_progress": 0.145,
+          "wbs_percent_complete": [
+            1.0,
+            0.9286,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB03-001",
+            "R-SB03-002",
+            "R-SB03-003"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "2.1 Barang diterima (delivery note) - 06-Nov-2026"
+        },
+        "SB04": {
+          "name": "Kelistrikan",
+          "report_file": "04_Kelistrikan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.2,
+          "actual_percent": 0.09,
+          "variance_percent": -0.11,
+          "rag": "Red",
+          "overall_weighted_progress": 0.09,
+          "wbs_percent_complete": [
+            1.0,
+            0.2143,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB04-001",
+            "R-SB04-002",
+            "R-SB04-003",
+            "R-SB04-004",
+            "R-SB04-005"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.2 DED disetujui - 30-Oct-2026"
+        },
+        "SB05": {
+          "name": "Pengkondisian Udara",
+          "report_file": "06_Pengkondisian_Udara_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.1826,
+          "actual_percent": 0.21,
+          "variance_percent": 0.0274,
+          "rag": "Green",
+          "overall_weighted_progress": 0.21,
+          "wbs_percent_complete": [
+            1.0,
+            0.9053,
+            0.2632,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB05-001",
+            "R-SB05-002",
+            "R-SB05-003"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.2 Cara pengambilan data terdokumentasi - 30-Oct-2026"
+        },
+        "SB06": {
+          "name": "Pengelolaan Sampah",
+          "report_file": "09_Pengelolaan_Sampah_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.195,
+          "actual_percent": 0.2,
+          "variance_percent": 0.005,
+          "rag": "Green",
+          "overall_weighted_progress": 0.2,
+          "wbs_percent_complete": [
+            1.0,
+            0.5882,
+            0.1,
+            0.1923,
+            0.0,
+            0.0,
+            0.0892,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB06-001",
+            "R-SB06-002"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.2 Prototipe lolos uji fungsi - 30-Oct-2026"
+        },
+        "SB07": {
+          "name": "Pencahayaan",
+          "report_file": "05_Pencahayaan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.2747,
+          "actual_percent": 0.215,
+          "variance_percent": -0.0597,
+          "rag": "Amber",
+          "overall_weighted_progress": 0.215,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            0.2333,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB07-001",
+            "R-SB07-002"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Barang diterima (delivery note) - 30-Oct-2026"
+        },
+        "SB08": {
+          "name": "Air Bersih",
+          "report_file": "07_Air_Bersih_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.2747,
+          "actual_percent": 0.215,
+          "variance_percent": -0.0597,
+          "rag": "Amber",
+          "overall_weighted_progress": 0.215,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            0.2333,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB08-001",
+            "R-SB08-002"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Barang diterima (delivery note) - 30-Oct-2026"
+        },
+        "SB09": {
+          "name": "Air Limbah",
+          "report_file": "08_Air_Limbah_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.2747,
+          "actual_percent": 0.285,
+          "variance_percent": 0.0103,
+          "rag": "Green",
+          "overall_weighted_progress": 0.285,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            0.7,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB09-001",
+            "R-SB09-002"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Barang diterima (delivery note) - 30-Oct-2026"
+        },
+        "SB10": {
+          "name": "Ventilasi",
+          "report_file": "10_Ventilasi_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.2747,
+          "actual_percent": 0.03,
+          "variance_percent": -0.2447,
+          "rag": "Red",
+          "overall_weighted_progress": 0.03,
+          "wbs_percent_complete": [
+            0.375,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB10-001",
+            "R-SB10-002"
+          ],
+          "new_risks": [
+            "R-SB10-002"
+          ],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Barang diterima (delivery note) - 30-Oct-2026"
+        },
+        "SB11": {
+          "name": "Pengelolaan Utilitas",
+          "report_file": "11_Pengelolaan_Utilitas_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.2747,
+          "actual_percent": 0.07,
+          "variance_percent": -0.2047,
+          "rag": "Red",
+          "overall_weighted_progress": 0.07,
+          "wbs_percent_complete": [
+            0.875,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB11-001",
+            "R-SB11-002"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Platform/material ready - 30-Oct-2026"
+        },
+        "SB12": {
+          "name": "BISMA",
+          "report_file": "12_BISMA_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.33,
+          "actual_percent": 0.6,
+          "variance_percent": 0.27,
+          "rag": "Green",
+          "overall_weighted_progress": 0.6,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            0.4167,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB12-001",
+            "R-SB12-002"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "5.1 Data flow operational - 06-Nov-2026"
+        }
+      },
+      "project_rollup": {
+        "note": "rata-rata sama-bobot 12 komponen; sistem tidak boleh menghitung skor gabungan tanpa menandai sumber",
+        "average_actual_percent": 0.2017,
+        "on_track": [
+          "SB01",
+          "SB05",
+          "SB06",
+          "SB09",
+          "SB12"
+        ],
+        "needs_attention": [
+          "SB03",
+          "SB07",
+          "SB08"
+        ],
+        "critical": [
+          "SB02",
+          "SB04",
+          "SB10",
+          "SB11"
+        ]
+      },
+      "risk_summary": {
+        "open_total": 30,
+        "new_this_week": [
+          "R-SB02-003",
+          "R-SB10-002"
+        ],
+        "closed_this_week": [],
+        "priority_changed_this_week": []
+      }
+    },
+    {
+      "session": "2026-10-30_w7",
+      "cut_off": "2026-10-30",
+      "week": 7,
+      "mom_file": "MoM_2026-10-30_Weekly_Meeting_ke-7.docx",
+      "components": {
+        "SB01": {
+          "name": "Alarm Kebencanaan",
+          "report_file": "01_Alarm_Kebencanaan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.367,
+          "actual_percent": 0.381,
+          "variance_percent": 0.014,
+          "rag": "Green",
+          "overall_weighted_progress": 0.381,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            1.0,
+            0.825,
+            0.0,
+            0.0,
+            0.3,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB01-001"
+          ],
+          "new_risks": [],
+          "closed_risks": [
+            "R-SB01-002"
+          ],
+          "priority_changed_risks": [],
+          "next_milestone": "2.1 Barang diterima (delivery note) - 06-Nov-2026"
+        },
+        "SB02": {
+          "name": "Kamera Pengawasan",
+          "report_file": "02_Kamera_Pengawasan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.2475,
+          "actual_percent": 0.102,
+          "variance_percent": -0.1455,
+          "rag": "Red",
+          "overall_weighted_progress": 0.102,
+          "wbs_percent_complete": [
+            1.0,
+            0.7,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB02-001",
+            "R-SB02-002",
+            "R-SB02-003"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [
+            "R-SB02-001"
+          ],
+          "next_milestone": "2.1 Barang diterima (delivery note) - 06-Nov-2026"
+        },
+        "SB03": {
+          "name": "Kontrol Akses",
+          "report_file": "03_Kontrol_Akses_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.2775,
+          "actual_percent": 0.225,
+          "variance_percent": -0.0525,
+          "rag": "Amber",
+          "overall_weighted_progress": 0.225,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            0.4167,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB03-002",
+            "R-SB03-003"
+          ],
+          "new_risks": [],
+          "closed_risks": [
+            "R-SB03-001"
+          ],
+          "priority_changed_risks": [],
+          "next_milestone": "2.1 Barang diterima (delivery note) - 06-Nov-2026"
+        },
+        "SB04": {
+          "name": "Kelistrikan",
+          "report_file": "04_Kelistrikan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.3238,
+          "actual_percent": 0.155,
+          "variance_percent": -0.1688,
+          "rag": "Red",
+          "overall_weighted_progress": 0.155,
+          "wbs_percent_complete": [
+            1.0,
+            0.6786,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB04-001",
+            "R-SB04-003",
+            "R-SB04-004",
+            "R-SB04-005"
+          ],
+          "new_risks": [],
+          "closed_risks": [
+            "R-SB04-002"
+          ],
+          "priority_changed_risks": [],
+          "next_milestone": "1.2 DED disetujui - 30-Oct-2026"
+        },
+        "SB05": {
+          "name": "Pengkondisian Udara",
+          "report_file": "06_Pengkondisian_Udara_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.3255,
+          "actual_percent": 0.36,
+          "variance_percent": 0.0345,
+          "rag": "Green",
+          "overall_weighted_progress": 0.36,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            0.8616,
+            0.0,
+            0.1923,
+            0.1515,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB05-002",
+            "R-SB05-003"
+          ],
+          "new_risks": [],
+          "closed_risks": [
+            "R-SB05-001"
+          ],
+          "priority_changed_risks": [],
+          "next_milestone": "2.1 Barang diterima (delivery note) - 06-Nov-2026"
+        },
+        "SB06": {
+          "name": "Pengelolaan Sampah",
+          "report_file": "09_Pengelolaan_Sampah_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.3329,
+          "actual_percent": 0.34,
+          "variance_percent": 0.0071,
+          "rag": "Green",
+          "overall_weighted_progress": 0.34,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            0.2632,
+            0.512,
+            0.0,
+            0.0,
+            0.3,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB06-001",
+            "R-SB06-002"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "1.3 Desain PCB lolos review - 13-Nov-2026"
+        },
+        "SB07": {
+          "name": "Pencahayaan",
+          "report_file": "05_Pencahayaan_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.33,
+          "actual_percent": 0.27,
+          "variance_percent": -0.06,
+          "rag": "Amber",
+          "overall_weighted_progress": 0.27,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            0.6,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB07-001",
+            "R-SB07-002"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Barang diterima (delivery note) - 30-Oct-2026"
+        },
+        "SB08": {
+          "name": "Air Bersih",
+          "report_file": "07_Air_Bersih_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.33,
+          "actual_percent": 0.26,
+          "variance_percent": -0.07,
+          "rag": "Amber",
+          "overall_weighted_progress": 0.26,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            0.5333,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB08-001",
+            "R-SB08-002"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Barang diterima (delivery note) - 30-Oct-2026"
+        },
+        "SB09": {
+          "name": "Air Limbah",
+          "report_file": "08_Air_Limbah_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.33,
+          "actual_percent": 0.345,
+          "variance_percent": 0.015,
+          "rag": "Green",
+          "overall_weighted_progress": 0.345,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            1.0,
+            0.0682,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB09-001"
+          ],
+          "new_risks": [],
+          "closed_risks": [
+            "R-SB09-002"
+          ],
+          "priority_changed_risks": [],
+          "next_milestone": "4.1 Terpasang (foto dan checklist) - 13-Nov-2026"
+        },
+        "SB10": {
+          "name": "Ventilasi",
+          "report_file": "10_Ventilasi_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.33,
+          "actual_percent": 0.06,
+          "variance_percent": -0.27,
+          "rag": "Red",
+          "overall_weighted_progress": 0.06,
+          "wbs_percent_complete": [
+            0.75,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB10-001",
+            "R-SB10-002"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Barang diterima (delivery note) - 30-Oct-2026"
+        },
+        "SB11": {
+          "name": "Pengelolaan Utilitas",
+          "report_file": "11_Pengelolaan_Utilitas_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.33,
+          "actual_percent": 0.12,
+          "variance_percent": -0.21,
+          "rag": "Red",
+          "overall_weighted_progress": 0.12,
+          "wbs_percent_complete": [
+            1.0,
+            0.4,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB11-001"
+          ],
+          "new_risks": [],
+          "closed_risks": [
+            "R-SB11-002"
+          ],
+          "priority_changed_risks": [],
+          "next_milestone": "3.1 Platform/material ready - 30-Oct-2026"
+        },
+        "SB12": {
+          "name": "BISMA",
+          "report_file": "12_BISMA_Subcontractor_Weekly.xlsx",
+          "planned_percent": 0.42,
+          "actual_percent": 0.65,
+          "variance_percent": 0.23,
+          "rag": "Green",
+          "overall_weighted_progress": 0.65,
+          "wbs_percent_complete": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            0.7611,
+            0.0667,
+            0.0,
+            0.0
+          ],
+          "open_risks": [
+            "R-SB12-001",
+            "R-SB12-002"
+          ],
+          "new_risks": [],
+          "closed_risks": [],
+          "priority_changed_risks": [],
+          "next_milestone": "5.1 Data flow operational - 06-Nov-2026"
+        }
+      },
+      "project_rollup": {
+        "note": "rata-rata sama-bobot 12 komponen; sistem tidak boleh menghitung skor gabungan tanpa menandai sumber",
+        "average_actual_percent": 0.2723,
+        "on_track": [
+          "SB01",
+          "SB05",
+          "SB06",
+          "SB09",
+          "SB12"
+        ],
+        "needs_attention": [
+          "SB03",
+          "SB07",
+          "SB08"
+        ],
+        "critical": [
+          "SB02",
+          "SB04",
+          "SB10",
+          "SB11"
+        ]
+      },
+      "risk_summary": {
+        "open_total": 24,
+        "new_this_week": [],
+        "closed_this_week": [
+          "R-SB01-002",
+          "R-SB03-001",
+          "R-SB04-002",
+          "R-SB05-001",
+          "R-SB09-002",
+          "R-SB11-002"
+        ],
+        "priority_changed_this_week": [
+          "R-SB02-001"
+        ]
+      }
+    }
+  ]
+}

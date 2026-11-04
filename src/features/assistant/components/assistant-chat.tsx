@@ -6,6 +6,7 @@ import {
   Bot,
   FileSearch,
   Lightbulb,
+  ListChecks,
   LoaderCircle,
   Send,
   UserRound,
@@ -19,12 +20,13 @@ import {
 import type { AssistantAnswer } from "@/features/assistant/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SectionCard } from "@/components/ui/section-card";
 
 const suggestedPrompts = [
-  "What is the most important project condition right now?",
-  "How does the current forecast compare with the approved budget?",
-  "What should management do next?",
-  "What evidence is still missing?",
+  "Apa kondisi proyek yang paling penting saat ini?",
+  "Bagaimana perkiraan terkini dibandingkan dengan anggaran yang disetujui?",
+  "Apa yang sebaiknya dilakukan manajemen selanjutnya?",
+  "Bukti apa yang masih kurang?",
 ];
 
 export function AssistantChat({
@@ -94,12 +96,12 @@ export function AssistantChat({
                 <Bot className="h-5 w-5" />
               </span>
               <div>
-                <h2 className="font-semibold text-ink">Ask about this project</h2>
-                <p className="text-sm text-ink-muted">Clear answers, grounded in uploaded evidence</p>
+                <h2 className="font-semibold text-ink">Tanya tentang proyek ini</h2>
+                <p className="text-sm text-ink-muted">Jawaban jelas, berdasarkan bukti yang diunggah</p>
               </div>
             </div>
             <Button type="button" variant="outline" size="sm" disabled={isThinking} onClick={handleNewConversation}>
-              New conversation
+              Percakapan baru
             </Button>
           </div>
         </div>
@@ -133,7 +135,7 @@ export function AssistantChat({
           <input type="hidden" name="projectId" value={projectId} />
           <input type="hidden" name="conversationId" value={state.conversationId} />
           <input type="hidden" name="activeReviewId" value={state.activeReviewId ?? ""} />
-          <label htmlFor="advisor-question" className="sr-only">Ask the AI Advisor</label>
+          <label htmlFor="advisor-question" className="sr-only">Tanya AI Advisor</label>
           <div className="flex gap-2">
             <Input
               id="advisor-question"
@@ -141,7 +143,7 @@ export function AssistantChat({
               value={question}
               maxLength={1000}
               onChange={(event) => setQuestion(event.target.value)}
-              placeholder="Ask about budget, deadlines, risk, or next actions"
+              placeholder="Tanya tentang anggaran, tenggat, risiko, atau tindakan berikutnya"
               readOnly={isThinking}
               required
               className="h-11"
@@ -156,7 +158,7 @@ export function AssistantChat({
               ) : (
                 <Send className="h-4 w-4" />
               )}
-              {isThinking ? "Thinking" : "Ask"}
+              {isThinking ? "Berpikir" : "Tanya"}
             </Button>
           </div>
         </form>
@@ -184,12 +186,12 @@ function ThinkingBubble({ activeReview }: { activeReview: boolean }) {
       </div>
       <div className="mt-4 flex items-center gap-3 text-sm text-ink-muted">
         <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" />
-        <span>Thinking</span>
+        <span>Berpikir</span>
       </div>
       <p className="mt-2 text-xs leading-5 text-ink-muted">
         {activeReview
-          ? "Searching fresh project evidence in the active review."
-          : "Searching fresh project evidence across this project."}
+          ? "Mencari bukti proyek terbaru dalam tinjauan yang aktif."
+          : "Mencari bukti proyek terbaru di seluruh proyek ini."}
       </p>
     </div>
   );
@@ -199,19 +201,19 @@ function WelcomeMessage({ activeReview }: { activeReview: boolean }) {
   return (
     <div className="rounded-2xl border border-analysis/40 bg-analysis-soft p-6 shadow-sm">
       <p className="text-xs font-semibold uppercase tracking-[0.15em] text-analysis">
-        Evidence-aware advisor
+        Penasihat berbasis bukti
       </p>
       <h3 className="mt-2 text-2xl font-semibold text-ink">
-        Ask one plain-language question.
+        Ajukan satu pertanyaan dengan bahasa yang sederhana.
       </h3>
       <p className="mt-3 max-w-2xl text-sm leading-6 text-ink-muted">
-        The Advisor searches fresh project evidence and cites its source
-        locations. {activeReview
-          ? "The active review scopes this search."
-          : "No active review is selected, so the search uses project scope."}
-        {" "}Historical and comparative questions can search relevant periods.
-        If the evidence is not strong enough, the advisor will say what is
-        missing instead of inventing an answer.
+        Penasihat mencari bukti proyek terbaru dan menyebutkan lokasi
+        sumbernya. {activeReview
+          ? "Tinjauan yang aktif membatasi pencarian ini."
+          : "Tidak ada tinjauan aktif yang dipilih, sehingga pencarian menggunakan cakupan proyek."}
+        {" "}Pertanyaan historis dan komparatif dapat menelusuri periode yang relevan.
+        Jika bukti belum cukup kuat, penasihat akan menyampaikan apa yang kurang
+        alih-alih mengarang jawaban.
       </p>
     </div>
   );
@@ -221,7 +223,7 @@ function UserBubble({ question }: { question: string }) {
   return (
     <div className="ml-auto max-w-[88%] rounded-2xl rounded-br-md border border-ui-border bg-plan-track px-4 py-3 text-sm text-ink">
       <div className="mb-1 flex items-center justify-end gap-2 text-xs text-ink-muted">
-        <span>You</span>
+        <span>Anda</span>
         <UserRound className="h-3.5 w-3.5" />
       </div>
       {question}
@@ -234,20 +236,20 @@ function AssistantBubble({ message }: { message: AssistantAnswer }) {
     <div className="max-w-[94%] rounded-2xl rounded-tl-md border border-analysis/40 bg-analysis-soft p-5 shadow-sm">
       <div className="flex items-center gap-2 text-sm font-semibold text-ink">
         <Bot className="h-4 w-4 text-analysis" />
-        Direct answer
+        Jawaban langsung
       </div>
       {message.insufficientEvidence && (
         <p className="mt-3 rounded-xl bg-status-warn-bg p-3 text-sm font-medium text-status-warn-text">
-          The available evidence is not sufficient for a reliable answer.
+          Bukti yang tersedia belum cukup untuk memberikan jawaban yang andal.
         </p>
       )}
       <div className="mt-4">
         <FormattedAnswer text={message.answer} />
       </div>
       <div className="mt-4 flex flex-wrap gap-2 border-t border-ui-border pt-3 text-xs text-ink-muted">
-        <span>{message.sources.length} source{message.sources.length === 1 ? "" : "s"}</span>
+        <span>{message.sources.length} sumber</span>
         {message.inferredClaims.length > 0 && (
-          <span>· {message.inferredClaims.length} method note{message.inferredClaims.length === 1 ? "" : "s"}</span>
+          <span>· {message.inferredClaims.length} catatan metode</span>
         )}
       </div>
     </div>
@@ -315,12 +317,8 @@ function splitSentences(text: string) {
 
 function SuggestedPrompts({ onSelect }: { onSelect: (value: string) => void }) {
   return (
-    <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
-      <div className="flex items-center gap-2">
-        <Lightbulb className="h-4 w-4 text-analysis" />
-        <h2 className="font-semibold text-ink">Useful questions</h2>
-      </div>
-      <div className="mt-4 grid gap-2">
+    <SectionCard icon={Lightbulb} iconTone="analysis" title="Pertanyaan yang berguna">
+      <div className="grid gap-2">
         {suggestedPrompts.map((prompt) => (
           <button
             key={prompt}
@@ -333,19 +331,15 @@ function SuggestedPrompts({ onSelect }: { onSelect: (value: string) => void }) {
           </button>
         ))}
       </div>
-    </section>
+    </SectionCard>
   );
 }
 
 function EvidencePanel({ answer }: { answer?: AssistantAnswer }) {
   return (
-    <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
-      <div className="flex items-center gap-2">
-        <FileSearch className="h-4 w-4 text-ink-muted" />
-        <h2 className="font-semibold text-ink">Sources used</h2>
-      </div>
+    <SectionCard icon={FileSearch} iconTone="neutral" title="Sumber yang digunakan">
       {answer?.sources.length ? (
-        <div className="mt-4 grid gap-3">
+        <div className="grid gap-3">
           {answer.sources.map((source, index) => (
             <details key={source.id} className="rounded-xl border border-ui-border p-3">
               <summary className="cursor-pointer text-sm font-medium text-ink">
@@ -353,12 +347,12 @@ function EvidencePanel({ answer }: { answer?: AssistantAnswer }) {
               </summary>
               <p className="mt-2 text-xs leading-5 text-ink-muted">{source.excerpt}</p>
               <p className="mt-2 text-xs text-ink-muted/70">{formatSourceLocation(source)}</p>
-              <p className="mt-1 text-[11px] text-ink-muted/60">Source ID: {source.id}</p>
+              <p className="mt-1 text-[11px] text-ink-muted/60">ID Sumber: {source.id}</p>
               {source.reportingPeriod || source.evidenceRole ? (
                 <p className="mt-1 text-[11px] text-ink-muted/60">
-                  {source.reportingPeriod ? `Confirmed period: ${source.reportingPeriod}` : ""}
+                  {source.reportingPeriod ? `Periode terkonfirmasi: ${source.reportingPeriod}` : ""}
                   {source.reportingPeriod && source.evidenceRole ? " · " : ""}
-                  {source.evidenceRole ? `Confirmed role: ${source.evidenceRole}` : ""}
+                  {source.evidenceRole ? `Peran terkonfirmasi: ${source.evidenceRole}` : ""}
                 </p>
               ) : null}
             </details>
@@ -366,7 +360,7 @@ function EvidencePanel({ answer }: { answer?: AssistantAnswer }) {
           {answer.inferredClaims.length > 0 && (
             <details className="rounded-xl bg-status-warn-bg p-3">
               <summary className="cursor-pointer text-sm font-medium text-status-warn-text">
-                Method notes
+                Catatan metode
               </summary>
               <ul className="mt-2 space-y-2 text-xs leading-5 text-status-warn-text/80">
                 {answer.inferredClaims.map((claim) => <li key={claim}>{claim}</li>)}
@@ -375,11 +369,11 @@ function EvidencePanel({ answer }: { answer?: AssistantAnswer }) {
           )}
         </div>
       ) : (
-        <p className="mt-4 rounded-xl bg-base p-3 text-sm leading-6 text-ink-muted">
-          Source documents will appear after the first answer.
+        <p className="rounded-xl bg-base p-3 text-sm leading-6 text-ink-muted">
+          Dokumen sumber akan muncul setelah jawaban pertama.
         </p>
       )}
-    </section>
+    </SectionCard>
   );
 }
 
@@ -387,36 +381,35 @@ function formatSourceLocation(source: AssistantAnswer["sources"][number]) {
   const location = source.sourceLocation ?? {};
   const parts: string[] = [];
   const pageNumber = source.pageNumber ?? location.pageNumber;
-  if (typeof pageNumber === "number") parts.push(`Page ${pageNumber}`);
+  if (typeof pageNumber === "number") parts.push(`Halaman ${pageNumber}`);
   if (typeof location.sheetName === "string") parts.push(`Sheet ${location.sheetName}`);
   if (typeof location.slideNumber === "number") parts.push(`Slide ${location.slideNumber}`);
   if (typeof location.rowStart === "number") {
     parts.push(
       location.rowStart === location.rowEnd
-        ? `Row ${location.rowStart}`
-        : `Rows ${location.rowStart}-${location.rowEnd}`,
+        ? `Baris ${location.rowStart}`
+        : `Baris ${location.rowStart}-${location.rowEnd}`,
     );
   }
   if (typeof location.cellRangeStart === "string") {
-    parts.push(`Cells ${location.cellRangeStart}-${String(location.cellRangeEnd ?? location.cellRangeStart)}`);
+    parts.push(`Sel ${location.cellRangeStart}-${String(location.cellRangeEnd ?? location.cellRangeStart)}`);
   }
   if (typeof location.paragraphStart === "number") {
     parts.push(
       location.paragraphStart === location.paragraphEnd
-        ? `Paragraph ${location.paragraphStart}`
-        : `Paragraphs ${location.paragraphStart}-${location.paragraphEnd}`,
+        ? `Paragraf ${location.paragraphStart}`
+        : `Paragraf ${location.paragraphStart}-${location.paragraphEnd}`,
     );
   }
   if (typeof location.imageName === "string") parts.push(location.imageName);
   if (source.sectionLabel) parts.push(source.sectionLabel);
-  return parts.length ? parts.join(" · ") : "Location not available";
+  return parts.length ? parts.join(" · ") : "Lokasi tidak tersedia";
 }
 
 function RecommendationsPanel({ answer }: { answer?: AssistantAnswer }) {
   return (
-    <section className="rounded-2xl border border-ui-border bg-surface p-5 text-ink shadow-sm">
-      <h2 className="font-semibold">Next actions</h2>
-      <div className="mt-4 grid gap-3">
+    <SectionCard icon={ListChecks} iconTone="neutral" title="Tindakan lanjutan">
+      <div className="grid gap-3">
         {answer?.recommendations.length ? (
           answer.recommendations.map((recommendation) => (
             <Link
@@ -426,16 +419,16 @@ function RecommendationsPanel({ answer }: { answer?: AssistantAnswer }) {
             >
               <p className="text-sm font-medium leading-6 text-ink">{recommendation.title}</p>
               <p className="mt-1 text-xs text-ink-muted/70">
-                {recommendation.ownerName ?? "Owner not assigned"} · {recommendation.priority} priority
+                {recommendation.ownerName ?? "Penanggung jawab belum ditugaskan"} · prioritas {recommendation.priority}
               </p>
             </Link>
           ))
         ) : (
           <p className="text-sm leading-6 text-ink-muted">
-            Relevant management actions will appear with the answer.
+            Tindakan manajemen yang relevan akan muncul bersama jawaban.
           </p>
         )}
       </div>
-    </section>
+    </SectionCard>
   );
 }

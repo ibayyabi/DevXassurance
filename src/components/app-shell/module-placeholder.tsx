@@ -27,7 +27,7 @@ export function ModulePlaceholder({
             {description}
           </p>
         </div>
-        <Button disabled={!canEdit} className="bg-brand text-brand-foreground hover:bg-brand/90">
+        <Button disabled={!canEdit}>
           {canEdit ? "Create action" : "View only"}
         </Button>
       </div>

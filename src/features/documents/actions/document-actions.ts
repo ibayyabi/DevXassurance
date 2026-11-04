@@ -249,6 +249,58 @@ export async function updateExtractedFact(formData: FormData): Promise<void> {
   if (error) throw new Error("Fact review could not be saved. Try again.");
   if (data?.length !== factIds.length) throw new Error("Some facts are no longer available. Refresh and try again.");
 
+  const { data: reviewedFactOwners, error: ownersError } = await supabase
+    .from("extracted_facts")
+    .select("extraction_runs(document_id)")
+    .in("id", factIds)
+    .eq("project_id", projectId);
+  if (ownersError) throw new Error("Fact review was saved, but affected documents could not be checked.");
+  const runDocumentId = (relation: unknown) => {
+    const run = Array.isArray(relation) ? relation[0] : relation;
+    return run && typeof run === "object" && "document_id" in run &&
+      typeof run.document_id === "string" ? run.document_id : null;
+  };
+
+  const documentIds = [...new Set((reviewedFactOwners ?? [])
+    .flatMap((fact) => {
+      const id = runDocumentId(fact.extraction_runs);
+      return id ? [id] : [];
+    }))];
+  if (documentIds.length) {
+    const { data: projectFacts, error: projectFactsError } = await supabase
+      .from("extracted_facts")
+      .select("confirmation_state, extraction_runs!inner(document_id)")
+      .eq("project_id", projectId)
+      .in("extraction_runs.document_id", documentIds);
+    if (projectFactsError) throw new Error("Fact review was saved, but document review completion could not be checked.");
+
+    const statesByDocument = new Map<string, string[]>();
+    for (const fact of projectFacts ?? []) {
+      const documentId = runDocumentId(fact.extraction_runs);
+      if (!documentId) continue;
+      const states = statesByDocument.get(documentId) ?? [];
+      states.push(fact.confirmation_state);
+      statesByDocument.set(documentId, states);
+    }
+    const completedDocumentIds = documentIds.filter((id) => {
+      const states = statesByDocument.get(id) ?? [];
+      return states.length > 0 && states.every((state) =>
+        state === "user_confirmed" || state === "user_edited" || state === "user_rejected"
+      );
+    });
+    if (completedDocumentIds.length) {
+      // Keep parser warnings visible; reviewer decisions do not repair the source file.
+      const { error: completionError } = await supabase
+        .from("documents")
+        .update({ processing_status: "completed" })
+        .eq("project_id", projectId)
+        .eq("processing_status", "needs_review")
+        .in("id", completedDocumentIds);
+      if (completionError) throw new Error("Fact review was saved, but document status could not be updated.");
+      revalidatePath(`/app/projects/${projectId}/assurance`);
+    }
+  }
+
   revalidatePath(`/app/projects/${projectId}/documents`);
 }
 

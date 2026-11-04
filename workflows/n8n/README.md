@@ -106,8 +106,39 @@ OLLAMA_API_KEY=your-ollama-api-key
 OLLAMA_CLOUD_MODEL=gpt-oss:20b
 ```
 
-The LLM variables belong to the Next.js app because the worker endpoint calls
-the configured LLM after parsing the PDF. n8n only calls the worker.
+To use Gemini instead, keep these settings in the root app `.env.local`:
+
+```env
+XASS_LLM_PROVIDER=gemini
+GEMINI_API_KEY=your-gemini-api-key
+GEMINI_MODEL=gemini-3.8-flash
+```
+
+To use Groq instead, keep these settings in the root app `.env.local`:
+
+```env
+XASS_LLM_PROVIDER=groq
+GROQ_API_KEY=your-groq-api-key
+GROQ_MODEL=your-groq-model-id
+```
+
+Choose a model available to your Groq account; access, pricing, and rate limits
+vary by model and account.
+
+To use a local 9router combo instead, configure the Next.js app:
+
+```env
+XASS_LLM_PROVIDER=openai-compatible
+XASS_CLOUD_LLM_BASE_URL=http://localhost:20128/v1
+XASS_CLOUD_LLM_API_KEY=your-9router-api-key
+XASS_CLOUD_LLM_MODEL=executor-free
+```
+
+The worker requests non-streaming JSON. Restart the Next.js app after changing
+environment variables; the n8n container does not call 9router directly.
+
+The LLM variables belong to the Next.js app because its worker calls the
+configured provider after parsing a document; n8n only calls the worker.
 
 For a local Ollama demo instead, use:
 
@@ -123,9 +154,9 @@ Make sure Ollama is running and the model exists:
 ollama pull qwen2.5:3b
 ```
 
-If that model is too heavy for your machine, use another available model and
-set `OLLAMA_MODEL` to that name. The worker falls back to rule-based extraction
-if Ollama is unavailable.
+If that model is too heavy for your machine, choose another available model and
+set `OLLAMA_MODEL` to its name. If Ollama is unavailable, the worker reports the
+provider failure; it does not produce fallback analysis.
 
 ### Supabase Database Webhook
 

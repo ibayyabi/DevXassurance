@@ -13,7 +13,11 @@ const upstreamBase = modelMode === "live"
     ? process.env.OLLAMA_CLOUD_BASE_URL ?? "https://ollama.com/api"
     : provider === "openai-compatible"
       ? process.env.XASS_CLOUD_LLM_BASE_URL ?? "https://ollama.com/v1"
-      : process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434"
+      : provider === "gemini"
+        ? process.env.GEMINI_API_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta"
+        : provider === "groq"
+          ? process.env.GROQ_API_BASE_URL ?? "https://api.groq.com/openai/v1"
+          : process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434"
   : "";
 const upstreamPath = modelMode === "fixture"
   ? ""
@@ -24,7 +28,11 @@ const providerEnvironment: Record<string, string> = provider === "ollama_cloud"
   ? { OLLAMA_CLOUD_BASE_URL: proxyBase }
   : provider === "openai-compatible"
     ? { XASS_CLOUD_LLM_BASE_URL: proxyBase }
-    : { OLLAMA_BASE_URL: proxyBase };
+    : provider === "gemini"
+      ? { GEMINI_API_BASE_URL: proxyBase }
+      : provider === "groq"
+        ? { GROQ_API_BASE_URL: proxyBase }
+        : { OLLAMA_BASE_URL: proxyBase };
 
 export default defineConfig({
   testDir: "./tests/e2e",

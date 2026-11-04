@@ -5,6 +5,7 @@ import type { WbsMapping } from "@/features/assurance/lib/cost-evidence";
 import type { AssuranceReview } from "@/features/assurance/lib/queries";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SectionCard } from "@/components/ui/section-card";
 
 type WbsBudgetFinding = {
   scopeLabel: string;
@@ -39,26 +40,18 @@ export function WbsComparisonPanel({
   const acceptedMappings = wbsMappings.filter((mapping) => mapping.state === "accepted");
 
   return (
-    <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
-      <div className="flex items-center gap-2">
-        <Layers className="h-4 w-4 text-ink-muted" />
-        <p className="text-sm font-medium text-ink-muted">WBS cost and scope</p>
-      </div>
-      <h2 className="mt-1 text-lg font-semibold text-ink">
-        Compare matching work packages, without merging unaccepted ones
-      </h2>
-      <p className="mt-2 max-w-3xl text-sm leading-6 text-ink-muted">
-        Work packages with identical labels are compared directly. Differing
-        codes or names are compared only after a reviewer accepts a mapping. A
-        WBS evidence gap never changes the project-total Budget result above.
-      </p>
-
+    <SectionCard
+      icon={Layers}
+      title="Biaya dan lingkup WBS — bandingkan paket kerja yang cocok, tanpa menggabungkan yang belum disetujui"
+      subtitle="Paket kerja dengan label identik dibandingkan langsung. Kode atau nama yang berbeda hanya dibandingkan setelah peninjau menyetujui pemetaannya. Kekurangan bukti WBS tidak pernah mengubah hasil Anggaran total proyek di atas."
+    >
       {/* WBS cost comparison */}
-      <h3 className="mt-5 text-sm font-semibold text-ink">WBS budget comparisons</h3>
+      <h3 className="text-sm font-semibold text-ink">Perbandingan anggaran WBS</h3>
       {budgetFindings.length === 0 ? (
         <p className="mt-2 rounded-xl border border-dashed border-ui-border p-4 text-sm text-ink-muted">
-          No WBS-level cost comparison yet. Run the analysis with WBS cost
-          evidence, and accept a WBS baseline, to compare per work package.
+          Belum ada perbandingan biaya tingkat WBS. Jalankan analisis dengan
+          bukti biaya WBS dan setujui baseline WBS untuk membandingkan per
+          paket kerja.
         </p>
       ) : (
         <ul className="mt-2 space-y-3">
@@ -78,12 +71,12 @@ export function WbsComparisonPanel({
 
       {/* WBS scope changes */}
       <h3 className="mt-6 text-sm font-semibold text-ink">
-        Reported scope changes (candidates, not approved changes)
+        Perubahan lingkup yang dilaporkan (kandidat, bukan perubahan yang disetujui)
       </h3>
       {scopeCandidates.length === 0 ? (
         <p className="mt-2 rounded-xl border border-dashed border-ui-border p-4 text-sm text-ink-muted">
-          No added, missing, or changed work package was detected between the
-          approved baseline scope and the reported scope.
+          Tidak ada paket kerja baru, hilang, atau berubah yang terdeteksi
+          antara lingkup baseline disetujui dan lingkup yang dilaporkan.
         </p>
       ) : (
         <ul className="mt-2 space-y-2">
@@ -97,13 +90,13 @@ export function WbsComparisonPanel({
               </div>
               <p className="mt-2 text-ink-muted">
                 {candidate.changeType === "changed"
-                  ? `Baseline: ${describe(candidate.baseline)} → Reported: ${describe(candidate.current)}`
+                  ? `Baseline: ${describe(candidate.baseline)} → Dilaporkan: ${describe(candidate.current)}`
                   : candidate.changeType === "missing"
-                    ? `In approved baseline scope, not reported now: ${describe(candidate.baseline)}`
-                    : `Reported now, not in approved baseline scope: ${describe(candidate.current)}`}
+                    ? `Ada di lingkup baseline disetujui, tidak dilaporkan kini: ${describe(candidate.baseline)}`
+                    : `Dilaporkan kini, tidak ada di lingkup baseline disetujui: ${describe(candidate.current)}`}
               </p>
               <p className="mt-1 text-xs text-ink-muted">
-                A source-backed candidate for reviewer attention, not an approved scope change.
+                Kandidat berdasarkan sumber untuk diperiksa peninjau, bukan perubahan lingkup yang disetujui.
               </p>
             </li>
           ))}
@@ -111,11 +104,11 @@ export function WbsComparisonPanel({
       )}
 
       {/* Reviewer mappings */}
-      <h3 className="mt-6 text-sm font-semibold text-ink">Accepted WBS mappings</h3>
+      <h3 className="mt-6 text-sm font-semibold text-ink">Pemetaan WBS yang disetujui</h3>
       {acceptedMappings.length === 0 ? (
         <p className="mt-2 text-sm text-ink-muted">
-          None accepted. Differing-label work packages stay separate until a
-          reviewer maps them.
+          Belum ada yang disetujui. Paket kerja berlabel berbeda tetap terpisah
+          sampai peninjau memetakannya.
         </p>
       ) : (
         <ul className="mt-2 space-y-2">
@@ -133,7 +126,7 @@ export function WbsComparisonPanel({
                   <input type="hidden" name="mappingId" value={mapping.id} />
                   <Button type="submit" size="sm" variant="outline">
                     <Trash2 className="h-4 w-4" />
-                    Remove
+                    Hapus
                   </Button>
                 </form>
               )}
@@ -146,8 +139,8 @@ export function WbsComparisonPanel({
         <form action={acceptWbsMapping} className="mt-4 grid gap-3 rounded-xl border border-ui-border p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
           <input type="hidden" name="projectId" value={projectId} />
           <label className="text-xs font-medium text-ink-muted">
-            Source label (from evidence)
-            <Input name="sourceLabel" list="wbs-scope-labels" required placeholder="e.g. WP-1.2" className="mt-1" />
+            Label sumber (dari bukti)
+            <Input name="sourceLabel" list="wbs-scope-labels" required placeholder="mis. WP-1.2" className="mt-1" />
             <datalist id="wbs-scope-labels">
               {wbsScopeLabels.map((label) => (
                 <option key={label} value={label} />
@@ -155,36 +148,36 @@ export function WbsComparisonPanel({
             </datalist>
           </label>
           <label className="text-xs font-medium text-ink-muted">
-            Canonical label
-            <Input name="canonicalLabel" required placeholder="e.g. 1.2" className="mt-1" />
+            Label kanonik
+            <Input name="canonicalLabel" required placeholder="mis. 1.2" className="mt-1" />
           </label>
           <Button type="submit" variant="outline">
             <GitMerge className="h-4 w-4" />
-            Accept mapping
+            Setujui pemetaan
           </Button>
           <label className="text-xs font-medium text-ink-muted sm:col-span-3">
-            Note (optional)
-            <Input name="note" placeholder="Why these are the same work package" className="mt-1" />
+            Catatan (opsional)
+            <Input name="note" placeholder="Alasan keduanya adalah paket kerja yang sama" className="mt-1" />
           </label>
         </form>
       )}
       {wbsScopeLabels.length > 0 && !canApprove && (
-        <p className="mt-3 text-xs text-ink-muted">Your project role cannot accept WBS mappings.</p>
+        <p className="mt-3 text-xs text-ink-muted">Peran proyek Anda tidak dapat menyetujui pemetaan WBS.</p>
       )}
-    </section>
+    </SectionCard>
   );
 }
 
 function describe(item: { name: string | null; scopeDescription: string | null } | null) {
   if (!item) return "—";
-  return [item.name, item.scopeDescription].filter(Boolean).join(" — ") || "stated without a name";
+  return [item.name, item.scopeDescription].filter(Boolean).join(" — ") || "disebutkan tanpa nama";
 }
 
 function conditionLabel(condition: WbsBudgetFinding["condition"]) {
-  if (condition === "on_track") return "On Track";
-  if (condition === "needs_attention") return "Needs Attention";
-  if (condition === "critical") return "Critical";
-  return "More Evidence Required";
+  if (condition === "on_track") return "Sesuai Rencana";
+  if (condition === "needs_attention") return "Perlu Perhatian";
+  if (condition === "critical") return "Kritis";
+  return "Perlu Bukti Tambahan";
 }
 
 function conditionTone(condition: WbsBudgetFinding["condition"]) {
@@ -195,9 +188,9 @@ function conditionTone(condition: WbsBudgetFinding["condition"]) {
 }
 
 function scopeLabel(change: WbsScopeCandidate["changeType"]) {
-  if (change === "added") return "Added";
-  if (change === "missing") return "Missing";
-  return "Changed";
+  if (change === "added") return "Baru";
+  if (change === "missing") return "Hilang";
+  return "Berubah";
 }
 
 function scopeTone(change: WbsScopeCandidate["changeType"]) {

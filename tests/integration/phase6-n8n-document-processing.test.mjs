@@ -52,13 +52,14 @@ function executePollingCodeNode(name, { input = [], nodes = {}, items = {} } = {
 }
 
 function buildPollingRows(result) {
-  return executePollingCodeNode("Build Supabase Rows", {
+  return executePollingCodeNode("Build Publish Payload", {
     input: [result],
     nodes: {
       "Build Worker Request": {
         project_id: "project-a",
         document_id: "document-a",
         job_id: "job-a",
+        claim_token: "token-a",
         document: { title: "Synthetic", document_date: null, created_at: "2026-06-09T14:31:00.000Z" },
       },
     },
@@ -82,13 +83,14 @@ function workerResult(overrides = {}) {
 }
 
 function buildRows(result = workerResult()) {
-  return executeCodeNode("Build Supabase Rows", {
+  return executeCodeNode("Build Publish Payload", {
     input: [result],
     nodes: {
       "Build Worker Request": {
         project_id: "project-a",
         document_id: "document-a",
         job_id: "job-a",
+        claim_token: "token-a",
         document: {
           title: "Schedule evidence",
           document_date: null,
@@ -99,13 +101,15 @@ function buildRows(result = workerResult()) {
   })[0].json;
 }
 
-test("worker row construction preserves undated snapshots as omitted and keeps exact citations separate", () => {
+test("publish payload preserves undated snapshots as omitted and keeps exact citations separate", () => {
   const rows = buildRows();
-  assert.deepEqual(rows.health_snapshots, []);
-  assert.equal(rows.facts[0].confidence, 0.81);
-  assert.equal("evidence_excerpt" in rows.facts[0], false);
-  assert.deepEqual(rows.fact_evidence, [{ evidence_chunk_index: 0, evidence_excerpt: "Baseline remains approved.\nCurrent completion is delayed." }]);
-  assert.equal(rows.chunks[0].parser_metadata.sourceLocation.pageNumber, 4);
+  assert.deepEqual(rows.p_result.health_snapshots, []);
+  assert.equal(rows.p_result.facts[0].confidence, 0.81);
+  assert.deepEqual(rows.p_result.facts[0].evidence_excerpt, "Baseline remains approved.\nCurrent completion is delayed.");
+  assert.equal(rows.p_result.facts[0].evidence_chunk_index, 0);
+  assert.equal(rows.p_claim_token, "token-a");
+  // Chunks are worker-persisted checkpoints; the publish payload never carries them.
+  assert.equal("chunks" in rows.p_result, false);
 });
 
 test("fact rows reject missing citations or unvalidated confidence instead of substituting values", () => {
@@ -116,37 +120,19 @@ test("fact rows reject missing citations or unvalidated confidence instead of su
   assert.throws(() => buildRows(noConfidence), /invalid fact confidence/);
 });
 
-test("persisted evidence links preserve normalized multiline citations as exact source substrings", () => {
+test("publish payload preserves normalized multiline citations for SQL chunk resolution", () => {
   const rows = buildRows();
-  const facts = executeCodeNode("Build Fact Inserts", {
-    input: [{ id: "run-a" }],
-    items: { "Build Supabase Rows": [rows] },
-  });
-  const [links] = executeCodeNode("Build Evidence Links", {
-    input: [{ id: "fact-a", confidence: facts[0].json.facts[0].confidence }],
-    items: {
-      "Build Supabase Rows": [rows],
-      "Upsert Document Chunks": [{ id: "chunk-a", chunk_index: 0, chunk_text: rows.chunks[0].chunk_text }],
-      "Build Fact Inserts": facts.map((item) => item.json),
-    },
-  });
-  assert.deepEqual(links.json.links, [{
-    project_id: "project-a",
-    extracted_fact_id: "fact-a",
-    document_id: "document-a",
-    document_chunk_id: "chunk-a",
-    excerpt: "Baseline remains approved.\nCurrent completion is delayed.",
-    confidence: 0.81,
-  }]);
+  const [fact] = rows.p_result.facts;
+  assert.deepEqual(
+    [fact.evidence_chunk_index, fact.evidence_excerpt, fact.confidence],
+    [0, "Baseline remains approved.\nCurrent completion is delayed.", 0.81],
+  );
 
-  assert.throws(() => executeCodeNode("Build Evidence Links", {
-    input: [{ id: "fact-a", confidence: null }],
-    items: {
-      "Build Supabase Rows": [rows],
-      "Upsert Document Chunks": [{ id: "chunk-a", chunk_index: 0, chunk_text: rows.chunks[0].chunk_text }],
-      "Build Fact Inserts": facts.map((item) => item.json),
-    },
-  }), /no verified source citation or valid confidence/);
+  // An unvalidated confidence is rejected by the publish node, never coerced.
+  assert.throws(
+    () => buildRows(workerResult({ facts: [{ ...workerResult().facts[0], confidence: null }] })),
+    /invalid fact confidence/,
+  );
 });
 test("claimed parse jobs reach document processing without being dropped", () => {
   function routeClaim(record) {
@@ -173,6 +159,7 @@ test("claimed parse jobs reach document processing without being dropped", () =>
 
   const claimed = {
     id: "job-a",
+    claim_token: "token-a",
     project_id: "project-a",
     document_id: "document-a",
     job_type: "parse_document",
@@ -181,6 +168,7 @@ test("claimed parse jobs reach document processing without being dropped", () =>
   };
   assert.deepEqual(routeClaim(claimed), [{
     job_id: "job-a",
+    claim_token: "token-a",
     project_id: "project-a",
     document_id: "document-a",
     job_type: "parse_document",
@@ -192,61 +180,37 @@ test("claimed parse jobs reach document processing without being dropped", () =>
     [],
     { ...claimed, status: "queued" },
     { ...claimed, job_type: "other" },
+    { ...claimed, claim_token: null },
     { ...claimed, document_id: null },
   ]) {
     assert.deepEqual(routeClaim(rejected), []);
   }
 });
 
-test("chunk evidence links resolve to worker-persisted chunk IDs", () => {
+test("publish payload resolves summary sources through chunk indexes for SQL chunk lookup", () => {
   const rows = buildPollingRows(workerResult());
-  const stored = rows.chunks.map((chunk) => ({
-    id: `persisted-${chunk.chunk_index}`,
-    chunk_index: chunk.chunk_index,
-    chunk_text: chunk.chunk_text,
-  }));
-  const factInsert = executePollingCodeNode("Build Fact Inserts", {
-    input: [{ id: "run-1" }],
-    nodes: {},
-    items: { "Build Supabase Rows": [rows] },
-  })[0].json;
-  assert.ok(factInsert.facts.length > 0);
-  const persistedFacts = factInsert.facts.map((fact, index) => ({
-    id: `fact-${index}`,
-    confidence: fact.confidence,
-  }));
-  const evidenceLinks = executePollingCodeNode("Build Evidence Links", {
-    input: persistedFacts,
-    items: {
-      "Build Supabase Rows": [rows],
-      "Get Persisted Document Chunks": stored,
-      "Build Fact Inserts": [factInsert],
-    },
-  })[0].json.links;
-  assert.deepEqual(evidenceLinks.map((link) => link.document_chunk_id), ["persisted-0"]);
+  assert.deepEqual(
+    rows.p_result.summary_sources.map((source) => source.chunk_index),
+    [0],
+  );
+  assert.equal(rows.p_result.summary_sources[0].excerpt, "Baseline remains approved.\nCurrent completion is delayed.");
 });
 
-test("worker response carries full summary citations and review status through persistence", () => {
+test("worker response carries full summary citations and review status through the publish payload", () => {
   const result = workerResult({
     processing_status: "needs_review",
     processing_error: "Synthetic partial result requires review.",
-    facts: [],
-    chunks: [
-      { chunk_index: 0, chunk_text: "First exact source excerpt." },
-      { chunk_index: 1, chunk_text: "Second exact source excerpt." },
-    ],
     summary_sources: [
-      { evidence_chunk_index: 1, excerpt: "Second exact source excerpt.", confidence: 0.6 },
-      { evidence_chunk_index: 0, excerpt: "First exact source excerpt.", confidence: 0.6 },
+      { evidence_chunk_index: 0, excerpt: "Baseline remains approved.\nCurrent completion is delayed.", confidence: 0.6 },
     ],
   });
   const rows = buildPollingRows(result);
-  assert.equal(rows.processing_status, "needs_review");
-  assert.equal(rows.processing_error, "Synthetic partial result requires review.");
-  assert.deepEqual(rows.summary_sources.map((source) => source.evidence_chunk_index), [1, 0]);
-  assert.equal(rows.summary_sources.length, 2);
+  assert.equal(rows.p_result.processing_status, "needs_review");
+  assert.equal(rows.p_result.processing_error, "Synthetic partial result requires review.");
+  assert.equal(rows.p_result.facts.length, 1);
 });
-test("polling workflow preserves all validated facts, citations, and review status", () => {
+
+test("publish payload preserves all validated facts, citations, and review status", () => {
   const chunks = Array.from({ length: 8 }, (_, index) => ({
     chunk_index: index,
     chunk_text: `SYNTHETIC_SOURCE_${index} retained evidence.`,
@@ -267,51 +231,94 @@ test("polling workflow preserves all validated facts, citations, and review stat
     })),
   });
   const rows = buildPollingRows(result);
-  assert.equal(rows.facts.length, 2);
-  assert.equal(rows.processing_status, "needs_review");
-  assert.equal(rows.processing_error, "Synthetic coverage warning.");
-  assert.equal(rows.summary_sources.length, 8);
-  const factInsert = executePollingCodeNode("Build Fact Inserts", {
-    input: [{ id: "run-a" }],
-    items: { "Build Supabase Rows": [rows] },
-  })[0].json;
-  const storedChunks = [...chunks].reverse().map((chunk) => ({
-    id: `stored-${chunk.chunk_index}`,
-    ...chunk,
+  assert.equal(rows.p_result.facts.length, 2);
+  assert.deepEqual(rows.p_result.facts.map((fact) => fact.evidence_chunk_index), [0, 7]);
+  assert.equal(rows.p_result.processing_status, "needs_review");
+  assert.equal(rows.p_result.processing_error, "Synthetic coverage warning.");
+  assert.equal(rows.p_result.summary_sources.length, 8);
+
+  // Every citation must quote its cited chunk exactly; a fabricated excerpt is
+  // rejected before publication instead of being persisted as a fake link.
+  assert.throws(
+    () => buildPollingRows({
+      ...result,
+      facts: [{ ...result.facts[0], excerpt: "not a source excerpt" }],
+    }),
+    /invalid fact citation/,
+  );
+
+  // Publication is a single fenced RPC carrying the attempt token.
+  assert.equal(rows.p_job_id, "job-a");
+  assert.equal(rows.p_claim_token, "token-a");
+  const publishNode = nodeByName(pollingWorkflow.nodes, "Publish Results");
+  assert.match(publishNode.parameters.url, /rpc\/complete_document_job/);
+  assert.match(publishNode.parameters.jsonBody, /p_claim_token/);
+});
+
+test("publish payload accepts the legitimate needs_review fallback without a summary", () => {
+  // The worker's guardrail fallback returns summary unavailable with no
+  // sources and processing_status needs_review; publication must keep the
+  // validated rows and land the document as needs_review, never throw and
+  // never treat fallback text as a factual summary.
+  const rows = buildPollingRows(workerResult({
+    processing_status: "needs_review",
+    processing_error: "Review AI artifact type and evidence role.",
+    summary: null,
+    summary_sources: [],
+    facts: [],
+    alerts: [],
+    actions: [],
+    anomalies: [],
   }));
-  const factItems = rows.facts.map((fact, index) => ({
-    id: `fact-${index}`,
-    confidence: fact.confidence,
-  }));
-  const linkItems = {
-    "Build Supabase Rows": [rows],
-    "Get Persisted Document Chunks": storedChunks,
-    "Build Fact Inserts": [factInsert],
-  };
-  const evidenceLinks = executePollingCodeNode("Build Evidence Links", {
-    input: factItems,
-    items: linkItems,
-  })[0].json.links;
-  assert.deepEqual(evidenceLinks.map((link) => link.document_chunk_id), ["stored-0", "stored-7"]);
-  const invalidFactInsert = {
-    ...factInsert,
-    fact_evidence: factInsert.fact_evidence.map((evidence, index) =>
-      index === 0 ? { ...evidence, evidence_excerpt: "not a source excerpt" } : evidence,
-    ),
-  };
-  assert.throws(() => executePollingCodeNode("Build Evidence Links", {
-    input: factItems,
-    items: { ...linkItems, "Build Fact Inserts": [invalidFactInsert] },
-  }), /No verified source citation/);
-  const persisted = executePollingCodeNode("Build Summary Sources", {
-    input: [{ id: "summary-a" }],
-    items: {
-      "Build Supabase Rows": [rows],
-      "Get Persisted Document Chunks": storedChunks,
-    },
-  })[0].json.sources;
-  assert.deepEqual(persisted.map((source) => source.document_chunk_id), chunks.map((chunk) => `stored-${chunk.chunk_index}`));
-  const statusNode = nodeByName(pollingWorkflow.nodes, "Mark Document Complete");
-  assert.match(statusNode.parameters.jsonBody, /processing_status/);
-  assert.match(statusNode.parameters.jsonBody, /processing_error/);
+  assert.equal(rows.p_result.processing_status, "needs_review");
+  assert.equal(rows.p_result.summary, null);
+  assert.deepEqual(rows.p_result.summary_sources, []);
+
+  // A valid, sourced summary is preserved verbatim through the publish
+  // payload — completed AND needs_review statuses alike, on BOTH entry-point
+  // workflows (polling and webhook run the same publish contract).
+  const validSummary = workerResult().summary;
+  const validSources = [{ evidence_chunk_index: 0, excerpt: "Baseline remains approved.\nCurrent completion is delayed.", confidence: 0.77 }];
+  const builders = { polling: buildPollingRows, webhook: buildRows };
+  for (const [entryPoint, build] of Object.entries(builders)) {
+    for (const processing_status of ["completed", "needs_review"]) {
+      const preserved = build(workerResult({ processing_status, summary: validSummary, summary_sources: validSources }));
+      const documentTitle = entryPoint === "polling" ? "Synthetic" : "Schedule evidence";
+      assert.deepEqual(preserved.p_result.summary, {
+        summary_text: "The schedule evidence is mixed.",
+        confidence: 0.77,
+        quality_warning: null,
+        metadata: { generated_by: "n8n_document_worker", job_id: "job-a", document_title: documentTitle },
+      }, `${entryPoint}/${processing_status} preserves a sourced summary`);
+      assert.deepEqual(preserved.p_result.summary_sources, [
+        { chunk_index: 0, excerpt: "Baseline remains approved.\nCurrent completion is delayed.", confidence: 0.77 },
+      ], `${entryPoint}/${processing_status} preserves the exact citations`);
+    }
+  }
+
+  // A guardrail fallback whose summary carries no verified source is warning
+  // text, not a factual summary: it is dropped, not published.
+  for (const build of [buildPollingRows, buildRows]) {
+    const guardrail = build(workerResult({
+      processing_status: "needs_review",
+      processing_error: "Review AI artifact type and evidence role.",
+      summary: { summary_text: "Review the artifact type; this is guardrail text.", confidence: 0.9, quality_warning: null },
+      summary_sources: [],
+    }));
+    assert.equal(guardrail.p_result.summary, null);
+    assert.equal(guardrail.p_result.processing_error, "Review AI artifact type and evidence role.");
+  }
+
+  // A completed result still demands a verified summary; the strict path is
+  // unchanged for the normal terminal state.
+  for (const build of [buildPollingRows, buildRows]) {
+    assert.throws(
+      () => build(workerResult({ summary: null, summary_sources: [] })),
+      /invalid summary/,
+    );
+    assert.throws(
+      () => build(workerResult({ summary: workerResult().summary, summary_sources: [] })),
+      /no verified source citations/,
+    );
+  }
 });

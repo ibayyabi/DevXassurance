@@ -12,7 +12,9 @@ import {
 import type { ProjectMember } from "@/features/projects/lib/members";
 import { projectRoles, roleLabels } from "@/features/projects/lib/roles";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
+import { MetaPill } from "@/components/ui/status-pill";
 
 const initialState: MemberActionState = {
   ok: false,
@@ -32,16 +34,16 @@ export function ProjectMembersWorkspace({
 
   return (
     <div className="grid gap-5 lg:grid-cols-[0.85fr_1.4fr]">
-      <section className="rounded-lg border border-ui-border bg-surface p-5 shadow-sm">
+      <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
         <div className="flex items-start gap-3">
-          <span className="rounded-md bg-plan-track p-2 text-ink-muted">
+          <span className="rounded-xl bg-plan-track p-2.5 text-ink-muted">
             <UserPlus className="h-5 w-5" />
           </span>
           <div>
-            <h2 className="font-semibold text-ink">Add Project Member</h2>
+            <h2 className="font-semibold text-ink">Tambah Anggota Proyek</h2>
             <p className="mt-1 text-sm leading-6 text-ink-muted">
-              Add a user who already has a Supabase Auth account, then assign
-              their project role.
+              Tambahkan pengguna yang sudah memiliki akun Supabase Auth, lalu
+              tetapkan peran proyeknya.
             </p>
           </div>
         </div>
@@ -60,7 +62,7 @@ export function ProjectMembersWorkspace({
             />
           </label>
           <label className="text-sm font-medium text-ink-muted">
-            Role
+            Peran
             <select
               name="role"
               disabled={!canManageMembers || pending}
@@ -80,11 +82,11 @@ export function ProjectMembersWorkspace({
             className="bg-brand text-brand-foreground hover:bg-brand/90"
           >
             <UserPlus className="h-4 w-4" />
-            {pending ? "Adding..." : "Add Member"}
+            {pending ? "Menambahkan..." : "Tambah Anggota"}
           </Button>
           {!canManageMembers && (
             <p className="rounded-md bg-base p-3 text-sm text-ink-muted">
-              Your role can view members but cannot manage access.
+              Peran Anda dapat melihat anggota tetapi tidak dapat mengelola akses.
             </p>
           )}
           {state.message && (
@@ -101,24 +103,26 @@ export function ProjectMembersWorkspace({
         </form>
       </section>
 
-      <section className="rounded-lg border border-ui-border bg-surface p-5 shadow-sm">
+      <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h2 className="font-semibold text-ink">Project Members</h2>
+            <h2 className="font-semibold text-ink">Anggota Proyek</h2>
             <p className="mt-1 text-sm text-ink-muted">
-              {members.length} active member{members.length === 1 ? "" : "s"}
+              {members.length} anggota aktif
             </p>
           </div>
-          <span className="rounded-md bg-base p-2 text-ink-muted">
+          <span className="rounded-xl bg-base p-2.5 text-ink-muted">
             <Users className="h-5 w-5" />
           </span>
         </div>
 
         <div className="mt-5 grid gap-3">
           {members.length === 0 ? (
-            <p className="rounded-md bg-base p-4 text-sm text-ink-muted">
-              No project members are assigned yet.
-            </p>
+            <EmptyState
+              icon={Users}
+              title="Belum ada anggota proyek"
+              description="Anggota proyek yang ditambahkan akan muncul di sini."
+            />
           ) : (
             members.map((member) => (
               <MemberRow
@@ -145,23 +149,19 @@ function MemberRow({
   canManageMembers: boolean;
 }) {
   return (
-    <div className="rounded-lg border border-ui-border p-4">
+    <div className="rounded-2xl border border-ui-border p-4">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <p className="truncate font-medium text-ink">
               {member.fullName ?? member.email}
             </p>
-            {member.isCurrentUser && (
-              <span className="rounded-md bg-plan-track px-2 py-1 text-xs font-medium text-ink-muted">
-                You
-              </span>
-            )}
+            {member.isCurrentUser && <MetaPill>Anda</MetaPill>}
           </div>
           <p className="mt-1 text-sm text-ink-muted">{member.email}</p>
           <p className="mt-1 flex items-center gap-1 text-xs text-ink-muted">
             <ShieldCheck className="h-3.5 w-3.5" />
-            Current role: {member.roleLabel}
+            Peran saat ini: {member.roleLabel}
           </p>
         </div>
 
@@ -182,7 +182,7 @@ function MemberRow({
               ))}
             </select>
             <Button type="submit" variant="outline" disabled={!canManageMembers}>
-              Save
+              Simpan
             </Button>
           </form>
 
@@ -194,10 +194,10 @@ function MemberRow({
               type="submit"
               variant="outline"
               disabled={!canManageMembers || member.isCurrentUser}
-              aria-label={`Remove ${member.email}`}
+              aria-label={`Hapus ${member.email}`}
             >
               <UserMinus className="h-4 w-4" />
-              Remove
+              Hapus
             </Button>
           </form>
         </div>

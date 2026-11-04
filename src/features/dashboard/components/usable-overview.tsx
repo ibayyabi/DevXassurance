@@ -10,6 +10,9 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
+import { MetaPill, StatusPill } from "@/components/ui/status-pill";
+import { SectionCard } from "@/components/ui/section-card";
 import type { ReviewCondition } from "@/features/assurance/lib/analysis";
 import type {
   AssuranceAction,
@@ -46,19 +49,20 @@ export function UsableOverview({
         <div className="grid lg:grid-cols-[1.25fr_0.75fr]">
           <div className="p-7 md:p-10">
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-ink-muted">
-              Start with evidence
+              Mulai dari bukti
             </p>
             <h2 className="mt-3 max-w-2xl text-4xl font-semibold tracking-tight text-ink md:text-5xl">
-              Prepare evidence, then review and assess.
+              Siapkan bukti, lalu tinjau dan lakukan asesmen.
             </h2>
             <p className="mt-4 max-w-2xl text-base leading-7 text-ink-muted">
-              Upload evidence for {projectName}, review suggested metadata, then
-              select approved baseline and current-period evidence in Assurance
-              Review to run the Budget, Schedule, and Risk assessment.
+              Unggah bukti untuk {projectName}, tinjau metadata yang disarankan,
+              lalu pilih baseline disetujui dan bukti periode berjalan di
+              Assurance Review untuk menjalankan asesmen Anggaran, Jadwal, dan
+              Risiko.
             </p>
             <Button asChild className="mt-7">
               <Link href={`/app/projects/${projectId}/documents`}>
-                Add project evidence <ArrowRight className="h-4 w-4" />
+                Tambah bukti proyek <ArrowRight className="h-4 w-4" />
               </Link>
             </Button>
           </div>
@@ -66,11 +70,11 @@ export function UsableOverview({
             <div className="max-w-xs">
               <FileSearch className="h-10 w-10 text-ink-muted" />
               <p className="mt-5 text-xl font-semibold text-ink">
-                From evidence to assessment
+                Dari bukti ke asesmen
               </p>
               <p className="mt-2 text-sm leading-6 text-ink-muted">
-                Upload files, review the extracted information, select evidence
-                and run an assessment in Assurance Review, then prepare a report.
+                Unggah berkas, tinjau informasi hasil ekstraksi, pilih bukti dan
+                jalankan asesmen di Assurance Review, lalu siapkan laporan.
               </p>
             </div>
           </div>
@@ -98,15 +102,15 @@ export function UsableOverview({
   const actionStatusData = buildActionStatusData(review.actions);
   const domainStatusData: DomainStatusDatum[] = [
     {
-      domain: "Budget",
+      domain: "Anggaran",
       condition: budget?.condition ?? "more_evidence_required",
     },
     {
-      domain: "Schedule",
+      domain: "Jadwal",
       condition: schedule?.condition ?? "more_evidence_required",
     },
     {
-      domain: "Risk",
+      domain: "Risiko",
       condition: risk?.condition ?? "more_evidence_required",
     },
   ];
@@ -120,7 +124,7 @@ export function UsableOverview({
           <div className="p-6 md:p-8">
             <div className="flex flex-wrap items-center gap-3">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-ink-muted">
-                Latest assessment
+                Asesmen terbaru
               </p>
               <ConditionBadge condition={overall.condition} />
             </div>
@@ -133,66 +137,66 @@ export function UsableOverview({
             <div className="mt-6 flex flex-wrap gap-3">
               <Button asChild>
                 <Link href={`/app/projects/${projectId}/reports`}>
-                  Prepare management report <ArrowRight className="h-4 w-4" />
+                  Siapkan laporan manajemen <ArrowRight className="h-4 w-4" />
                 </Link>
               </Button>
               <Button asChild variant="outline">
                 <Link href={`/app/projects/${projectId}/documents`}>
-                  Review evidence
+                  Tinjau bukti
                 </Link>
               </Button>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-px border-t border-ui-border bg-ui-border lg:border-l lg:border-t-0">
             <SummaryStat
-              label="Assessment period"
+              label="Periode asesmen"
               value={formatPeriod(review.reportingPeriod)}
             />
             <SummaryStat
-              label="Evidence included"
-              value={`${review.documents.length} files`}
+              label="Bukti disertakan"
+              value={`${review.documents.length} berkas`}
             />
             <SummaryStat
-              label="Open actions"
+              label="Tindakan terbuka"
               value={String(openActions.length)}
             />
             <SummaryStat
-              label="Last assessed"
-              value={completedAt ? formatTimestamp(completedAt) : "Not recorded"}
+              label="Terakhir dinilai"
+              value={completedAt ? formatTimestamp(completedAt) : "Belum dicatat"}
             />
           </div>
         </div>
       </section>
 
-      <section aria-label="Current project indicators">
+      <section aria-label="Indikator proyek terkini">
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <KpiCard
             icon={CircleDollarSign}
-            label="Budget variance"
+            label="Deviasi anggaran"
             value={budgetVarianceLabel(budget)}
-            detail={budget?.headline ?? "Budget evidence is incomplete"}
+            detail={budget?.headline ?? "Bukti anggaran belum lengkap"}
             condition={budget?.condition ?? "more_evidence_required"}
           />
           <KpiCard
             icon={CalendarDays}
-            label="Schedule movement"
+            label="Pergerakan jadwal"
             value={scheduleDelayLabel(schedule)}
-            detail={schedule?.headline ?? "Schedule evidence is incomplete"}
+            detail={schedule?.headline ?? "Bukti jadwal belum lengkap"}
             condition={schedule?.condition ?? "more_evidence_required"}
           />
           <KpiCard
             icon={ShieldAlert}
-            label="Open high risks"
+            label="Risiko tinggi terbuka"
             value={riskCountLabel(riskCounts)}
-            detail={risk?.headline ?? "Risk evidence is incomplete"}
+            detail={risk?.headline ?? "Bukti risiko belum lengkap"}
             condition={risk?.condition ?? "more_evidence_required"}
           />
           <KpiCard
             icon={ClipboardCheck}
-            label="Evidence coverage"
-            value={`${review.documents.length} files`}
-            detail="Selected evidence included in this assessment"
-            badgeLabel="Included"
+            label="Cakupan bukti"
+            value={`${review.documents.length} berkas`}
+            detail="Bukti terpilih yang disertakan dalam asesmen ini"
+            badgeLabel="Disertakan"
           />
         </div>
       </section>
@@ -224,35 +228,31 @@ export function UsableOverview({
         />
       </section>
 
-      <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm md:p-6">
-        <div>
-          <h2 className="text-xl font-semibold text-ink">
-            What the evidence says
-          </h2>
-          <p className="mt-1 text-sm leading-6 text-ink-muted">
-            The latest plan-to-current findings behind the dashboard charts.
-          </p>
-        </div>
-        <div className="mt-5 grid gap-5 xl:grid-cols-3">
+      <SectionCard
+        icon={FileSearch}
+        title="Apa yang dikatakan bukti"
+        subtitle="Temuan terbaru dari perbandingan rencana dan realisasi di balik grafik dasbor."
+      >
+        <div className="grid gap-5 xl:grid-cols-3">
           <FindingPanel
             icon={CircleDollarSign}
-            label="Budget"
+            label="Anggaran"
             finding={budget}
           >
             {budget ? <BudgetComparison finding={budget} /> : null}
           </FindingPanel>
           <FindingPanel
             icon={CalendarDays}
-            label="Schedule"
+            label="Jadwal"
             finding={schedule}
           >
             {schedule ? <ScheduleComparison finding={schedule} /> : null}
           </FindingPanel>
-          <FindingPanel icon={ShieldAlert} label="Risk" finding={risk}>
+          <FindingPanel icon={ShieldAlert} label="Risiko" finding={risk}>
             {risk ? <RiskSummary finding={risk} /> : null}
           </FindingPanel>
         </div>
-      </section>
+      </SectionCard>
 
       <section className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.8fr)_minmax(320px,0.8fr)]">
         <ManagementActionsPanel actions={review.actions} />
@@ -297,9 +297,7 @@ function KpiCard({
           <Icon className="h-5 w-5" aria-hidden="true" />
         </span>
         {badgeLabel ? (
-          <span className="w-fit rounded-full bg-plan-track px-3 py-1 text-xs font-semibold text-ink-muted">
-            {badgeLabel}
-          </span>
+          <StatusPill tone="neutral">{badgeLabel}</StatusPill>
         ) : (
           <ConditionBadge condition={condition ?? "more_evidence_required"} />
         )}
@@ -342,7 +340,7 @@ function FindingPanel({
               {label}
             </p>
             <h3 className="mt-1 text-lg font-semibold leading-6 text-ink">
-              {finding?.headline ?? "More evidence is needed"}
+              {finding?.headline ?? "Perlu bukti tambahan"}
             </h3>
           </div>
         </div>
@@ -356,8 +354,8 @@ function FindingPanel({
         </>
       ) : (
         <p className="mt-4 text-sm leading-6 text-ink-muted">
-          Upload relevant plan and current evidence so this condition can be
-          calculated.
+          Unggah bukti rencana dan realisasi yang relevan agar kondisi ini
+          dapat dihitung.
         </p>
       )}
     </article>
@@ -379,18 +377,18 @@ function BudgetComparison({ finding }: { finding: AssuranceFinding }) {
   return (
     <dl className="mt-5 grid gap-2 border-t border-ui-border pt-4">
       <ComparisonRow
-        label="Accepted baseline"
+        label="Baseline disetujui"
         value={formatAmount(baseline, currency)}
       />
       <ComparisonRow
-        label="Reported EAC"
+        label="EAC terlapor"
         value={formatAmount(current, currency)}
       />
       <ComparisonRow
-        label="Variance"
+        label="Deviasi"
         value={
           variance === null
-            ? "Not available"
+            ? "Tidak tersedia"
             : `${variance > 0 ? "+" : ""}${variance.toFixed(1)}%`
         }
         valueClassName={conditionText(finding.condition)}
@@ -409,10 +407,10 @@ function ScheduleComparison({ finding }: { finding: AssuranceFinding }) {
 
   return (
     <dl className="mt-5 grid gap-2 border-t border-ui-border pt-4">
-      <ComparisonRow label="Approved date" value={formatDate(baselineDate)} />
-      <ComparisonRow label="Current forecast" value={formatDate(currentDate)} />
+      <ComparisonRow label="Tanggal disetujui" value={formatDate(baselineDate)} />
+      <ComparisonRow label="Prakiraan terkini" value={formatDate(currentDate)} />
       <ComparisonRow
-        label="Movement"
+        label="Pergerakan"
         value={formatDelay(delayDays)}
         valueClassName={conditionText(finding.condition)}
       />
@@ -429,10 +427,10 @@ function RiskSummary({ finding }: { finding: AssuranceFinding }) {
 
   return (
     <dl className="mt-5 grid grid-cols-3 gap-2 border-t border-ui-border pt-4">
-      <RiskCount label="Critical" value={counts.critical ?? 0} danger />
-      <RiskCount label="High" value={counts.high ?? 0} />
+      <RiskCount label="Kritis" value={counts.critical ?? 0} danger />
+      <RiskCount label="Tinggi" value={counts.high ?? 0} />
       <RiskCount
-        label="Uncontrolled"
+        label="Tidak terkendali"
         value={counts.uncontrolled ?? 0}
         danger
       />
@@ -493,36 +491,30 @@ function ManagementActionsPanel({ actions }: { actions: AssuranceAction[] }) {
     <section className="overflow-hidden rounded-2xl border border-ui-border bg-surface shadow-sm">
       <header className="flex flex-col gap-2 border-b border-ui-border px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-base font-semibold text-ink">Management focus</h2>
+          <h2 className="text-base font-semibold text-ink">Fokus manajemen</h2>
           <p className="mt-1 text-sm leading-5 text-ink-muted">
-            Decisions and follow-up work generated from the latest findings.
+            Keputusan dan tindak lanjut yang dihasilkan dari temuan terbaru.
           </p>
         </div>
-        <span className="w-fit rounded-full bg-plan-track px-3 py-1 text-xs font-semibold text-ink-muted">
-          {actions.length} total
-        </span>
+        <MetaPill>{actions.length} total</MetaPill>
       </header>
       {ordered.length === 0 ? (
         <div className="flex min-h-64 items-center justify-center px-6 text-center">
-          <div>
-            <Sparkles className="mx-auto h-8 w-8 text-ink-muted" />
-            <p className="mt-3 text-sm font-semibold text-ink">
-              No management action
-            </p>
-            <p className="mt-1 text-sm leading-6 text-ink-muted">
-              The current findings did not create a follow-up action.
-            </p>
-          </div>
+          <EmptyState
+            icon={Sparkles}
+            title="Belum ada tindakan manajemen"
+            description="Temuan terkini belum menghasilkan tindakan tindak lanjut."
+          />
         </div>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full min-w-[720px] text-left text-sm">
             <thead className="bg-base text-xs font-medium text-ink-muted">
               <tr>
-                <th className="px-5 py-3 font-medium">Action</th>
-                <th className="px-4 py-3 font-medium">Owner</th>
-                <th className="px-4 py-3 font-medium">Due date</th>
-                <th className="px-4 py-3 font-medium">Priority</th>
+                <th className="px-5 py-3 font-medium">Tindakan</th>
+                <th className="px-4 py-3 font-medium">Penanggung jawab</th>
+                <th className="px-4 py-3 font-medium">Tenggat</th>
+                <th className="px-4 py-3 font-medium">Prioritas</th>
                 <th className="px-5 py-3 text-right font-medium">Status</th>
               </tr>
             </thead>
@@ -536,10 +528,10 @@ function ManagementActionsPanel({ actions }: { actions: AssuranceAction[] }) {
                     {action.title}
                   </td>
                   <td className="px-4 py-4 text-ink-muted">
-                    {action.ownerName ?? "Not assigned"}
+                    {action.ownerName ?? "Belum ditentukan"}
                   </td>
                   <td className="px-4 py-4 text-ink-muted">
-                    {action.dueDate ? formatDate(action.dueDate) : "Not set"}
+                    {action.dueDate ? formatDate(action.dueDate) : "Belum diatur"}
                   </td>
                   <td className="px-4 py-4">
                     <PriorityBadge priority={action.priority} />
@@ -560,50 +552,36 @@ function ManagementActionsPanel({ actions }: { actions: AssuranceAction[] }) {
 function PriorityBadge({ priority }: { priority: AssuranceAction["priority"] }) {
   const tone =
     priority === "high"
-      ? "bg-status-critical-bg text-status-critical-text"
+      ? "critical"
       : priority === "medium"
-        ? "bg-status-warn-bg text-status-warn-text"
-        : "bg-plan-track text-ink-muted";
-  return (
-    <span
-      className={`whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ${tone}`}
-    >
-      {titleCase(priority)}
-    </span>
-  );
+        ? "warn"
+        : "neutral";
+  return <StatusPill tone={tone}>{priorityLabel(priority)}</StatusPill>;
 }
 
 function ActionStatusBadge({ status }: { status: AssuranceAction["status"] }) {
   const tone =
     status === "completed"
-      ? "bg-status-ok-bg text-status-ok-text"
+      ? "ok"
       : status === "open"
-        ? "bg-status-warn-bg text-status-warn-text"
-        : "bg-plan-track text-ink-muted";
-  return (
-    <span
-      className={`whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ${tone}`}
-    >
-      {status === "in_progress" ? "In progress" : titleCase(status)}
-    </span>
-  );
+        ? "warn"
+        : "neutral";
+  return <StatusPill tone={tone}>{actionStatusLabel(status)}</StatusPill>;
 }
 
 function MissingEvidence({ finding }: { finding: AssuranceFinding }) {
   return finding.requiredEvidence.length > 0 ? (
     <p className="mt-5 rounded-xl bg-status-warn-bg p-3 text-sm text-status-warn-text">
-      Needed: {finding.requiredEvidence.join(", ")}
+      Diperlukan: {finding.requiredEvidence.join(", ")}
     </p>
   ) : null;
 }
 
 function ConditionBadge({ condition }: { condition: ReviewCondition }) {
   return (
-    <span
-      className={`w-fit rounded-full px-3 py-1 text-xs font-semibold ${conditionBadgeTone(condition)}`}
-    >
+    <StatusPill tone={conditionTone(condition)}>
       {conditionLabel(condition)}
-    </span>
+    </StatusPill>
   );
 }
 
@@ -617,10 +595,10 @@ function overallCondition(findings: AssuranceFinding[]) {
     );
     return {
       condition: "more_evidence_required" as const,
-      label: "Evidence incomplete",
+      label: "Bukti belum lengkap",
       explanation:
         missing?.explanation ??
-        "Budget, Schedule, and Risk evidence are required before management can rely on a complete project condition.",
+        "Bukti Anggaran, Jadwal, dan Risiko diperlukan sebelum manajemen dapat mengandalkan kondisi proyek yang lengkap.",
     };
   }
 
@@ -628,7 +606,7 @@ function overallCondition(findings: AssuranceFinding[]) {
   if (critical) {
     return {
       condition: "critical" as const,
-      label: "Critical condition",
+      label: "Kondisi kritis",
       explanation: `${critical.headline}. ${critical.explanation}`,
     };
   }
@@ -639,16 +617,16 @@ function overallCondition(findings: AssuranceFinding[]) {
   if (attention) {
     return {
       condition: "needs_attention" as const,
-      label: "Needs attention",
+      label: "Perlu Perhatian",
       explanation: `${attention.headline}. ${attention.explanation}`,
     };
   }
 
   return {
     condition: "on_track" as const,
-    label: "On track",
+    label: "Sesuai Rencana",
     explanation:
-      "The available Budget, Schedule, and Risk evidence is within the working assurance rules for this reporting period.",
+      "Bukti Anggaran, Jadwal, dan Risiko yang tersedia masih dalam aturan assurance yang berlaku untuk periode pelaporan ini.",
   };
 }
 
@@ -677,19 +655,19 @@ function buildActionStatusData(
 ): ActionStatusDatum[] {
   return [
     {
-      status: "Open",
+      status: "Buka",
       value: actions.filter((action) => action.status === "open").length,
     },
     {
-      status: "In progress",
+      status: "Sedang Berjalan",
       value: actions.filter((action) => action.status === "in_progress").length,
     },
     {
-      status: "Completed",
+      status: "Selesai",
       value: actions.filter((action) => action.status === "completed").length,
     },
     {
-      status: "Deferred",
+      status: "Ditunda",
       value: actions.filter((action) => action.status === "deferred").length,
     },
   ];
@@ -714,37 +692,46 @@ function readRiskCounts(finding?: AssuranceFinding) {
 
 function budgetVarianceLabel(finding?: AssuranceFinding) {
   const variance = numberValue(finding?.variance?.percent);
-  if (variance === null) return "Not found";
+  if (variance === null) return "Tidak ditemukan";
   return `${variance > 0 ? "+" : ""}${variance.toFixed(1)}%`;
 }
 
 function scheduleDelayLabel(finding?: AssuranceFinding) {
   const delay = numberValue(finding?.variance?.delay_days);
-  if (delay === null) return "Not found";
+  if (delay === null) return "Tidak ditemukan";
   return formatDelay(delay);
 }
 
 function riskCountLabel(counts: ReturnType<typeof readRiskCounts>) {
-  if (counts.critical === null && counts.high === null) return "Not found";
+  if (counts.critical === null && counts.high === null) return "Tidak ditemukan";
   return String((counts.critical ?? 0) + (counts.high ?? 0));
 }
 
 function conditionLabel(condition: ReviewCondition) {
-  if (condition === "on_track") return "On track";
-  if (condition === "needs_attention") return "Needs attention";
-  if (condition === "critical") return "Critical";
-  return "More evidence needed";
+  if (condition === "on_track") return "Sesuai Rencana";
+  if (condition === "needs_attention") return "Perlu Perhatian";
+  if (condition === "critical") return "Kritis";
+  return "Perlu Bukti Tambahan";
 }
 
-function conditionBadgeTone(condition: ReviewCondition) {
-  if (condition === "on_track") return "bg-status-ok-bg text-status-ok-text";
-  if (condition === "needs_attention") {
-    return "bg-status-warn-bg text-status-warn-text";
-  }
-  if (condition === "critical") {
-    return "bg-status-critical-bg text-status-critical-text";
-  }
-  return "bg-plan-track text-ink-muted";
+function conditionTone(condition: ReviewCondition) {
+  if (condition === "on_track") return "ok" as const;
+  if (condition === "needs_attention") return "warn" as const;
+  if (condition === "critical") return "critical" as const;
+  return "neutral" as const;
+}
+
+function priorityLabel(priority: AssuranceAction["priority"]) {
+  if (priority === "high") return "Tinggi";
+  if (priority === "medium") return "Sedang";
+  return "Rendah";
+}
+
+function actionStatusLabel(status: AssuranceAction["status"]) {
+  if (status === "in_progress") return "Sedang Berjalan";
+  if (status === "open") return "Buka";
+  if (status === "deferred") return "Ditunda";
+  return "Selesai";
 }
 
 function conditionAccent(condition: ReviewCondition) {
@@ -802,18 +789,20 @@ function textValue(value: unknown) {
 }
 
 function formatAmount(value: number, currency: string) {
-  return `${currency || "Amount"} ${new Intl.NumberFormat("en", {
+  return `${currency || "Jumlah"} ${new Intl.NumberFormat("id", {
     maximumFractionDigits: 0,
   }).format(value)}`;
 }
 
 function formatDelay(value: number) {
-  if (value === 0) return "On baseline";
-  return value > 0 ? `${value} days late` : `${Math.abs(value)} days early`;
+  if (value === 0) return "Sesuai baseline";
+  return value > 0
+    ? `terlambat ${value} hari`
+    : `${Math.abs(value)} hari lebih cepat`;
 }
 
 function formatDate(value: string) {
-  return new Intl.DateTimeFormat("en", {
+  return new Intl.DateTimeFormat("id", {
     day: "numeric",
     month: "short",
     timeZone: "UTC",
@@ -822,7 +811,8 @@ function formatDate(value: string) {
 }
 
 function formatPeriod(value: string) {
-  return new Intl.DateTimeFormat("en", {
+  return new Intl.DateTimeFormat("id", {
+    day: "numeric",
     month: "long",
     timeZone: "UTC",
     year: "numeric",
@@ -830,7 +820,8 @@ function formatPeriod(value: string) {
 }
 
 function shortPeriod(value: string) {
-  return new Intl.DateTimeFormat("en", {
+  return new Intl.DateTimeFormat("id", {
+    day: "numeric",
     month: "short",
     timeZone: "UTC",
     year: "2-digit",
@@ -838,15 +829,9 @@ function shortPeriod(value: string) {
 }
 
 function formatTimestamp(value: string) {
-  return new Intl.DateTimeFormat("en", {
+  return new Intl.DateTimeFormat("id", {
     day: "numeric",
     month: "short",
     year: "numeric",
   }).format(new Date(value));
-}
-
-function titleCase(value: string) {
-  return value
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }

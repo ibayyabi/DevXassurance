@@ -41,6 +41,7 @@ export type AssuranceDocument = {
   confirmedDocumentDate: string | null;
   processingStatus: ProcessingStatus;
   processingError: string | null;
+  hasCurrentAssuranceCoverage: boolean;
   evidenceRole: "baseline" | "current" | "supporting" | null;
   suggestedEvidenceRole: "baseline" | "current" | "supporting" | null;
   confirmedEvidenceRole: "baseline" | "current" | "supporting" | null;
@@ -239,7 +240,7 @@ export async function getAssuranceWorkspace(projectId: string) {
     supabase
       .from("documents")
       .select(
-        "id, title, document_type, document_type_hint, suggested_document_type, confirmed_document_type, document_date, document_date_hint, suggested_document_date, confirmed_document_date, processing_status, processing_error, evidence_role, suggested_evidence_role, confirmed_evidence_role, classification_confidence, classification_reason, detected_reporting_period, reporting_period_hint, confirmed_reporting_period, workstream_hint, suggested_workstream, workstream, confirmed_workstream",
+        "id, title, document_type, document_type_hint, suggested_document_type, confirmed_document_type, document_date, document_date_hint, suggested_document_date, confirmed_document_date, processing_status, processing_error, content_hash, assurance_observation_parser_version, assurance_observation_contract_version, evidence_role, suggested_evidence_role, confirmed_evidence_role, classification_confidence, classification_reason, detected_reporting_period, reporting_period_hint, confirmed_reporting_period, workstream_hint, suggested_workstream, workstream, confirmed_workstream",
       )
       .eq("project_id", projectId)
       .order("document_date", { ascending: false, nullsFirst: false })
@@ -255,6 +256,33 @@ export async function getAssuranceWorkspace(projectId: string) {
 
   if (documentsResult.error) throw new Error(documentsResult.error.message);
   if (reviewsResult.error) throw new Error(reviewsResult.error.message);
+  const needsReviewDocuments = (documentsResult.data ?? []).filter(
+    (row) => row.processing_status === "needs_review",
+  );
+  let currentCoverageDocumentIds = new Set<string>();
+  if (needsReviewDocuments.length) {
+    const { data: coverageRows, error: coverageError } = await supabase
+      .from("assurance_observation_coverage")
+      .select("document_id, source_content_hash, parser_version, contract_version")
+      .eq("project_id", projectId)
+      .in("document_id", needsReviewDocuments.map((document) => document.id));
+    if (coverageError) throw new Error(coverageError.message);
+    const versions = new Map(needsReviewDocuments.map((document) => [
+      document.id,
+      JSON.stringify([
+        document.content_hash,
+        document.assurance_observation_parser_version,
+        document.assurance_observation_contract_version,
+      ]),
+    ]));
+    currentCoverageDocumentIds = new Set((coverageRows ?? []).flatMap((coverage) =>
+      versions.get(coverage.document_id) === JSON.stringify([
+        coverage.source_content_hash,
+        coverage.parser_version,
+        coverage.contract_version,
+      ]) ? [coverage.document_id] : [],
+    ));
+  }
 
   const documents: AssuranceDocument[] = (documentsResult.data ?? []).map(
     (row) => {
@@ -271,6 +299,7 @@ export async function getAssuranceWorkspace(projectId: string) {
         confirmedDocumentDate: row.confirmed_document_date,
         processingStatus: row.processing_status,
         processingError: row.processing_error,
+        hasCurrentAssuranceCoverage: currentCoverageDocumentIds.has(row.id),
         evidenceRole: effective.evidenceRole,
         suggestedEvidenceRole: row.suggested_evidence_role,
         confirmedEvidenceRole: row.confirmed_evidence_role,

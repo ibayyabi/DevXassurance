@@ -3,7 +3,7 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## Supabase job polling\nRuns every 60 seconds. The atomic database claim returns at most one queued parse_document job per poll and caps active jobs at two.\n\nRequired env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, XASS_DOCUMENT_WORKER_URL, XASS_WORKER_SECRET.",
+        "content": "## Supabase job polling\nRuns every minute and processes the oldest eligible queued parse_document job through the fenced claim/publish boundary (capacity and backoff enforced by the claim RPC).\n\nRequired env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, XASS_DOCUMENT_WORKER_URL, XASS_WORKER_SECRET.\n\nClaim: rpc/claim_next_available_document_job mints an attempt claim token. Publish: rpc/complete_document_job verifies the token and an unexpired lease inside one atomic transaction. Failure: rpc/fail_document_job_attempt is equally fenced. A stale or expired attempt can neither extend the lease, overwrite results, nor publish twice.",
         "height": 260,
         "width": 380
       },
@@ -18,7 +18,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const input = $input.first()?.json;\nif (!input) return [];\nconst rows = Array.isArray(input) ? input : Array.isArray(input.body) ? input.body : input.id ? [input] : [];\nreturn rows.filter((record) => record?.status === 'processing' && record.job_type === 'parse_document').map((record) => ({ json: { job_id: record.id, project_id: record.project_id, document_id: record.document_id, job_type: record.job_type, status: record.status, metadata: record.metadata ?? {}, valid: Boolean(record.id && record.project_id && record.document_id) } }));"
+        "jsCode": "const input = $input.first()?.json;\nif (!input) return [];\nconst rows = Array.isArray(input) ? input : Array.isArray(input.body) ? input.body : input.id ? [input] : [];\nreturn rows\n  .filter((record) => record?.status === 'processing' && record.job_type === 'parse_document' && record.claim_token)\n  .map((record) => ({ json: { job_id: record.id, claim_token: record.claim_token, project_id: record.project_id, document_id: record.document_id, job_type: record.job_type, status: record.status, metadata: record.metadata ?? {}, valid: Boolean(record.id && record.claim_token && record.project_id && record.document_id) } }));"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -91,7 +91,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const raw = $input.first().json;\nconst document = Array.isArray(raw) ? raw[0] : raw;\nconst job = $node['Normalize Job Payload'].json;\n\nif (!document?.id) {\n  throw new Error('Document row was not found for queued AI job.');\n}\n\nreturn [\n  {\n    json: {\n      job_id: job.job_id,\n      project_id: job.project_id,\n      document_id: job.document_id,\n      document,\n      worker_request: {\n        job_id: job.job_id,\n        project_id: job.project_id,\n        document_id: job.document_id,\n        storage_bucket: document.storage_bucket || 'project-evidence',\n        storage_path: document.storage_path,\n        title: document.title,\n        file_name: document.file_name,\n        document_type: document.document_type,\n        document_date: document.document_date\n      }\n    }\n  }\n];"
+        "jsCode": "const raw = $input.first().json;\nconst document = Array.isArray(raw) ? raw[0] : raw;\nconst job = $node['Normalize Job Payload'].json;\n\nif (!document?.id) {\n  throw new Error('Document row was not found for queued AI job.');\n}\n\nreturn [\n  {\n    json: {\n      job_id: job.job_id,\n      claim_token: job.claim_token,\n      project_id: job.project_id,\n      document_id: job.document_id,\n      document,\n      worker_request: {\n        job_id: job.job_id,\n        claim_token: job.claim_token,\n        project_id: job.project_id,\n        document_id: job.document_id,\n        storage_bucket: document.storage_bucket || 'project-evidence',\n        storage_path: document.storage_path,\n        title: document.title,\n        file_name: document.file_name,\n        document_type: document.document_type,\n        document_date: document.document_date\n      }\n    }\n  }\n];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -122,7 +122,9 @@
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ $json.worker_request }}",
-        "options": { "timeout": 10800000 }
+        "options": {
+          "timeout": 10800000
+        }
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
@@ -131,11 +133,12 @@
         -40
       ],
       "id": "2f0b3d29-20fb-448f-bb3a-8703f90b4e99",
-      "name": "Call Document Worker"
+      "name": "Call Document Worker",
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
-        "content": "Worker response contract\n\nThe worker should download the PDF from Supabase Storage with a service role key, parse it, run extraction/AI, and return JSON:\n\nchunks[]\nfacts[]\nsummary\nhealth_snapshots[]\nalerts[]\nactions[]\n\nn8n writes the returned rows to Supabase.",
+        "content": "Worker response contract\n\nThe worker downloads the document itself from canonical Storage state, parses it, runs grouped extraction/AI, persists checkpoint tables (document_chunks, document_extraction_groups, cost_observations), and returns JSON: facts[], summary, summary_sources[], health_snapshots[], alerts[], actions[], anomalies[], processing_status.\n\nThe worker only computes checkpoints; final results are published once by rpc/complete_document_job, which validates the claim token and lease inside the publication transaction. If the worker reports failure or loses its claim, rpc/fail_document_job_attempt records it under the same ownership rule.",
         "height": 300,
         "width": 430
       },
@@ -150,7 +153,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const result = $input.first().json;\nconst { project_id, document_id, job_id, document } = $node['Build Worker Request'].json;\nconst chunks = (result.chunks ?? []).map((chunk, index) => ({ project_id, document_id, chunk_index: Number.isInteger(chunk.chunk_index) ? chunk.chunk_index : index, chunk_text: String(chunk.chunk_text ?? chunk.text ?? '').trim(), page_number: chunk.page_number ?? null, section_label: chunk.section_label ?? null, parser_metadata: chunk.parser_metadata ?? { source: 'document_worker' } })).filter((chunk) => chunk.chunk_text.length > 0);\nconst facts = (result.facts ?? []).map((fact, fact_index) => ({ fact_index, project_id, fact_type: fact.fact_type, extracted_text: String(fact.extracted_text ?? fact.text ?? '').trim(), original_value: String(fact.original_value ?? fact.extracted_text ?? fact.text ?? '').trim(), confidence: Math.max(0, Math.min(1, Number(fact.confidence))), confirmation_state: 'ai_extracted', evidence_excerpt: fact.excerpt ?? fact.evidence_excerpt, evidence_chunk_index: fact.evidence_chunk_index }));\nconst summary = result.summary?.summary_text ? { project_id, summary_text: String(result.summary.summary_text), confidence: Number(result.summary.confidence), quality_warning: result.summary.quality_warning ?? null, selected_document_ids: [document_id], metadata: { generated_by: 'n8n_document_worker', job_id, document_title: document.title, evidence_count: chunks.length } } : null;\nconst dimensions = ['overall', 'schedule', 'cost', 'risk', 'governance', 'audit_readiness'];\nconst health_snapshots = (result.health_snapshots ?? []).map((snapshot) => ({ project_id, dimension: snapshot.dimension, score: snapshot.score ?? null, status: snapshot.status, evidence_coverage: snapshot.evidence_coverage ?? null, status_text: snapshot.status_text, snapshot_date: snapshot.snapshot_date, source_summary: snapshot.source_summary })).filter((snapshot) => dimensions.includes(snapshot.dimension) && snapshot.snapshot_date && snapshot.source_summary);\nconst alerts = (result.alerts ?? []).map((alert) => ({ project_id, severity: alert.severity, impacted_area: String(alert.impacted_area ?? alert.area ?? ''), explanation: String(alert.explanation ?? alert.title ?? ''), evidence_count: Number(alert.evidence_count ?? 1), recommended_action: String(alert.recommended_action ?? ''), source_path: alert.source_path ?? `/app/projects/${project_id}/documents?document=${document_id}` })).filter((alert) => ['low', 'medium', 'high', 'critical'].includes(alert.severity) && alert.explanation.length > 0);\nconst actions = (result.actions ?? result.recommended_actions ?? []).map((action) => ({ project_id, title: String(action.title ?? action.action ?? '').trim(), owner_name: action.owner_name ?? action.owner_or_function ?? null, due_date: action.due_date ?? null, priority: action.priority, status: action.status ?? 'open', source_path: action.source_path ?? `/app/projects/${project_id}/anomalies` })).filter((action) => ['low', 'medium', 'high'].includes(action.priority) && action.title.length > 0);\nconst anomalies = (result.anomalies ?? []).map((anomaly) => ({ project_id, category: anomaly.category, missing_field: anomaly.missing_field ?? null, severity: anomaly.severity, status: anomaly.status ?? 'open', title: String(anomaly.title ?? '').trim(), affected_item: String(anomaly.affected_item ?? anomaly.affectedItem ?? '').trim(), explanation: String(anomaly.explanation ?? '').trim(), impact: String(anomaly.impact ?? '').trim(), impact_rating: String(anomaly.impact_rating ?? anomaly.impactRating ?? '').trim(), recommended_action: String(anomaly.recommended_action ?? anomaly.recommendedAction ?? '').trim(), suggested_owners: Array.isArray(anomaly.suggested_owners) ? anomaly.suggested_owners : [], evidence_count: Number(anomaly.evidence_count ?? 1), absence_type: anomaly.absence_type, rationale: String(anomaly.rationale ?? '').trim(), source_path: anomaly.source_path ?? `/app/projects/${project_id}/documents?document=${document_id}` })).filter((anomaly) => ['cost', 'schedule', 'risk', 'governance', 'scope', 'accountability'].includes(anomaly.category) && ['low', 'medium', 'high', 'critical'].includes(anomaly.severity) && ['not_found_in_evidence', 'confirmed_missing', 'not_applicable'].includes(anomaly.absence_type) && anomaly.title.length > 0 && anomaly.affected_item.length > 0 && anomaly.explanation.length > 0);\nreturn [{ json: { project_id, document_id, job_id, document, processing_status: result.processing_status, processing_error: result.processing_error ?? null, chunks, facts, summary, summary_sources: (result.summary_sources ?? []).map((source) => ({ project_id, document_id, evidence_chunk_index: source.evidence_chunk_index, excerpt: source.excerpt, confidence: source.confidence })), health_snapshots, alerts, actions, anomalies, extraction_run: { project_id, document_id, ai_job_id: job_id, status: 'processing', metadata: { source: 'n8n_document_processing', worker: result.worker ?? 'external', chunk_count: chunks.length, fact_count: facts.length } } } }];"
+        "jsCode": "const result = $input.first().json;\nconst { job_id, claim_token, project_id, document_id, document } = $node['Build Worker Request'].json;\n\n// Citation validation mirrors the source-integrity contract: every fact and\n// summary source must quote an exact substring of the chunk it cites, with an\n// in-range confidence. The worker owns chunk persistence; this node publishes\n// only the validated final rows through the fenced RPC.\nconst chunks = (result.chunks ?? []).map((chunk, index) => ({\n  chunk_index: Number.isInteger(chunk.chunk_index) ? chunk.chunk_index : index,\n  chunk_text: String(chunk.chunk_text ?? chunk.text ?? '').trim()\n}));\nconst chunksByIndex = new Map(chunks.map((chunk) => [chunk.chunk_index, chunk]));\nconst requireSource = (index, excerpt, label) => {\n  const chunk = chunksByIndex.get(index);\n  if (!chunk || typeof excerpt !== 'string' || !excerpt || !chunk.chunk_text.includes(excerpt)) {\n    throw new Error('The document worker returned an invalid ' + label + ' citation.');\n  }\n};\n\nconst facts = (result.facts ?? []).map((fact) => {\n  requireSource(fact.evidence_chunk_index, fact.excerpt ?? fact.evidence_excerpt, 'fact');\n  if (typeof fact.confidence !== 'number' || !Number.isFinite(fact.confidence) || fact.confidence < 0 || fact.confidence > 1) {\n    throw new Error('The document worker returned invalid fact confidence.');\n  }\n  if (!['risk', 'issue', 'milestone', 'decision', 'owner_action'].includes(fact.fact_type) || typeof fact.extracted_text !== 'string' || !fact.extracted_text.trim() || typeof fact.original_value !== 'string') {\n    throw new Error('The document worker returned an invalid fact.');\n  }\n  return {\n    fact_type: fact.fact_type,\n    extracted_text: fact.extracted_text.trim(),\n    original_value: fact.original_value.trim(),\n    confidence: fact.confidence,\n    evidence_excerpt: fact.excerpt ?? fact.evidence_excerpt,\n    evidence_chunk_index: fact.evidence_chunk_index\n  };\n});\n\n// A completed result must carry a fully verified summary; an explicit\n// needs_review result may legitimately arrive without one (guardrail\n// fallback). In that case publish the validated facts/alerts/actions and let\n// the document land as needs_review \u2014 never invent a citation or treat\n// fallback text as a factual summary.\nconst isReviewFallback = result.processing_status === 'needs_review';\nlet summary = null;\nlet verifiedSummarySources = [];\nif (result.summary?.summary_text) {\n  if (typeof result.summary.summary_text !== 'string' || !result.summary.summary_text.trim() || typeof result.summary.confidence !== 'number' || !Number.isFinite(result.summary.confidence) || result.summary.confidence < 0 || result.summary.confidence > 1) {\n    throw new Error('The document worker returned an invalid summary.');\n  }\n  verifiedSummarySources = result.summary_sources ?? [];\n  if (!verifiedSummarySources.length) {\n    // A needs_review fallback whose summary carries no verified source is\n    // warning text, not a factual summary: drop it and let processing_error\n    // carry the warning. Facts, alerts, and actions that validated remain.\n    // Only the dropped fallback lands here; a sourced summary always publishes.\n    if (!isReviewFallback) throw new Error('The document summary has no verified source citations.');\n    summary = null;\n    verifiedSummarySources = [];\n  } else {\n    for (const source of verifiedSummarySources) {\n      requireSource(source.evidence_chunk_index, source.excerpt, 'summary');\n      if (typeof source.confidence !== 'number' || !Number.isFinite(source.confidence) || source.confidence < 0 || source.confidence > 1) {\n        throw new Error('The document worker returned invalid summary confidence.');\n      }\n    }\n    summary = {\n      summary_text: result.summary.summary_text.trim(),\n      confidence: result.summary.confidence,\n      quality_warning: result.summary.quality_warning ?? null,\n      metadata: { generated_by: 'n8n_document_worker', job_id, document_title: document.title }\n    };\n  }\n} else if (!isReviewFallback) {\n  throw new Error('The document worker returned an invalid summary.');\n}\n\nconst health_snapshots = (result.health_snapshots ?? [])\n  .filter((snapshot) => snapshot.snapshot_date !== null && snapshot.snapshot_date !== undefined)\n  .map((snapshot) => {\n    if (typeof snapshot.snapshot_date !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}$/.test(snapshot.snapshot_date)) {\n      throw new Error('The document worker returned an invalid evidenced health snapshot date.');\n    }\n    return {\n      dimension: snapshot.dimension,\n      score: snapshot.score,\n      status: snapshot.status,\n      evidence_coverage: snapshot.evidence_coverage,\n      status_text: snapshot.status_text,\n      snapshot_date: snapshot.snapshot_date,\n      source_summary: snapshot.source_summary\n    };\n  });\n\nconst alerts = (result.alerts ?? []).map((alert) => ({\n  severity: alert.severity,\n  impacted_area: alert.impacted_area,\n  explanation: alert.explanation,\n  evidence_count: alert.evidence_count,\n  recommended_action: alert.recommended_action,\n  source_path: alert.source_path ?? null\n}));\nconst actions = (result.actions ?? []).map((action) => ({\n  title: action.title,\n  owner_name: action.owner_name,\n  due_date: action.due_date ?? null,\n  priority: action.priority,\n  status: action.status,\n  source_path: action.source_path ?? null\n}));\nconst anomalies = (result.anomalies ?? []).map((anomaly) => ({\n  category: anomaly.category,\n  missing_field: anomaly.missing_field ?? null,\n  severity: anomaly.severity,\n  status: anomaly.status ?? 'open',\n  title: anomaly.title,\n  affected_item: anomaly.affected_item,\n  explanation: anomaly.explanation,\n  impact: anomaly.impact,\n  impact_rating: anomaly.impact_rating,\n  recommended_action: anomaly.recommended_action,\n  suggested_owners: anomaly.suggested_owners,\n  evidence_count: anomaly.evidence_count,\n  absence_type: anomaly.absence_type,\n  rationale: anomaly.rationale,\n  source_path: anomaly.source_path ?? null\n}));\n\nreturn [{ json: {\n  p_job_id: job_id,\n  p_claim_token: claim_token,\n  p_result: {\n    worker: result.worker ?? 'next_document_worker',\n    processing_status: result.processing_status === 'needs_review' ? 'needs_review' : 'completed',\n    processing_error: result.processing_error ?? null,\n    facts,\n    summary,\n    summary_sources: verifiedSummarySources.map((source) => ({\n      chunk_index: source.evidence_chunk_index,\n      excerpt: source.excerpt,\n      confidence: source.confidence\n    })),\n    health_snapshots,\n    alerts,\n    actions,\n    anomalies,\n    extraction_run_metadata: { parser_metadata: result.parser_metadata ?? {}, chunk_count: chunks.length }\n  }\n} }];\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -159,497 +162,11 @@
         -40
       ],
       "id": "5ec2b1f8-f5e9-4d15-bd3b-b238d67cf7ad",
-      "name": "Build Supabase Rows"
+      "name": "Build Publish Payload"
     },
     {
       "parameters": {
-        "method": "GET",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/document_chunks?document_id=eq.' + $node['Build Supabase Rows'].json.document_id + '&select=id,chunk_index,chunk_text' }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": false,
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        1480,
-        -40
-      ],
-      "id": "2195daef-eb49-4c8a-8dff-b78d61315f8e",
-      "name": "Get Persisted Document Chunks"
-    },
-    {
-      "parameters": {
-        "jsCode": "return [{ json: { persisted_chunk_count: $input.all().length } }];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1600,
-        -40
-      ],
-      "id": "824bb73c-1e61-4574-957f-4e5cad984d30",
-      "name": "Collapse Chunk Response"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/extraction_runs?on_conflict=ai_job_id' }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            },
-            {
-              "name": "Prefer",
-              "value": "resolution=merge-duplicates,return=representation"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ $items('Build Supabase Rows')[0].json.extraction_run }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        1720,
-        -40
-      ],
-      "id": "611f8f10-fc9c-4e38-9274-aab3b4c178ad",
-      "name": "Create Extraction Run"
-    },
-    {
-      "parameters": {
-        "jsCode": "const rawRun = $input.first().json;\nconst run = Array.isArray(rawRun) ? rawRun[0] : rawRun;\nconst rows = $items('Build Supabase Rows')[0].json;\n\nreturn [\n  {\n    json: {\n      facts: rows.facts.map(({ evidence_excerpt, evidence_chunk_index, fact_index, ...fact }) => ({\n        ...fact,\n        extraction_run_id: run.id\n      })),\n      fact_evidence: rows.facts.map((fact) => ({\n        fact_index: fact.fact_index,\n        evidence_excerpt: fact.evidence_excerpt,\n        evidence_chunk_index: fact.evidence_chunk_index\n      }))\n    }\n  }\n];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1960,
-        -40
-      ],
-      "id": "8cded7bf-7ec1-46b8-a4b8-e370238e3c6b",
-      "name": "Build Fact Inserts"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/extracted_facts' }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            },
-            {
-              "name": "Prefer",
-              "value": "return=representation"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ $json.facts }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        2200,
-        -40
-      ],
-      "id": "6fbec9b1-df2f-4f16-a7f8-53ce66e00e1f",
-      "name": "Insert Extracted Facts"
-    },
-    {
-      "parameters": {
-        "jsCode": "const insertedFacts = $input.all().map((item) => item.json);\nconst rows = $items('Build Supabase Rows')[0].json;\nconst chunks = $items('Get Persisted Document Chunks').map(item => item.json);\nconst factEvidence = $items('Build Fact Inserts')[0].json.fact_evidence ?? [];\n\nconst links = insertedFacts.map((fact, index) => {\n  const evidence = factEvidence[index];\n  const chunk = Number.isInteger(evidence?.evidence_chunk_index)\n    ? chunks.find((candidate) => candidate.chunk_index === evidence.evidence_chunk_index)\n    : null;\n  const confidence = fact.confidence;\n  if (\n    !chunk?.id ||\n    typeof evidence?.evidence_excerpt !== 'string' ||\n    !evidence.evidence_excerpt ||\n    typeof chunk.chunk_text !== 'string' ||\n    !chunk.chunk_text.includes(evidence.evidence_excerpt) ||\n    typeof confidence !== 'number' ||\n    !Number.isFinite(confidence) ||\n    confidence < 0 ||\n    confidence > 1\n  ) {\n    throw new Error('No verified source citation or valid confidence for an extracted fact.');\n  }\n\n  return {\n    project_id: rows.project_id,\n    extracted_fact_id: fact.id,\n    document_id: rows.document_id,\n    document_chunk_id: chunk.id,\n    excerpt: evidence.evidence_excerpt,\n    confidence\n  };\n});\n\nreturn [{ json: { links } }];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        2440,
-        -40
-      ],
-      "id": "bd70e21d-48c4-4a64-aaf8-22048ce19a1b",
-      "name": "Build Evidence Links"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/evidence_links' }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ $json.links }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        2680,
-        -40
-      ],
-      "id": "1434f976-ac2e-4fd9-9c07-373a142173ec",
-      "name": "Insert Evidence Links"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/document_summaries' }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            },
-            {
-              "name": "Prefer",
-              "value": "return=representation"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ $items('Build Supabase Rows')[0].json.summary ? $items('Build Supabase Rows')[0].json.summary : [] }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        2920,
-        -40
-      ],
-      "id": "02cf216e-0abe-463e-962e-2489e76b16db",
-      "name": "Insert Document Summary"
-    },
-    {
-      "parameters": {
-        "jsCode": "const rawSummary = $input.first().json;\nconst summary = Array.isArray(rawSummary) ? rawSummary[0] : rawSummary;\nconst rows = $items('Build Supabase Rows')[0].json;\nconst chunks = $items('Get Persisted Document Chunks').map(item => item.json);\n\nif (!summary?.id) {\n  return [{ json: { sources: [] } }];\n}\n\nconst sources = rows.summary_sources.map((source) => {\n  const chunk = chunks.find((candidate) => candidate.chunk_index === source.evidence_chunk_index);\n  if (!chunk?.id) throw new Error('Validated summary source chunk was not returned by storage.');\n  return {\n    project_id: rows.project_id,\n    summary_id: summary.id,\n    document_id: rows.document_id,\n    document_chunk_id: chunk.id,\n    excerpt: source.excerpt,\n    confidence: source.confidence\n  };\n});\n\nreturn [{ json: { sources } }];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        3160,
-        -40
-      ],
-      "id": "5a5ec7ac-664f-4040-bcde-9a9618d4583a",
-      "name": "Build Summary Sources"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/document_summary_sources' }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ $json.sources }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        3400,
-        -40
-      ],
-      "id": "f636f034-efc0-408a-84d9-b835f8057630",
-      "name": "Insert Summary Sources"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/dashboard_health_snapshots?on_conflict=project_id,dimension,snapshot_date' }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            },
-            {
-              "name": "Prefer",
-              "value": "resolution=merge-duplicates"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ $items('Build Supabase Rows')[0].json.health_snapshots }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        3640,
-        -40
-      ],
-      "id": "c0f13c4c-5ff2-458f-8ea8-92d1585f4ed3",
-      "name": "Upsert Health Snapshots"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/dashboard_critical_alerts' }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ $items('Build Supabase Rows')[0].json.alerts }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        3880,
-        -40
-      ],
-      "id": "9a0570f1-2e93-4d5f-9472-e8a5e874722b",
-      "name": "Insert Critical Alerts"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/recommended_actions' }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ $items('Build Supabase Rows')[0].json.actions }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        4120,
-        -40
-      ],
-      "id": "28f66739-3175-4b60-94f0-cc773c9d372d",
-      "name": "Insert Recommended Actions"
-    },
-    {
-      "parameters": {
-        "method": "PATCH",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/extraction_runs?ai_job_id=eq.' + $node['Normalize Job Payload'].json.job_id }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ { status: 'completed' } }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        4600,
-        -40
-      ],
-      "id": "f96cf77b-0f8f-48d7-850b-eec0de931452",
-      "name": "Complete Extraction Run"
-    },
-    {
-      "parameters": {
-        "method": "PATCH",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/ai_jobs?id=eq.' + $node['Normalize Job Payload'].json.job_id }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ { status: 'completed', error_code: null, error_message: null, lease_expires_at: null, completed_at: new Date().toISOString(), updated_at: new Date().toISOString() } }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        4840,
-        -40
-      ],
-      "id": "69aa74ca-c78f-4af0-a13c-313d63a6f631",
-      "name": "Complete Job"
-    },
-    {
-      "parameters": {
-        "method": "PATCH",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/documents?id=eq.' + $node['Normalize Job Payload'].json.document_id }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ { processing_status: $items('Build Supabase Rows')[0].json.processing_status, processing_error: $items('Build Supabase Rows')[0].json.processing_error } }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        5080,
-        -40
-      ],
-      "id": "5f1b65f4-4252-42e4-8e5e-af8100f1a1d5",
-      "name": "Mark Document Complete"
-    },
-    {
-      "parameters": {
-        "content": "Required n8n environment variables\n\nSUPABASE_URL\nSUPABASE_SERVICE_ROLE_KEY\nXASS_DOCUMENT_WORKER_URL\n\nOptional:\nXASS_N8N_WEBHOOK_SECRET\nXASS_WORKER_SECRET\n\nNever expose the service-role key in the Next.js app.",
+        "content": "Required n8n environment variables\n\nSUPABASE_URL\nSUPABASE_SERVICE_ROLE_KEY\nXASS_DOCUMENT_WORKER_URL\nXASS_WORKER_SECRET\n\nNever expose the service-role key in the Next.js app.\n\nCutover: import this workflow while it is inactive, apply migration 202611020002, then activate this workflow and deactivate the legacy webhook workflow. Old executions calling the dropped unfenced claim RPCs fail loudly instead of bypassing fencing.",
         "height": 240,
         "width": 430,
         "color": 5
@@ -662,41 +179,6 @@
       ],
       "id": "75242172-7215-4eb4-8c80-356c863fd248",
       "name": "Environment Note"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/anomalies' }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ $items('Build Supabase Rows')[0].json.anomalies }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        4360,
-        -40
-      ],
-      "id": "cce6f98d-d5a1-4ded-8b43-7f89aa1593e3",
-      "name": "Insert Anomalies"
     },
     {
       "parameters": {
@@ -760,7 +242,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/rpc/reset_document_job_results' }}",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/rpc/complete_document_job' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -780,22 +262,111 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { reset_job_id: $node['Normalize Job Payload'].json.job_id } }}",
+        "jsonBody": "={{ { p_job_id: $json.p_job_id, p_claim_token: $json.p_claim_token, p_result: $json.p_result } }}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        400,
+        1600,
         -40
       ],
-      "id": "47bdfef1-973d-455e-b55c-90feb376c111",
-      "name": "Reset Previous Attempt",
-      "alwaysOutputData": true
+      "id": "69aa74ca-c78f-4af0-a13c-313d63a6f631",
+      "name": "Publish Results"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/rpc/fail_document_job_attempt' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { fail_job_id: $node['Build Worker Request'].json.job_id, fail_project_id: $node['Build Worker Request'].json.project_id, fail_document_id: $node['Build Worker Request'].json.document_id, fail_claim_token: $node['Build Worker Request'].json.claim_token, fail_error_code: String($json.errorCode ?? $json.error?.errorCode ?? 'worker_failed'), fail_error_message: String($json.errorMessage ?? $json.error?.message ?? 'The document worker did not complete processing.') } }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1600,
+        200
+      ],
+      "id": "cce6f98d-d5a1-4ded-8b43-7f89aa1593e3",
+      "name": "Report Failed Job"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "f0a1c2d3-0000-4000-8000-0000000000b1",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1360,
+        -40
+      ],
+      "id": "f0a1c2d3-0000-4000-8000-0000000000b2",
+      "name": "Worker Succeeded"
     }
   ],
   "pinData": {},
   "connections": {
+    "Poll Every 60 Seconds": {
+      "main": [
+        [
+          {
+            "node": "Claim Available Document Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Available Document Job": {
+      "main": [
+        [
+          {
+            "node": "Normalize Job Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "Normalize Job Payload": {
       "main": [
         [
@@ -811,7 +382,7 @@
       "main": [
         [
           {
-            "node": "Reset Previous Attempt",
+            "node": "Get Document",
             "type": "main",
             "index": 0
           }
@@ -845,232 +416,36 @@
       "main": [
         [
           {
-            "node": "Build Supabase Rows",
+            "node": "Worker Succeeded",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Build Supabase Rows": {
+    "Worker Succeeded": {
       "main": [
         [
           {
-            "node": "Get Persisted Document Chunks",
+            "node": "Build Publish Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report Failed Job",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Get Persisted Document Chunks": {
+    "Build Publish Payload": {
       "main": [
         [
           {
-            "node": "Collapse Chunk Response",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Collapse Chunk Response": {
-      "main": [
-        [
-          {
-            "node": "Create Extraction Run",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Create Extraction Run": {
-      "main": [
-        [
-          {
-            "node": "Build Fact Inserts",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Build Fact Inserts": {
-      "main": [
-        [
-          {
-            "node": "Insert Extracted Facts",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Insert Extracted Facts": {
-      "main": [
-        [
-          {
-            "node": "Build Evidence Links",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Build Evidence Links": {
-      "main": [
-        [
-          {
-            "node": "Insert Evidence Links",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Insert Evidence Links": {
-      "main": [
-        [
-          {
-            "node": "Insert Document Summary",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Insert Document Summary": {
-      "main": [
-        [
-          {
-            "node": "Build Summary Sources",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Build Summary Sources": {
-      "main": [
-        [
-          {
-            "node": "Insert Summary Sources",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Insert Summary Sources": {
-      "main": [
-        [
-          {
-            "node": "Upsert Health Snapshots",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Upsert Health Snapshots": {
-      "main": [
-        [
-          {
-            "node": "Insert Critical Alerts",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Insert Critical Alerts": {
-      "main": [
-        [
-          {
-            "node": "Insert Recommended Actions",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Insert Recommended Actions": {
-      "main": [
-        [
-          {
-            "node": "Insert Anomalies",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Complete Extraction Run": {
-      "main": [
-        [
-          {
-            "node": "Mark Document Complete",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Complete Job": {
-      "main": [
-        []
-      ]
-    },
-    "Mark Document Complete": {
-      "main": [
-        [
-          {
-            "node": "Complete Job",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Insert Anomalies": {
-      "main": [
-        [
-          {
-            "node": "Complete Extraction Run",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Poll Every 60 Seconds": {
-      "main": [
-        [
-          {
-            "node": "Claim Available Document Job",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Claim Available Document Job": {
-      "main": [
-        [
-          {
-            "node": "Normalize Job Payload",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Reset Previous Attempt": {
-      "main": [
-        [
-          {
-            "node": "Get Document",
+            "node": "Publish Results",
             "type": "main",
             "index": 0
           }
@@ -1082,7 +457,7 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "versionId": "00000000-0000-4000-8000-000000000202",
+  "versionId": "00000000-0000-4000-8000-000000000301",
   "meta": {
     "templateCredsSetupCompleted": false
   },

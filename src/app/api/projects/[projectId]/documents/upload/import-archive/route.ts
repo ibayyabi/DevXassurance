@@ -354,44 +354,31 @@ export async function POST(
         .limit(1)
         .maybeSingle();
       const processable = isProcessableEvidenceFile(new File([Uint8Array.from(bytes)], fileName, { type: memberMimeType }));
-      const { data: document, error: documentError } = await supabase
-        .from("documents")
-        .insert({
-          project_id: projectId,
-          uploader_id: user.id,
-          submission_id: submissionId,
-          archive_member_identity: identity,
-          title: fileName,
-          file_name: fileName,
-          file_size: bytes.byteLength,
-          mime_type: memberMimeType,
-          storage_path: memberStoragePath,
-          document_type: "unknown",
-          processing_status: processable ? "queued" : "needs_review",
-          processing_error: processable ? null : "File retained as reference evidence; this format is not automatically analyzed.",
-        })
-        .select("id")
-        .single();
-      if (documentError || !document) throw new Error("document-create-failed");
-
-      let jobId: string | undefined;
-      let processingStatus = processable ? "queued" : "needs_review";
-      let resultReason: string | undefined;
-      if (processable) {
-        const { data: job, error: jobError } = await supabase.from("ai_jobs").insert({
-          project_id: projectId,
-          document_id: document.id,
-          job_type: "parse_document",
-          status: "queued",
-          metadata: { source: "zip_import", archive_name: archiveName, archive_member: memberName },
-        }).select("id").single();
-        jobId = job?.id;
-        if (jobError || !job) {
-          processingStatus = "needs_review";
-          resultReason = "Imported; analysis could not be queued.";
-          await supabase.from("documents").update({ processing_status: "needs_review", processing_error: resultReason }).eq("id", document.id).eq("project_id", projectId);
-        }
-      }
+      const { data: memberRecord, error: memberError } = await supabase.rpc(
+        "create_document_with_job",
+        {
+          p_project_id: projectId,
+          p_submission_id: submissionId,
+          p_archive_member_identity: identity,
+          p_title: fileName,
+          p_file_name: fileName,
+          p_file_size: bytes.byteLength,
+          p_mime_type: memberMimeType,
+          p_storage_path: memberStoragePath,
+          p_document_type: "unknown",
+          p_document_date: null,
+          p_process_automatically: processable,
+          p_job_source: "zip_import",
+          p_job_metadata: { archive_name: archiveName, archive_member: memberName },
+          p_content_hash: contentHash,
+        },
+      );
+      if (memberError || !memberRecord) throw new Error("document-create-failed");
+      const memberPair = Array.isArray(memberRecord) ? memberRecord[0] : memberRecord;
+      const document = { id: String(memberPair.document_id) };
+      const jobId = memberPair.job_id ? String(memberPair.job_id) : undefined;
+      const processingStatus = processable ? (memberPair.queued ? "queued" : "needs_review") : "needs_review";
+      const resultReason = processable && !memberPair.queued ? "Imported; analysis could not be queued." : undefined;
       setMember(manifest, {
         index,
         identity,

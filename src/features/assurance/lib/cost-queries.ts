@@ -44,7 +44,20 @@ export type CostObservationRow = {
   page_number: number | null;
   section_label: string | null;
   source_location: Record<string, unknown> | null;
-  documents?: { title: string } | { title: string }[] | null;
+  source_content_hash?: string | null;
+  parser_version?: string | null;
+  contract_version?: string | null;
+  documents?: {
+    title: string;
+    content_hash?: string | null;
+    assurance_observation_parser_version?: string | null;
+    assurance_observation_contract_version?: string | null;
+  } | {
+    title: string;
+    content_hash?: string | null;
+    assurance_observation_parser_version?: string | null;
+    assurance_observation_contract_version?: string | null;
+  }[] | null;
 };
 
 export type CostBaselineRow = {

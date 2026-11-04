@@ -102,6 +102,11 @@ export async function processDocumentJob(
     alerts: extraction.alerts,
     actions: extraction.actions,
     cost_observations: extraction.cost_observations,
+    source_content_hash: extraction.source_content_hash,
+    parser_version: extraction.parser_version,
+    assurance_observation_contract_version: extraction.assurance_observation_contract_version,
+    assurance_observations: extraction.assurance_observations,
+    assurance_observation_coverage: extraction.assurance_observation_coverage,
     document_suggestions: extraction.document_suggestions,
     anomalies: buildAnomalies(extraction.alerts, extraction.facts),
     parserMetadata: {

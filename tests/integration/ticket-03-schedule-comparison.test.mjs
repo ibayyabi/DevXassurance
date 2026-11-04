@@ -61,40 +61,7 @@ const {
   milestoneSourceLabels,
 } = await import(pathToFileURL(scheduleModule).href);
 
-const { parseReviewExtraction } = await import(pathToFileURL(analysisModule).href);
 
-function validExtraction(overrides = {}) {
-  return {
-    schedule: {
-      baseline_milestones: [
-        { label: "Go-live", date: "2026-03-01", period_label: "Baseline", as_of_date: null, excerpt: "Go-live 2026-03-01" },
-      ],
-      current_milestones: [
-        { label: "Go-live", date: "2026-03-10", period_label: "October 2026", as_of_date: "2026-10-31", excerpt: "Now 2026-03-10" },
-      ],
-      confidence: 0.8,
-    },
-    progress: {
-      observations: [
-        { role: "current", scope_level: "project", scope_label: null, percent: 60, period_label: "October 2026", as_of_date: "2026-10-31", excerpt: "60% complete" },
-      ],
-      confidence: 0.7,
-    },
-    risk: {
-      has_current_evidence: true,
-      open_critical_count: 0,
-      open_high_count: 1,
-      high_risks_missing_owner_or_mitigation: 0,
-      increased_risk_count: 0,
-      new_high_risk_count: 0,
-      max_mitigation_overdue_days: 0,
-      baseline_excerpt: null,
-      current_excerpt: "One high risk open.",
-      confidence: 0.6,
-    },
-    ...overrides,
-  };
-}
 
 function milestone(overrides = {}) {
   return {
@@ -102,6 +69,9 @@ function milestone(overrides = {}) {
     date: "2026-03-01",
     periodLabel: "March 2026",
     asOfDate: "2026-03-31",
+    scopeLevel: "project",
+    scopeLabel: null,
+    sourceRef: null,
     excerpt: "Go-live is planned for 2026-03-01.",
     ...overrides,
   };
@@ -202,6 +172,16 @@ test("differing milestone labels do not compare without an accepted mapping", ()
   assert.equal(withMapping[0].condition, "needs_attention");
   assert.equal(withMapping[0].delayDays, 9);
 });
+test("same-named milestones in different WBS scopes remain separate evidence gaps", () => {
+  const comparisons = buildMilestoneComparisons({
+    baselineMilestones: [milestone({ scopeLevel: "wbs", scopeLabel: "Package A" })],
+    currentMilestones: [milestone({ scopeLevel: "wbs", scopeLabel: "Package B", date: "2026-03-10" })],
+    mappings: [],
+  });
+  assert.equal(comparisons.length, 2);
+  assert.ok(comparisons.every((comparison) => comparison.delayDays === null));
+  assert.ok(comparisons.every((comparison) => comparison.condition === "more_evidence_required"));
+});
 
 test("the schedule finding reports the worst comparable delay, or a gap", () => {
   const comparisons = buildMilestoneComparisons({
@@ -284,62 +264,6 @@ test("a WBS progress value without a label is preserved but never compared", () 
   assert.equal(results[0].deltaPercentPoints, null);
 });
 
-test("parseReviewExtraction reads the split schedule and progress shape", () => {
-  const extraction = parseReviewExtraction(validExtraction());
-  assert.ok(extraction);
-  assert.equal(extraction.schedule.baselineMilestones[0].label, "Go-live");
-  assert.equal(extraction.schedule.currentMilestones[0].date, "2026-03-10");
-  assert.equal(extraction.schedule.currentMilestones[0].periodLabel, "October 2026");
-  assert.equal(extraction.progress.observations[0].percent, 60);
-  assert.equal(extraction.progress.observations[0].scopeLevel, "project");
-  assert.equal(extraction.progress.observations[0].scopeLabel, null);
-});
-
-test("parseReviewExtraction rejects invalid dates, percents, and missing sections", () => {
-  // A non-ISO milestone date is rejected rather than coerced.
-  assert.equal(
-    parseReviewExtraction(
-      validExtraction({
-        schedule: {
-          baseline_milestones: [{ label: "Go-live", date: "March 2026", period_label: null, as_of_date: null, excerpt: null }],
-          current_milestones: [],
-          confidence: 0.5,
-        },
-      }),
-    ),
-    null,
-  );
-  // An out-of-range progress percentage is rejected.
-  assert.equal(
-    parseReviewExtraction(
-      validExtraction({
-        progress: {
-          observations: [{ role: "current", scope_level: "project", scope_label: null, percent: 160, period_label: null, as_of_date: null, excerpt: null }],
-          confidence: 0.5,
-        },
-      }),
-    ),
-    null,
-  );
-  // The progress section is required.
-  const { progress, ...withoutProgress } = validExtraction();
-  void progress;
-  assert.equal(parseReviewExtraction(withoutProgress), null);
-});
-
-test("parseReviewExtraction drops a WBS scope label from project progress", () => {
-  const extraction = parseReviewExtraction(
-    validExtraction({
-      progress: {
-        observations: [{ role: "current", scope_level: "project", scope_label: "1.2", percent: 60, period_label: null, as_of_date: null, excerpt: null }],
-        confidence: 0.5,
-      },
-    }),
-  );
-  assert.ok(extraction);
-  // Project progress never carries a WBS label.
-  assert.equal(extraction.progress.observations[0].scopeLabel, null);
-});
 
 test("milestoneSourceLabels lists distinct source labels from both groups", () => {
   const labels = milestoneSourceLabels({

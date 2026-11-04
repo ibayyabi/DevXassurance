@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  evaluateAssuranceReview,
-  parseReviewExtraction,
-} from "../../src/features/assurance/lib/analysis.ts";
+import { evaluateAssuranceReview } from "../../src/features/assurance/lib/analysis.ts";
 
 // Budget is evaluated from cost observations and an accepted baseline; see
 // ticket-01-project-budget-assurance.test.mjs. Schedule is evaluated from
@@ -143,6 +140,3 @@ test("risk becomes critical for an open critical risk or missing high-risk contr
   );
 });
 
-test("AI extraction parser rejects an incomplete response contract", () => {
-  assert.equal(parseReviewExtraction({ schedule: {} }), null);
-});

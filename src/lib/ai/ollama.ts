@@ -2,13 +2,13 @@ export type OllamaChatResult =
   | {
       ok: true;
       content: string;
-      provider: "ollama" | "ollama_cloud" | "openai-compatible";
+      provider: "ollama" | "ollama_cloud" | "openai-compatible" | "gemini" | "groq";
       model: string;
     }
   | {
       ok: false;
       warning: string;
-      provider: "disabled" | "ollama" | "ollama_cloud" | "openai-compatible";
+      provider: "disabled" | "ollama" | "ollama_cloud" | "openai-compatible" | "gemini" | "groq";
       model: string | null;
     };
 
@@ -38,7 +38,7 @@ export async function runOllamaChat({
     return runOllamaCloudRequest({ system, user, temperature, format });
   }
 
-  if (provider === "openai-compatible") {
+  if (provider === "openai-compatible" || provider === "groq") {
     return runOpenAiCompatibleRequest({
       provider,
       system,
@@ -46,6 +46,10 @@ export async function runOllamaChat({
       temperature,
       format,
     });
+  }
+
+  if (provider === "gemini") {
+    return runGeminiRequest({ system, user, temperature, format });
   }
 
   return {
@@ -225,25 +229,36 @@ async function runOpenAiCompatibleRequest({
   temperature,
   format,
 }: {
-  provider: "openai-compatible";
+  provider: "openai-compatible" | "groq";
   system: string;
   user: string;
   temperature: number;
   format?: "json";
 }): Promise<OllamaChatResult> {
-  const model =
-    process.env.XASS_CLOUD_LLM_MODEL ?? "gpt-oss:20b";
-  const baseUrl =
-    process.env.XASS_CLOUD_LLM_BASE_URL ?? "https://ollama.com/v1";
-  const apiKey =
-    process.env.XASS_CLOUD_LLM_API_KEY ?? process.env.OLLAMA_API_KEY;
+  const model = provider === "groq"
+    ? process.env.GROQ_MODEL
+    : process.env.XASS_CLOUD_LLM_MODEL ?? "gpt-oss:20b";
+  const baseUrl = provider === "groq"
+    ? process.env.GROQ_API_BASE_URL ?? "https://api.groq.com/openai/v1"
+    : process.env.XASS_CLOUD_LLM_BASE_URL ?? "https://ollama.com/v1";
+  const apiKey = provider === "groq"
+    ? process.env.GROQ_API_KEY
+    : process.env.XASS_CLOUD_LLM_API_KEY ?? process.env.OLLAMA_API_KEY;
 
   if (!apiKey) {
     return {
       ok: false,
       provider,
-      model,
-      warning: "Cloud LLM API key is not configured.",
+      model: model ?? null,
+      warning: provider === "groq" ? "GROQ_API_KEY is not configured." : "Cloud LLM API key is not configured.",
+    };
+  }
+  if (!model) {
+    return {
+      ok: false,
+      provider,
+      model: null,
+      warning: provider === "groq" ? "GROQ_MODEL is not configured." : "Cloud LLM model is not configured.",
     };
   }
 
@@ -260,6 +275,7 @@ async function runOpenAiCompatibleRequest({
         body: JSON.stringify({
           model,
           temperature,
+          stream: false,
           messages: [
             { role: "system", content: system },
             { role: "user", content: user },
@@ -300,6 +316,70 @@ async function runOpenAiCompatibleRequest({
       model,
       warning:
         error instanceof Error ? error.message : "Cloud LLM request failed.",
+    };
+  }
+}
+
+async function runGeminiRequest({
+  system,
+  user,
+  temperature,
+  format,
+}: {
+  system: string;
+  user: string;
+  temperature: number;
+  format?: "json";
+}): Promise<OllamaChatResult> {
+  const model = process.env.GEMINI_MODEL;
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return { ok: false, provider: "gemini", model: model ?? null, warning: "GEMINI_API_KEY is not configured." };
+  }
+  if (!model) {
+    return { ok: false, provider: "gemini", model: null, warning: "GEMINI_MODEL is not configured." };
+  }
+  const baseUrl = process.env.GEMINI_API_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta";
+
+  try {
+    const response = await fetch(
+      `${baseUrl.replace(/\/$/, "")}/models/${encodeURIComponent(model)}:generateContent`,
+      {
+        method: "POST",
+        signal: AbortSignal.timeout(llmTimeoutMs()),
+        headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: system }] },
+          contents: [{ role: "user", parts: [{ text: user }] }],
+          generationConfig: {
+            temperature,
+            ...(format ? { responseMimeType: "application/json" } : {}),
+          },
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      return { ok: false, provider: "gemini", model, warning: `Gemini returned HTTP ${response.status}.` };
+    }
+
+    const payload = (await response.json()) as {
+      candidates?: { content?: { parts?: { text?: string }[] } }[];
+    };
+    const content = (payload.candidates?.[0]?.content?.parts ?? [])
+      .map((part) => part.text ?? "")
+      .join("")
+      .trim();
+    if (!content) {
+      return { ok: false, provider: "gemini", model, warning: "Gemini returned an empty response." };
+    }
+    return { ok: true, provider: "gemini", model, content };
+  } catch (error) {
+    return {
+      ok: false,
+      provider: "gemini",
+      model,
+      warning: error instanceof Error ? error.message : "Gemini request failed.",
     };
   }
 }

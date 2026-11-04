@@ -23,23 +23,26 @@ import type {
   ReportPreview,
 } from "@/features/reports/lib/queries";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
+import { SectionCard } from "@/components/ui/section-card";
+import { StatusPill } from "@/components/ui/status-pill";
 
 const sectionMeta = {
   project_health: {
-    label: "Executive condition",
-    help: "The clearest management statement about the project condition.",
+    label: "Kondisi eksekutif",
+    help: "Pernyataan manajemen paling jelas tentang kondisi proyek.",
   },
   key_findings: {
-    label: "Budget, Schedule, and Risk findings",
-    help: "Evidence-backed findings from this reporting-period Assurance Review.",
+    label: "Temuan Anggaran, Jadwal, dan Risiko",
+    help: "Temuan berbasis bukti dari Assurance Review pada periode pelaporan ini.",
   },
   critical_risks: {
-    label: "Critical matters",
-    help: "Conditions that need escalation or a management decision.",
+    label: "Hal-hal kritis",
+    help: "Kondisi yang membutuhkan eskalasi atau keputusan manajemen.",
   },
   recommended_actions: {
-    label: "Recommended actions",
-    help: "Specific next steps for accountable owners.",
+    label: "Tindakan yang disarankan",
+    help: "Langkah lanjutan yang spesifik untuk penanggung jawab.",
   },
 } as const;
 
@@ -73,19 +76,19 @@ export function ReportWorkspace({
 
   if (!reviewReady) {
     return (
-      <section className="rounded-3xl border border-status-warn bg-status-warn-bg p-7 shadow-sm md:p-10">
+      <section className="rounded-2xl border border-status-warn bg-status-warn-bg p-7 shadow-sm md:p-10">
         <p className="text-xs font-semibold uppercase tracking-[0.16em] text-status-warn-text">
-          Assurance Review not ready
+          Assurance Review belum siap
         </p>
         <h2 className="mt-3 max-w-2xl text-3xl font-semibold tracking-tight text-status-warn-text">
-          Add enough evidence before creating a management report.
+          Lengkapi bukti sebelum membuat laporan manajemen.
         </h2>
         <p className="mt-3 max-w-2xl text-sm leading-6 text-status-warn-text/80">
-          Select completed baseline and current evidence, then complete this
-          review&apos;s analysis before generating a management report.
+          Pilih bukti baseline dan bukti terkini yang sudah selesai, lalu
+          selesaikan analisis tinjauan ini sebelum membuat laporan manajemen.
         </p>
         <Button asChild className="mt-6 bg-brand text-brand-foreground hover:bg-brand/90">
-          <Link href={`/app/projects/${projectId}/documents`}>Review evidence</Link>
+          <Link href={`/app/projects/${projectId}/documents`}>Tinjau bukti</Link>
         </Button>
       </section>
     );
@@ -93,36 +96,36 @@ export function ReportWorkspace({
 
   return (
     <div className="space-y-5">
-      <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-3">
-            <span className="rounded-xl bg-plan-track p-2.5 text-ink-muted">
-              <FileText className="h-5 w-5" />
-            </span>
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-ink-muted">
-                Source review
-              </p>
-              <h2 className="mt-1 font-semibold text-ink">{review.title}</h2>
-            </div>
-          </div>
-          <span className={`w-fit rounded-full px-3 py-1 text-xs font-semibold ${approved || !currentPreview ? "bg-status-ok-bg text-status-ok-text" : "bg-status-warn-bg text-status-warn-text"}`}>
-            {approved ? "Approved for export" : currentPreview ? "Draft ready" : "Ready to generate"}
-          </span>
-        </div>
-      </section>
+      <SectionCard
+        icon={FileText}
+        iconTone="neutral"
+        title={review.title}
+        subtitle="Sumber tinjauan"
+        bodyClassName="p-0"
+        aside={
+          <StatusPill tone={approved || !currentPreview ? "ok" : "warn"} dot>
+            {approved
+              ? "Disetujui untuk ekspor"
+              : currentPreview
+                ? "Draf siap"
+                : "Siap dibuat"}
+          </StatusPill>
+        }
+      >
+        {null}
+      </SectionCard>
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1.3fr)_minmax(300px,0.7fr)]">
         <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm md:p-6">
           <div className="border-b border-ui-border pb-4">
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-brand">
-              Management report
+              Laporan manajemen
             </p>
             <h2 className="mt-1 text-2xl font-semibold text-ink">
               {projectName}
             </h2>
             <p className="mt-1 text-sm text-ink-muted">
-              Review the wording before approving and exporting.
+              Tinjau redaksi sebelum menyetujui dan mengekspor.
             </p>
           </div>
 
@@ -140,20 +143,16 @@ export function ReportWorkspace({
                 />
               ))}
               <Button type="submit" variant="outline" className="w-fit bg-surface text-ink">
-                Save report edits
+                Simpan perubahan laporan
               </Button>
             </form>
           ) : (
-            <div className="mt-5 rounded-2xl border border-dashed border-ui-border bg-base p-8 text-center">
-              <Sparkles className="mx-auto h-7 w-7 text-ink-muted" />
-              <p className="mt-3 font-semibold text-ink">
-                Generate a concise report draft
-              </p>
-              <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-ink-muted">
-                The draft uses this Assurance Review&apos;s findings, selected
-                evidence, and management actions.
-              </p>
-            </div>
+            <EmptyState
+              className="mt-5"
+              icon={Sparkles}
+              title="Buat draf laporan yang ringkas"
+              description="Draf menggunakan temuan dari Assurance Review ini, bukti terpilih, dan tindakan manajemen."
+            />
           )}
         </section>
 
@@ -161,19 +160,19 @@ export function ReportWorkspace({
           <form action={generateReportPreview} className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
             <input type="hidden" name="projectId" value={projectId} />
             <input type="hidden" name="assuranceReviewId" value={review.id} />
-            <h2 className="text-lg font-semibold text-ink">Report options</h2>
+            <h2 className="text-lg font-semibold text-ink">Opsi laporan</h2>
             <div className="mt-4 grid gap-4">
               <label className="grid gap-1.5 text-sm font-medium text-ink">
-                Audience
-                <select name="audience" className="h-11 rounded-lg border border-ui-border bg-surface px-3 text-sm text-ink shadow-sm">
+                Audiens
+                <select name="audience" className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink shadow-sm">
                   {audiences.map((audience) => (
                     <option key={audience}>{audience}</option>
                   ))}
                 </select>
               </label>
               <label className="grid gap-1.5 text-sm font-medium text-ink">
-                Detail level
-                <select name="detailLevel" className="h-11 rounded-lg border border-ui-border bg-surface px-3 text-sm text-ink shadow-sm">
+                Tingkat detail
+                <select name="detailLevel" className="h-10 rounded-md border border-ui-border bg-surface px-3 text-sm text-ink shadow-sm">
                   {detailLevels.map((level) => (
                     <option key={level}>{level}</option>
                   ))}
@@ -181,16 +180,16 @@ export function ReportWorkspace({
               </label>
               <Button type="submit" className="bg-brand text-brand-foreground hover:bg-brand/90">
                 <Sparkles className="h-4 w-4" />
-                {currentPreview ? "Regenerate report" : preview ? "Generate updated report" : "Generate report"}
+                {currentPreview ? "Buat ulang laporan" : preview ? "Buat laporan terbaru" : "Buat laporan"}
               </Button>
             </div>
           </form>
 
           <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
-            <h2 className="font-semibold text-ink">Approve and create files</h2>
+            <h2 className="font-semibold text-ink">Setujui dan buat berkas</h2>
             <p className="mt-1 text-sm leading-6 text-ink-muted">
-              Approve the wording, create the required format, then download it
-              from Recent downloads.
+              Setujui redaksi, buat format yang diminta, lalu unduh dari
+              Unduhan terbaru.
             </p>
             <div className="mt-4 grid gap-2">
               <form action={markReportReviewed}>
@@ -203,11 +202,11 @@ export function ReportWorkspace({
                   disabled={!currentPreview}
                 >
                   <CheckCircle2 className="h-4 w-4" />
-                  {approved ? "Report approved" : "Approve report"}
+                  {approved ? "Laporan disetujui" : "Setujui laporan"}
                 </Button>
               </form>
-              <ExportButton projectId={projectId} preview={currentPreview} format="pdf" label="Create PDF file" />
-              <ExportButton projectId={projectId} preview={currentPreview} format="docx" label="Create DOCX file" />
+              <ExportButton projectId={projectId} preview={currentPreview} format="pdf" label="Buat berkas PDF" />
+              <ExportButton projectId={projectId} preview={currentPreview} format="docx" label="Buat berkas DOCX" />
               <Button
                 type="button"
                 variant="outline"
@@ -215,7 +214,7 @@ export function ReportWorkspace({
                 disabled
               >
                 <Mail className="h-4 w-4" />
-                Share coming later
+                Berbagi hadir nanti
               </Button>
             </div>
           </section>
@@ -292,7 +291,7 @@ function EvidenceSummary({ stats }: { stats: ReportEvidenceStats }) {
   return (
     <details className="min-w-0 rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
       <summary className="cursor-pointer font-semibold text-ink">
-        Evidence included
+        Bukti yang disertakan
       </summary>
       <dl className="mt-4 grid grid-cols-2 gap-2">
         {Object.entries(stats).map(([key, value]) => (
@@ -310,10 +309,11 @@ function ReportProvenance({ preview }: { preview: ReportPreview | null }) {
   return (
     <details className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
       <summary className="cursor-pointer font-semibold text-ink">
-        Technical traceability
+        Keterlacakan teknis
       </summary>
       <p className="mt-2 text-sm leading-6 text-ink-muted">
-        Use this when an auditor needs to trace the report back to stored records.
+        Gunakan ini saat auditor perlu melacak laporan kembali ke catatan yang
+        tersimpan.
       </p>
       <div className="mt-4 grid gap-2">
         {preview?.provenance.length ? (
@@ -324,7 +324,7 @@ function ReportProvenance({ preview }: { preview: ReportPreview | null }) {
             </div>
           ))
         ) : (
-          <p className="text-sm text-ink-muted">Generate a report to create traceability records.</p>
+          <p className="text-sm text-ink-muted">Buat laporan untuk menghasilkan catatan keterlacakan.</p>
         )}
       </div>
     </details>
@@ -334,11 +334,11 @@ function ReportProvenance({ preview }: { preview: ReportPreview | null }) {
 function ExportHistory({ exports }: { exports: ReportExport[] }) {
   return (
     <section className="min-w-0 rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
-      <h2 className="font-semibold text-ink">Recent downloads</h2>
+      <h2 className="font-semibold text-ink">Unduhan terbaru</h2>
       <div className="mt-4 grid gap-2">
         {exports.length === 0 ? (
           <p className="rounded-xl bg-base p-4 text-sm text-ink-muted">
-            Downloaded reports will appear here.
+            Laporan yang diunduh akan muncul di sini.
           </p>
         ) : (
           exports.map((item) => (
@@ -351,10 +351,10 @@ function ExportHistory({ exports }: { exports: ReportExport[] }) {
               </div>
               {item.downloadUrl ? (
                 <Button asChild size="sm" variant="outline" className="bg-surface text-ink">
-                  <Link href={item.downloadUrl}>Download</Link>
+                  <Link href={item.downloadUrl}>Unduh</Link>
                 </Button>
               ) : (
-                <span className="text-xs text-ink-muted/70">Unavailable</span>
+                <span className="text-xs text-ink-muted/70">Tidak tersedia</span>
               )}
             </div>
           ))

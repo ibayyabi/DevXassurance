@@ -13,11 +13,17 @@ if (!new Set(["fixture", "live"]).has(mode)) {
   throw new Error("E2E model proxy requires an explicit fixture or live mode.");
 }
 if (mode === "live") {
-  if (!new Set(["ollama", "ollama_cloud", "openai-compatible"]).has(provider)) {
+  if (!new Set(["ollama", "ollama_cloud", "openai-compatible", "gemini", "groq"]).has(provider)) {
     throw new Error("Live E2E model proxy requires a configured supported provider.");
   }
   if (provider === "ollama_cloud" && upstreamBase.hostname !== "ollama.com") {
     throw new Error("E2E cloud model proxy only permits the configured Ollama Cloud host.");
+  }
+  if (provider === "gemini" && upstreamBase.hostname !== "generativelanguage.googleapis.com") {
+    throw new Error("Gemini E2E proxy only permits the Google Generative Language API host.");
+  }
+  if (provider === "groq" && upstreamBase.hostname !== "api.groq.com") {
+    throw new Error("Groq E2E proxy only permits the official Groq API host.");
   }
   if (provider === "ollama" && !new Set(["localhost", "127.0.0.1", "::1"]).has(upstreamBase.hostname)) {
     throw new Error("E2E local Ollama proxy only permits a loopback provider host.");
@@ -42,7 +48,10 @@ const server = createServer(async (request, response) => {
     response.writeHead(204).end();
     return;
   }
-  if (request.method !== "POST" || !["/api/chat", "/chat", "/v1/chat/completions"].includes(requestUrl.pathname)) {
+  if (request.method !== "POST" || (
+    !["/api/chat", "/chat", "/v1/chat/completions", "/openai/v1/chat/completions"].includes(requestUrl.pathname) &&
+    !(provider === "gemini" && /^\/v1beta\/models\/[^/]+:generateContent$/u.test(requestUrl.pathname))
+  )) {
     response.writeHead(404).end();
     return;
   }
@@ -72,6 +81,9 @@ const server = createServer(async (request, response) => {
     const target = modelTargetUrl(`${requestUrl.pathname}${requestUrl.search}`, upstreamBase.href);
     const headers = new Headers({ "content-type": request.headers["content-type"] ?? "application/json" });
     if (typeof request.headers.authorization === "string") headers.set("authorization", request.headers.authorization);
+    if (typeof request.headers["x-goog-api-key"] === "string") {
+      headers.set("x-goog-api-key", request.headers["x-goog-api-key"]);
+    }
     const upstream = await fetch(target, {
       method: "POST",
       headers,

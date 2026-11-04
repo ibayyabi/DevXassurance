@@ -8,6 +8,7 @@ import type { MilestoneMapping } from "@/features/assurance/lib/schedule-compari
 import type { AssuranceReview } from "@/features/assurance/lib/queries";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SectionCard } from "@/components/ui/section-card";
 
 type Condition = "on_track" | "needs_attention" | "critical" | "more_evidence_required";
 
@@ -65,27 +66,17 @@ export function ScheduleProgressPanel({
   const acceptedMappings = milestoneMappings.filter((mapping) => mapping.state === "accepted");
 
   return (
-    <section className="rounded-2xl border border-ui-border bg-surface p-5 shadow-sm">
-      <div className="flex items-center gap-2">
-        <CalendarClock className="h-4 w-4 text-ink-muted" />
-        <p className="text-sm font-medium text-ink-muted">Schedule and progress</p>
-      </div>
-      <h2 className="mt-1 text-lg font-semibold text-ink">
-        Compare approved and reported milestone dates, and read reported progress
-      </h2>
-      <p className="mt-2 max-w-3xl text-sm leading-6 text-ink-muted">
-        Milestones with identical labels are compared directly; differing labels
-        are compared only after a reviewer accepts a mapping. A missing forecast
-        date stays an evidence gap. Reported progress is shown as stated and is
-        never aggregated into a project total or turned into a forecast date.
-      </p>
-
+    <SectionCard
+      icon={CalendarClock}
+      title="Jadwal dan progres — bandingkan tanggal milestone yang disetujui dan yang dilaporkan, lalu baca progres yang dilaporkan"
+      subtitle="Milestone dengan label identik dibandingkan langsung; label yang berbeda hanya dibandingkan setelah peninjau menyetujui pemetaannya. Tanggal prakiraan yang tidak ada tetap menjadi kekurangan bukti. Progres yang dilaporkan ditampilkan apa adanya dan tidak pernah diagregasi menjadi total proyek atau diubah menjadi tanggal prakiraan."
+    >
       {/* Milestone date comparisons */}
-      <h3 className="mt-5 text-sm font-semibold text-ink">Milestone date comparisons</h3>
+      <h3 className="text-sm font-semibold text-ink">Perbandingan tanggal milestone</h3>
       {comparisons.length === 0 ? (
         <p className="mt-2 rounded-xl border border-dashed border-ui-border p-4 text-sm text-ink-muted">
-          No milestone comparison yet. Run the analysis with baseline and current
-          evidence that state milestone dates.
+          Belum ada perbandingan milestone. Jalankan analisis dengan bukti
+          baseline dan periode berjalan yang menyebutkan tanggal milestone.
         </p>
       ) : (
         <ul className="mt-2 space-y-3">
@@ -100,17 +91,17 @@ export function ScheduleProgressPanel({
               {comparison.gapReason ? (
                 <p className="mt-2 text-sm leading-6 text-ink-muted">
                   {comparison.gapReason === "forecast_not_reported"
-                    ? `Approved baseline date ${formatDate(comparison.baseline?.date)}, but no reported forecast date for this milestone.`
-                    : `Reported forecast date ${formatDate(comparison.current?.date)}, but no approved baseline date for this milestone.`}
+                    ? `Tanggal baseline disetujui ${formatDate(comparison.baseline?.date)}, tetapi belum ada tanggal prakiraan yang dilaporkan untuk milestone ini.`
+                    : `Tanggal prakiraan dilaporkan ${formatDate(comparison.current?.date)}, tetapi belum ada tanggal baseline yang disetujui untuk milestone ini.`}
                 </p>
               ) : (
                 <p className="mt-2 text-sm leading-6 text-ink-muted">
-                  Baseline {formatDate(comparison.baseline?.date)} → forecast {formatDate(comparison.current?.date)} ·{" "}
+                  Baseline {formatDate(comparison.baseline?.date)} → prakiraan {formatDate(comparison.current?.date)} ·{" "}
                   {comparison.delayDays === 0
-                    ? "on baseline"
+                    ? "sesuai baseline"
                     : comparison.delayDays && comparison.delayDays > 0
-                      ? `${comparison.delayDays} day${comparison.delayDays === 1 ? "" : "s"} late`
-                      : `${Math.abs(comparison.delayDays ?? 0)} day${Math.abs(comparison.delayDays ?? 0) === 1 ? "" : "s"} ahead`}
+                      ? `terlambat ${comparison.delayDays} hari`
+                      : `lebih cepat ${Math.abs(comparison.delayDays ?? 0)} hari`}
                 </p>
               )}
               <SourceLines baseline={comparison.baseline} current={comparison.current} />
@@ -120,11 +111,11 @@ export function ScheduleProgressPanel({
       )}
 
       {/* Reported progress */}
-      <h3 className="mt-6 text-sm font-semibold text-ink">Reported progress (as stated)</h3>
+      <h3 className="mt-6 text-sm font-semibold text-ink">Progres dilaporkan (apa adanya)</h3>
       {progress.length === 0 ? (
         <p className="mt-2 rounded-xl border border-dashed border-ui-border p-4 text-sm text-ink-muted">
-          No reported progress captured. Run the analysis with evidence that
-          states a project or WBS progress percentage.
+          Belum ada progres yang dilaporkan. Jalankan analisis dengan bukti
+          yang menyebutkan persentase progres proyek atau WBS.
         </p>
       ) : (
         <ul className="mt-2 space-y-2">
@@ -134,20 +125,20 @@ export function ScheduleProgressPanel({
               className="rounded-xl border border-ui-border p-4 text-sm"
             >
               <p className="font-semibold text-ink">
-                {scope.scopeLevel === "project" ? "Project total" : `WBS ${scope.scopeLabel}`}
+                {scope.scopeLevel === "project" ? "Total proyek" : `WBS ${scope.scopeLabel}`}
               </p>
               <p className="mt-1 text-ink-muted">
                 {scope.current
-                  ? `Reported ${formatPercent(scope.current.percent)}${periodSuffix(scope.current)}`
-                  : "No current-period progress reported."}
+                  ? `Dilaporkan ${formatPercent(scope.current.percent)}${periodSuffix(scope.current)}`
+                  : "Belum ada progres periode berjalan yang dilaporkan."}
                 {scope.prior &&
-                  ` · Prior ${formatPercent(scope.prior.percent)}${periodSuffix(scope.prior)}`}
+                  ` · Sebelumnya ${formatPercent(scope.prior.percent)}${periodSuffix(scope.prior)}`}
                 {scope.deltaPercentPoints !== null &&
-                  ` · ${scope.deltaPercentPoints >= 0 ? "+" : ""}${scope.deltaPercentPoints} pts`}
+                  ` · ${scope.deltaPercentPoints >= 0 ? "+" : ""}${scope.deltaPercentPoints} poin`}
               </p>
               {scope.prior && scope.deltaPercentPoints === null && (
                 <p className="mt-1 text-xs text-ink-muted">
-                  Prior value preserved but not compared (scope not comparable across periods).
+                  Nilai sebelumnya disimpan tetapi tidak dibandingkan (lingkup tidak dapat dibandingkan antarperiode).
                 </p>
               )}
               <ProgressSources current={scope.current} prior={scope.prior} />
@@ -157,11 +148,11 @@ export function ScheduleProgressPanel({
       )}
 
       {/* Reviewer milestone mappings */}
-      <h3 className="mt-6 text-sm font-semibold text-ink">Accepted milestone mappings</h3>
+      <h3 className="mt-6 text-sm font-semibold text-ink">Pemetaan milestone yang disetujui</h3>
       {acceptedMappings.length === 0 ? (
         <p className="mt-2 text-sm text-ink-muted">
-          None accepted. Differing-label milestones stay separate until a reviewer
-          maps them.
+          Belum ada yang disetujui. Milestone berlabel berbeda tetap terpisah
+          sampai peninjau memetakannya.
         </p>
       ) : (
         <ul className="mt-2 space-y-2">
@@ -179,7 +170,7 @@ export function ScheduleProgressPanel({
                   <input type="hidden" name="mappingId" value={mapping.id} />
                   <Button type="submit" size="sm" variant="outline">
                     <Trash2 className="h-4 w-4" />
-                    Remove
+                    Hapus
                   </Button>
                 </form>
               )}
@@ -192,8 +183,8 @@ export function ScheduleProgressPanel({
         <form action={acceptMilestoneMapping} className="mt-4 grid gap-3 rounded-xl border border-ui-border p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
           <input type="hidden" name="projectId" value={projectId} />
           <label className="text-xs font-medium text-ink-muted">
-            Source milestone (from evidence)
-            <Input name="sourceLabel" list="milestone-labels" required placeholder="e.g. Go-live (prod)" className="mt-1" />
+            Milestone sumber (dari bukti)
+            <Input name="sourceLabel" list="milestone-labels" required placeholder="mis. Go-live (prod)" className="mt-1" />
             <datalist id="milestone-labels">
               {milestoneLabels.map((label) => (
                 <option key={label} value={label} />
@@ -201,23 +192,23 @@ export function ScheduleProgressPanel({
             </datalist>
           </label>
           <label className="text-xs font-medium text-ink-muted">
-            Canonical milestone
-            <Input name="canonicalLabel" required placeholder="e.g. Go-live" className="mt-1" />
+            Milestone kanonik
+            <Input name="canonicalLabel" required placeholder="mis. Go-live" className="mt-1" />
           </label>
           <Button type="submit" variant="outline">
             <GitMerge className="h-4 w-4" />
-            Accept mapping
+            Setujui pemetaan
           </Button>
           <label className="text-xs font-medium text-ink-muted sm:col-span-3">
-            Note (optional)
-            <Input name="note" placeholder="Why these are the same milestone" className="mt-1" />
+            Catatan (opsional)
+            <Input name="note" placeholder="Alasan keduanya adalah milestone yang sama" className="mt-1" />
           </label>
         </form>
       )}
       {milestoneLabels.length > 0 && !canApprove && (
-        <p className="mt-3 text-xs text-ink-muted">Your project role cannot accept milestone mappings.</p>
+        <p className="mt-3 text-xs text-ink-muted">Peran proyek Anda tidak dapat menyetujui pemetaan milestone.</p>
       )}
-    </section>
+    </SectionCard>
   );
 }
 
@@ -230,7 +221,7 @@ function SourceLines({
 }) {
   const lines = [
     baseline?.excerpt ? { role: "Baseline", observation: baseline } : null,
-    current?.excerpt ? { role: "Forecast", observation: current } : null,
+    current?.excerpt ? { role: "Prakiraan", observation: current } : null,
   ].filter((line): line is { role: string; observation: MilestoneObservation } => line !== null);
   if (lines.length === 0) return null;
   return (
@@ -239,7 +230,7 @@ function SourceLines({
         <li key={line.role}>
           <span className="font-medium text-ink">{line.role}:</span> “{line.observation.excerpt}”
           {line.observation.periodLabel && ` — ${line.observation.periodLabel}`}
-          {line.observation.asOfDate && ` (as of ${line.observation.asOfDate})`}
+          {line.observation.asOfDate && ` (per ${line.observation.asOfDate})`}
         </li>
       ))}
     </ul>
@@ -254,8 +245,8 @@ function ProgressSources({
   prior: ProgressObservation | null;
 }) {
   const lines = [
-    current?.excerpt ? { role: "Current", observation: current } : null,
-    prior?.excerpt ? { role: "Prior", observation: prior } : null,
+    current?.excerpt ? { role: "Periode Berjalan", observation: current } : null,
+    prior?.excerpt ? { role: "Sebelumnya", observation: prior } : null,
   ].filter((line): line is { role: string; observation: ProgressObservation } => line !== null);
   if (lines.length === 0) return null;
   return (
@@ -264,7 +255,7 @@ function ProgressSources({
         <li key={line.role}>
           <span className="font-medium text-ink">{line.role}:</span> “{line.observation.excerpt}”
           {line.observation.periodLabel && ` — ${line.observation.periodLabel}`}
-          {line.observation.asOfDate && ` (as of ${line.observation.asOfDate})`}
+          {line.observation.asOfDate && ` (per ${line.observation.asOfDate})`}
         </li>
       ))}
     </ul>
@@ -273,7 +264,7 @@ function ProgressSources({
 
 function periodSuffix(observation: ProgressObservation) {
   if (observation.periodLabel) return ` (${observation.periodLabel})`;
-  if (observation.asOfDate) return ` (as of ${observation.asOfDate})`;
+  if (observation.asOfDate) return ` (per ${observation.asOfDate})`;
   return "";
 }
 
@@ -286,10 +277,10 @@ function formatPercent(percent: number | null) {
 }
 
 function conditionLabel(condition: Condition) {
-  if (condition === "on_track") return "On Track";
-  if (condition === "needs_attention") return "Needs Attention";
-  if (condition === "critical") return "Critical";
-  return "More Evidence Required";
+  if (condition === "on_track") return "Sesuai Rencana";
+  if (condition === "needs_attention") return "Perlu Perhatian";
+  if (condition === "critical") return "Kritis";
+  return "Perlu Bukti Tambahan";
 }
 
 function conditionTone(condition: Condition) {

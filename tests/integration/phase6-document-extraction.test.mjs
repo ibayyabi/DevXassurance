@@ -29,6 +29,9 @@ const constantsSource = fileURLToPath(
 const costEvidenceSource = fileURLToPath(
   new URL("../../src/features/assurance/lib/cost-evidence.ts", import.meta.url),
 );
+const sourceValueValidationSource = fileURLToPath(
+  new URL("../../src/features/documents/lib/source-value-validation.ts", import.meta.url),
+);
 const parserModule = join(dirname(parserSource), `.parser-${randomUUID()}.mjs`);
 const extractionModule = join(dirname(extractionSource), `.extraction-${randomUUID()}.mjs`);
 const jobModule = join(dirname(jobSource), `.job-${randomUUID()}.mjs`);
@@ -36,6 +39,7 @@ const guardModule = join(dirname(guardSource), `.guards-${randomUUID()}.mjs`);
 const zipSafetyModule = join(dirname(zipSafetySource), `.zip-safety-${randomUUID()}.mjs`);
 const constantsModule = join(dirname(constantsSource), `.constants-${randomUUID()}.mjs`);
 const costEvidenceModule = join(dirname(costEvidenceSource), `.cost-evidence-${randomUUID()}.mjs`);
+const sourceValueValidationModule = join(dirname(sourceValueValidationSource), `.source-value-validation-${randomUUID()}.mjs`);
 const compile = (source) =>
   ts.transpileModule(readFileSync(source, "utf8"), {
     compilerOptions: {
@@ -47,6 +51,7 @@ const compile = (source) =>
 writeFileSync(zipSafetyModule, compile(zipSafetySource));
 writeFileSync(constantsModule, compile(constantsSource));
 writeFileSync(costEvidenceModule, compile(costEvidenceSource));
+writeFileSync(sourceValueValidationModule, compile(sourceValueValidationSource));
 writeFileSync(
   parserModule,
   compile(parserSource).replace(
@@ -65,6 +70,10 @@ writeFileSync(
     .replace(
       'from "../../../src/features/assurance/lib/cost-evidence"',
       `from "${pathToFileURL(costEvidenceModule).href}"`,
+    )
+    .replace(
+      'from "../../../src/features/documents/lib/source-value-validation"',
+      `from "${pathToFileURL(sourceValueValidationModule).href}"`,
     )
     .replace(
       'from "../types/guards"',
@@ -95,6 +104,7 @@ try {
   unlinkSync(guardModule);
   unlinkSync(constantsModule);
   unlinkSync(costEvidenceModule);
+  unlinkSync(sourceValueValidationModule);
   unlinkSync(extractionModule);
   unlinkSync(jobModule);
 }
@@ -202,6 +212,13 @@ function validModelOutput(
     ],
     alerts: [],
     actions: [],
+    cost_observations: [],
+    assurance_observations: {
+      milestones: [],
+      progress: [],
+      risk_snapshots: [],
+      risk_register_statements: [],
+    },
     group_metadata_suggestions: metadata,
   };
 }
@@ -820,7 +837,7 @@ test("Ollama Cloud and OpenAI-compatible requests use zero temperature", async (
     process.env.XASS_CLOUD_LLM_MODEL = "test-model";
     globalThis.fetch = async (_url, init) => {
       const request = JSON.parse(init.body);
-      assert.equal(request.temperature, 0);
+      assert.equal(request.stream, false);
       assert.deepEqual(request.response_format, { type: "json_object" });
       return new Response(JSON.stringify({
         choices: [{ message: { content: JSON.stringify(validModelOutput(request.messages[1].content)) } }],
@@ -828,6 +845,87 @@ test("Ollama Cloud and OpenAI-compatible requests use zero temperature", async (
     };
     const compatibleResult = await processDocumentJob(job(sourceDocument("COMPAT")), memoryGroupStore());
     assert.equal(compatibleResult.status, "completed");
+  } finally {
+    globalThis.fetch = savedFetch;
+    for (const key of envKeys) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+  }
+});
+
+
+test("Gemini provider uses its configured model and JSON-mode request", async () => {
+  const envKeys = ["XASS_LLM_PROVIDER", "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_API_BASE_URL"];
+  const savedEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  const savedFetch = globalThis.fetch;
+  process.env.XASS_LLM_PROVIDER = "gemini";
+  process.env.GEMINI_API_KEY = "test-only-gemini-key";
+  process.env.GEMINI_MODEL = "test-gemini-model";
+  delete process.env.GEMINI_API_BASE_URL;
+  globalThis.fetch = async (url, init) => {
+    const target = new URL(url);
+    assert.equal(
+      target.href,
+      "https://generativelanguage.googleapis.com/v1beta/models/test-gemini-model:generateContent",
+    );
+    assert.equal(target.searchParams.has("key"), false);
+    assert.equal(init.headers["x-goog-api-key"], "test-only-gemini-key");
+    const request = JSON.parse(init.body);
+    assert.equal(
+      request.systemInstruction.parts[0].text,
+      "You are X-Assurance, an evidence-grounded project assurance analyst. Return only the requested JSON object.",
+    );
+    assert.equal(request.contents[0].role, "user");
+    assert.equal(request.generationConfig.temperature, 0);
+    assert.equal(request.generationConfig.responseMimeType, "application/json");
+    const prompt = request.contents[0].parts[0].text;
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: JSON.stringify(validModelOutput(prompt)) }] } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const result = await processDocumentJob(
+      job(sourceDocument("GEMINI")),
+      memoryGroupStore(),
+    );
+    assert.equal(result.status, "completed");
+  } finally {
+    globalThis.fetch = savedFetch;
+    for (const key of envKeys) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+  }
+});
+
+
+
+test("Groq provider uses its configured model and OpenAI-compatible JSON request", async () => {
+  const envKeys = ["XASS_LLM_PROVIDER", "GROQ_API_KEY", "GROQ_MODEL", "GROQ_API_BASE_URL"];
+  const savedEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  const savedFetch = globalThis.fetch;
+  process.env.XASS_LLM_PROVIDER = "groq";
+  process.env.GROQ_API_KEY = "test-only-groq-key";
+  process.env.GROQ_MODEL = "test-groq-model";
+  process.env.GROQ_API_BASE_URL = "http://groq.test/openai/v1";
+  globalThis.fetch = async (url, init) => {
+    assert.equal(new URL(url).href, "http://groq.test/openai/v1/chat/completions");
+    assert.equal(init.headers.Authorization, "Bearer test-only-groq-key");
+    const request = JSON.parse(init.body);
+    assert.equal(request.model, "test-groq-model");
+    assert.equal(request.temperature, 0);
+    assert.deepEqual(request.response_format, { type: "json_object" });
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(validModelOutput(request.messages[1].content)) } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const result = await processDocumentJob(
+      job(sourceDocument("GROQ")),
+      memoryGroupStore(),
+    );
+    assert.equal(result.status, "completed");
   } finally {
     globalThis.fetch = savedFetch;
     for (const key of envKeys) {
@@ -1040,7 +1138,8 @@ test("normalizes known document type labels but rejects unsupported categories",
 const costSource =
   "COST EVIDENCE Approved project budget USD 1,250,000 approved on 2026-01-05. " +
   "Estimate at completion is USD 1,312,500 for October 2026. " +
-  "Actual cost to date USD 600,000. Contingency is about USD 1.2 million.";
+  "Actual cost to date USD 600,000. Committed cost is about USD 1.2 million. " +
+  "WBS 1.2 Build, code 1.2, parent 1, Build phase: Construction of the core platform. Estimate at completion USD 900,000.";
 
 function costModelOutput(prompt, observations) {
   const group = validModelOutput(prompt);
@@ -1168,7 +1267,7 @@ test("a WBS cost value captures the work-package identity, and a project total d
   const outcome = await extractCostObservations([
     {
       measure: "eac",
-      source_value: "USD 1,312,500",
+      source_value: "USD 900,000",
       scope_level: "wbs",
       scope_label: "1.2 Build",
       wbs_code: "1.2",
@@ -1253,3 +1352,194 @@ test("a provider quota defers the remaining groups for retry instead of reportin
   });
 });
 
+
+test("structured assurance preserves source versions and excludes unsupported progress", async () => {
+  const source = "Progress: 8% — June 2026. Risk R-1: Delay is Open and rated High.";
+  for (const percent of [8, 80]) {
+    const outcome = await withLocalOllama(async (_url, init) => {
+      const prompt = JSON.parse(init.body).messages[1].content;
+      if (prompt.startsWith("Classify the entire document") || isExecutiveSummaryPrompt(prompt)) {
+        return modelResponse(validModelOutput(prompt));
+      }
+      const sourceId = documentContextFromPrompt(prompt)[0].source_id;
+      return modelResponse({
+        ...validModelOutput(prompt),
+        assurance_observations: {
+          milestones: [],
+          progress: [{
+            raw_value: "8%", percent, scope_level: "project", scope_label: null,
+            period_label: "June 2026", as_of_date: null,
+            excerpt: "Progress: 8% — June 2026.", source_id: sourceId,
+          }],
+          risk_snapshots: [{
+            risk_id: "R-1", name: "Delay", description: null, status: "Open",
+            rating_label: "High", rating_value: null, scale_label: null,
+            owner: null, mitigation: null, mitigation_due_date: null,
+            raw_mitigation_due_date: null, wbs: null, period_label: null, as_of_date: null,
+            raw_value: "Risk R-1: Delay is Open and rated High.",
+            excerpt: "Risk R-1: Delay is Open and rated High.", source_id: sourceId,
+          }],
+          risk_register_statements: [],
+        },
+      });
+    }, async () => await extractDocumentGroups(
+      job(source),
+      [{ chunkIndex: 0, chunkText: source }],
+      { parserVersion: "structured-assurance-test-v1" },
+      memoryGroupStore(),
+    ));
+    assert.equal(outcome.ok, true);
+    const extraction = outcome.extraction;
+    assert.match(extraction.source_content_hash, /^[0-9a-f]{64}$/);
+    assert.equal(extraction.parser_version, "structured-assurance-test-v1");
+    assert.equal(extraction.assurance_observation_contract_version, "pmo-assurance-observations/1");
+    assert.deepEqual(extraction.assurance_observations.progress.map((item) => item.percent), percent === 8 ? [8] : []);
+    assert.equal(extraction.assurance_observations.risk_snapshots.length, 1);
+    const coverage = Object.fromEntries(extraction.assurance_observation_coverage.map((row) => [row.domain, row.state]));
+    assert.equal(coverage.progress, percent === 8 ? "processed" : "unprocessed");
+    assert.equal(coverage.risk, "processed");
+  }
+});
+
+// A per-cell XLSX reference pins one exact cell, so an unresolved formula in a
+// sibling cell on the same row must not disqualify it. The formula cell itself
+// and the full-row reference that spans its column stay disqualifying.
+test("a per-cell citation survives a sibling cell's unresolved formula while the formula cell and its row citation stay rejected", async () => {
+  const rowLocation = {
+    kind: "xlsx",
+    sheetName: "Weekly",
+    tableNumber: 0,
+    rowStart: 12,
+    rowEnd: 12,
+    cellRangeStart: "A12",
+    cellRangeEnd: "C12",
+  };
+  const cellReference = (sourceId, column, text) => ({
+    sourceId,
+    chunkIndex: 0,
+    text,
+    modelText: text,
+    sourceLocation: {
+      ...rowLocation,
+      cellRangeStart: `${column}12`,
+      cellRangeEnd: `${column}12`,
+    },
+  });
+  const rowText = "Progress: 25% | Cost: 1,000 | Remaining: =B12*2 (no cached value)";
+  const chunks = [{
+    chunkIndex: 0,
+    chunkText: rowText,
+    sectionLabel: "Weekly",
+    sourceLocation: rowLocation,
+    formulaCells: [{
+      sheetName: "Weekly",
+      cellReference: "C12",
+      formula: "=B12*2",
+      formulaCacheStatus: "missing_cache",
+      formulaCacheType: null,
+      formulaCacheRaw: null,
+      cacheProvenance: null,
+      rowStart: 12,
+      rowEnd: 12,
+    }],
+    sourceReferences: [
+      { sourceId: "c0s0", chunkIndex: 0, text: rowText, modelText: rowText, sourceLocation: rowLocation },
+      cellReference("c0s1", "A", "Progress: 25%"),
+      cellReference("c0s2", "B", "Cost: 1,000"),
+      cellReference("c0s3", "C", "Remaining: =B12*2 (no cached value); formula cache: missing_cache"),
+    ],
+  }];
+
+  await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (prompt.startsWith("Classify the entire document") || isExecutiveSummaryPrompt(prompt)) {
+      return modelResponse(validModelOutput(prompt));
+    }
+    const output = validModelOutput(prompt);
+    output.facts = [
+      // A literal cell in column A, disjoint from the unresolved formula in C.
+      { fact_type: "milestone", extracted_text: "Progress: 25%", original_value: "Progress: 25%", confidence: 0.8, source_id: "c0s1" },
+      // The retained full-row reference spans the formula column.
+      { fact_type: "milestone", extracted_text: "Progress: 25%", original_value: "Progress: 25%", confidence: 0.8, source_id: "c0s0" },
+      // The unresolved formula cell itself.
+      { fact_type: "milestone", extracted_text: "Progress: 25%", original_value: "Progress: 25%", confidence: 0.8, source_id: "c0s3" },
+    ];
+    output.assurance_observations.progress = [{
+      raw_value: "25%", percent: 25, scope_level: "project", scope_label: null,
+      period_label: null, as_of_date: null, excerpt: "Progress: 25%", source_id: "c0s1",
+    }];
+    return modelResponse(output);
+  }, async () => {
+    const result = await extractDocumentGroups(
+      job("formula-guard-per-cell"),
+      chunks,
+      { parserVersion: "formula-guard-test-v1" },
+      memoryGroupStore(),
+    );
+    assert.equal(result.ok, true, `${result.errorCode}: ${result.errorMessage}`);
+    assert.deepEqual(
+      result.extraction.facts.map((fact) => [fact.extracted_text, fact.evidence_chunk_index]),
+      [["Progress: 25%", 0]],
+    );
+    assert.equal(result.extraction.assurance_observations.progress[0]?.source_location?.cellRangeStart, "A12");
+    const warnings = result.extraction.quality_warnings.join(" ");
+    assert.doesNotMatch(warnings, /facts\[0\]/);
+    assert.match(warnings, /facts\[1\] was excluded because facts\[1\]\.source_id cites formula_result_unavailable/);
+    assert.match(warnings, /facts\[2\] was excluded because facts\[2\]\.source_id cites formula_result_unavailable/);
+    // An unresolved formula still keeps every evidence domain unprocessed.
+    assert.deepEqual(
+      result.extraction.assurance_observation_coverage.map((row) => row.state),
+      ["unprocessed", "unprocessed", "unprocessed", "unprocessed"],
+    );
+  });
+});
+
+// A reference without a column range (non-XLSX, the synthetic fallback, or an
+// older persisted payload) keeps the conservative row-only rule.
+test("a citation without a column range stays conservative when its row has an unresolved formula", async () => {
+  const sourceLocation = { kind: "xlsx", sheetName: "Legacy", rowStart: 12, rowEnd: 12 };
+  const text = "Legacy: 42 units";
+  const chunks = [{
+    chunkIndex: 0,
+    chunkText: text,
+    sectionLabel: "Legacy",
+    sourceLocation,
+    formulaCells: [{
+      sheetName: "Legacy",
+      cellReference: "B12",
+      formula: "=SUM(A12:A11)",
+      formulaCacheStatus: "cached_error",
+      formulaCacheType: "error",
+      formulaCacheRaw: "#DIV/0!",
+      cacheProvenance: null,
+      rowStart: 12,
+      rowEnd: 12,
+    }],
+    sourceReferences: [{ sourceId: "c0s0", chunkIndex: 0, text, modelText: text, sourceLocation }],
+  }];
+
+  await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (prompt.startsWith("Classify the entire document") || isExecutiveSummaryPrompt(prompt)) {
+      return modelResponse(validModelOutput(prompt));
+    }
+    const output = validModelOutput(prompt);
+    output.facts = [
+      { fact_type: "risk", extracted_text: text, original_value: text, confidence: 0.8, source_id: "c0s0" },
+    ];
+    return modelResponse(output);
+  }, async () => {
+    const result = await extractDocumentGroups(
+      job("formula-guard-legacy"),
+      chunks,
+      { parserVersion: "formula-guard-test-v1" },
+      memoryGroupStore(),
+    );
+    assert.equal(result.ok, true, `${result.errorCode}: ${result.errorMessage}`);
+    assert.deepEqual(result.extraction.facts, []);
+    assert.match(
+      result.extraction.quality_warnings.join(" "),
+      /facts\[0\] was excluded because facts\[0\]\.source_id cites formula_result_unavailable/,
+    );
+  });
+});
