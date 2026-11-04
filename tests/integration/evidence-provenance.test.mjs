@@ -30,10 +30,10 @@ const CASES = [
     session: "2026-10-09_w4",
     actualCell: "D7",
     actualRow: 7,
+    cutOffCell: "B7",
     percent: 12.5,
     week: "W4",
     cutOff: "2026-10-09",
-    otherCutOff: "2026-10-16",
     unresolvedCell: "F8",
     unresolvedRow: 8,
   },
@@ -41,10 +41,10 @@ const CASES = [
     session: "2026-10-16_w5",
     actualCell: "D8",
     actualRow: 8,
+    cutOffCell: "B8",
     percent: 20.4,
     week: "W5",
     cutOff: "2026-10-16",
-    otherCutOff: "2026-10-23",
     unresolvedCell: "F9",
     unresolvedRow: 9,
   },
@@ -209,13 +209,24 @@ function modelForCase(spec) {
         reference.source_location?.cellRangeStart === spec.actualCell,
     );
     if (rowSource && actualSource) {
-      // The excerpt is a slice of the text the model was shown.
+      // A slice of the text the model was shown, spanning several cells.
       const varianceIndex = rowSource.text.indexOf(" | Variance");
-      const excerpt = varianceIndex > 0 ? rowSource.text.slice(0, varianceIndex) : rowSource.text;
+      const rowExcerpt = varianceIndex > 0 ? rowSource.text.slice(0, varianceIndex) : rowSource.text;
       output.assurance_observations.progress = [
-        // The row states the week, the cut-off, and the actual percentage, so the
-        // relation is source-proven. The row states no work package, so the scope
-        // stays unknown rather than borrowing one from another cell.
+        // One cell states the percentage, so the value is accepted with its exact
+        // location and no date (the cell itself states none).
+        {
+          raw_value: `${spec.percent}%`,
+          percent: spec.percent,
+          scope_level: "unknown",
+          scope_label: null,
+          period_label: null,
+          as_of_date: null,
+          excerpt: actualSource.text,
+          source_id: actualSource.source_id,
+        },
+        // The cited row spans columns, so a date inside it cannot be attributed
+        // to the value's column; the row's own cut-off stays a gap here.
         {
           raw_value: `${spec.percent}%`,
           percent: spec.percent,
@@ -223,18 +234,7 @@ function modelForCase(spec) {
           scope_label: null,
           period_label: spec.week,
           as_of_date: spec.cutOff,
-          excerpt,
-          source_id: rowSource.source_id,
-        },
-        // A cut-off this row does not state is not traceable.
-        {
-          raw_value: `${spec.percent}%`,
-          percent: spec.percent,
-          scope_level: "unknown",
-          scope_label: null,
-          period_label: spec.week,
-          as_of_date: spec.otherCutOff,
-          excerpt,
+          excerpt: rowExcerpt,
           source_id: rowSource.source_id,
         },
         // A work-package scope from another sheet is not present in this source.
@@ -256,7 +256,7 @@ function modelForCase(spec) {
           scope_label: null,
           period_label: null,
           as_of_date: null,
-          excerpt,
+          excerpt: actualSource.text,
           source_id: `${actualSource.source_id}-missing`,
         },
       ];
@@ -269,6 +269,25 @@ function modelForCase(spec) {
           source_id: actualSource.source_id,
         },
       ];
+    }
+    // The cut-off cell alone carries the date, so its column is provable.
+    const cutOffSource = references.find(
+      (reference) =>
+        reference.source_location?.sheetName === WEEKLY &&
+        reference.source_location?.cellRangeStart === spec.cutOffCell,
+    );
+    if (cutOffSource) {
+      output.assurance_observations.milestones.push({
+        label: cutOffSource.text.split(":")[0],
+        raw_date: spec.cutOff,
+        date: spec.cutOff,
+        scope_level: "unknown",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: cutOffSource.text,
+        source_id: cutOffSource.source_id,
+      });
     }
     const unresolved = references.find(
       (reference) =>
@@ -356,6 +375,7 @@ test("the real W4/W5 workbooks replay parser to validated provenance from model-
     );
     assert.equal(jobResult.status, "completed", jobResult.processing_error);
     assert.equal(jobResult.processing_status, "needs_review");
+    assert.equal(jobResult.parser_version, "document-parser/10");
     assert.match(jobResult.processing_error ?? "", /Formula results are unavailable/);
 
     const extraction = await withLocalOllama(mock, async () =>
@@ -368,23 +388,36 @@ test("the real W4/W5 workbooks replay parser to validated provenance from model-
   for (const { spec, jobResult, extraction } of outcomes) {
     const warnings = extraction.quality_warnings.join(" ");
 
-    // One dated actual survives; every unsupported variant is excluded.
+    // The per-cell literal survives; a date claimed from the multi-cell row is
+    // not attributable and stays a gap.
     assert.equal(extraction.assurance_observations.progress.length, 1, warnings);
     const actual = extraction.assurance_observations.progress[0];
     assert.equal(actual.percent, spec.percent);
-    assert.equal(actual.as_of_date, spec.cutOff);
-    assert.equal(actual.period_label, spec.week);
+    assert.equal(actual.as_of_date, null);
+    assert.equal(actual.period_label, null);
     assert.equal(actual.scope_level, "unknown");
     assert.equal(actual.scope_label, null);
     assert.equal(actual.source_location.sheetName, WEEKLY);
+    assert.equal(actual.source_location.cellRangeStart, spec.actualCell);
+    assert.equal(actual.source_location.cellRangeEnd, spec.actualCell);
     assert.equal(actual.source_location.rowStart, spec.actualRow);
-    assert.equal(actual.source_location.cellRangeStart, `A${spec.actualRow}`);
-    assert.ok(actual.excerpt.includes(spec.week));
-    assert.ok(actual.excerpt.includes(spec.cutOff));
     assert.ok(actual.excerpt.includes(`${spec.percent}%`));
-    assert.match(warnings, /as_of_date is not present as an ISO date in the cited excerpt/);
+    assert.match(
+      warnings,
+      /progress\[\d+\]\.as_of_date spans more than one cell, so its date cannot be attributed to a column/,
+    );
     assert.match(warnings, /scope_label is not present in the cited excerpt/);
     assert.match(warnings, /source_id must reference a supplied source/);
+
+    // The cut-off is only accepted from the single cell that states it, so the
+    // dated observation keeps a provable column.
+    assert.equal(extraction.assurance_observations.milestones.length, 1, warnings);
+    const cutOff = extraction.assurance_observations.milestones[0];
+    assert.equal(cutOff.date, spec.cutOff);
+    assert.equal(cutOff.as_of_date, null);
+    assert.equal(cutOff.source_location.sheetName, WEEKLY);
+    assert.equal(cutOff.source_location.cellRangeStart, spec.cutOffCell);
+    assert.equal(cutOff.source_location.cellRangeEnd, spec.cutOffCell);
 
     // The cited excerpt is stored verbatim inside the persisted chunk text, and
     // the observation carries the parser-authored locator of its source.
@@ -436,6 +469,113 @@ test("the real W4/W5 workbooks replay parser to validated provenance from model-
       (risk) => risk.risk_id === "R-SB01-001",
     ),
   );
+});
+
+test("a same-row due date is not accepted as the record date", async () => {
+  const rowText = "Cut-off Date: 2026-10-16 | Actual %: 20.4% | Due Date: 2026-10-23";
+  const location = {
+    kind: "xlsx",
+    sheetName: WEEKLY,
+    tableNumber: 0,
+    rowStart: 8,
+    rowEnd: 8,
+    cellRangeStart: "A8",
+    cellRangeEnd: "C8",
+  };
+  const cell = (sourceId, column, text) => ({
+    sourceId,
+    chunkIndex: 0,
+    text,
+    modelText: text,
+    sourceLocation: { ...location, cellRangeStart: `${column}8`, cellRangeEnd: `${column}8` },
+  });
+  const chunks = [
+    {
+      chunkIndex: 0,
+      chunkText: rowText,
+      sectionLabel: WEEKLY,
+      sourceLocation: location,
+      sourceReferences: [
+        { sourceId: "c0s0", chunkIndex: 0, text: rowText, modelText: rowText, sourceLocation: location },
+        cell("c0s1", "A", "Cut-off Date: 2026-10-16"),
+        cell("c0s2", "B", "Actual %: 20.4%"),
+        cell("c0s3", "C", "Due Date: 2026-10-23"),
+      ],
+    },
+  ];
+  await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    const output = baseGroupOutput(references);
+    output.assurance_observations.progress = [
+      // The due date is verbatim in the cited excerpt, but the citation spans the
+      // whole row, so the date cannot be attributed to the percentage's column.
+      {
+        raw_value: "20.4%",
+        percent: 20.4,
+        scope_level: "unknown",
+        scope_label: null,
+        period_label: null,
+        as_of_date: "2026-10-23",
+        excerpt: rowText,
+        source_id: "c0s0",
+      },
+      // The one cell that states the percentage states no date.
+      {
+        raw_value: "20.4%",
+        percent: 20.4,
+        scope_level: "unknown",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: "Actual %: 20.4%",
+        source_id: "c0s2",
+      },
+    ];
+    output.assurance_observations.milestones = [
+      // A single cell states the date and its own label, so that column is proved.
+      {
+        label: "Cut-off Date",
+        raw_date: "2026-10-16",
+        date: "2026-10-16",
+        scope_level: "unknown",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: "Cut-off Date: 2026-10-16",
+        source_id: "c0s1",
+      },
+    ];
+    return modelResponse(output);
+  }, async () => {
+    const result = await extractDocumentGroups(
+      job(rowText, { fileName: "weekly.txt" }),
+      chunks,
+      { parserVersion: "document-parser/10" },
+      memoryGroupStore(),
+    );
+    assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+    const progress = result.extraction.assurance_observations.progress;
+    assert.equal(progress.length, 1);
+    assert.equal(progress[0].as_of_date, null);
+    assert.equal(progress[0].source_location.cellRangeStart, "B8");
+    const warnings = result.extraction.quality_warnings.join(" ");
+    assert.match(
+      warnings,
+      /progress\[0\]\.as_of_date spans more than one cell, so its date cannot be attributed to a column/,
+    );
+    assert.doesNotMatch(warnings, /2026-10-23/);
+    const milestones = result.extraction.assurance_observations.milestones;
+    assert.equal(milestones.length, 1);
+    assert.equal(milestones[0].date, "2026-10-16");
+    assert.equal(milestones[0].source_location.cellRangeStart, "A8");
+    assert.equal(milestones[0].source_location.cellRangeEnd, "A8");
+  });
 });
 
 test("a stale group cache version is not reused and a cache hit re-derives provenance", async () => {
@@ -506,7 +646,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
       ),
     );
 
-  const cold = await runOnce("provenance-cache-v1");
+  const cold = await runOnce("document-parser/10");
   assert.equal(cold.ok, true, cold.ok ? undefined : cold.errorMessage);
   assert.equal(calls, 1);
   assert.equal(cold.extraction.assurance_observations.progress[0].percent, 42);
@@ -515,14 +655,19 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
     location,
   );
 
+  // Every completed row records the parser and validation versions that produced
+  // it, so a rule change can never be reused under an older version.
+  const cached = [...store.rows.values()][0];
+  assert.equal(cached.parserVersion, "document-parser/10");
+  assert.equal(cached.schemaVersion, "phase6-document-extraction/17");
+
   // A cache hit re-derives the location from the live chunk instead of trusting
   // a stored payload that dropped it.
-  const cached = [...store.rows.values()][0];
   const withoutLocation = JSON.parse(JSON.stringify(cached.result));
   delete withoutLocation.assurance_observations.progress[0].source_location;
   store.rows.set(cached.groupKey, { ...cached, result: withoutLocation });
   calls = 0;
-  const warm = await runOnce("provenance-cache-v1");
+  const warm = await runOnce("document-parser/10");
   assert.equal(warm.ok, true, warm.ok ? undefined : warm.errorMessage);
   assert.equal(calls, 0, "the completed group is reused without a model call");
   assert.deepEqual(
@@ -530,11 +675,11 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
     location,
   );
 
-  // A stale parser version produces a different group key, so the old payload is
-  // neither selected nor trusted.
+  // A row written by the previous parser version produces a different group key,
+  // so the stale payload is neither selected nor trusted.
   calls = 0;
   marker = "Progress: 42%";
-  const stale = await runOnce("provenance-cache-v2");
+  const stale = await runOnce("document-parser/9");
   assert.equal(stale.ok, true, stale.ok ? undefined : stale.errorMessage);
   assert.equal(calls, 1, "the stale cached group is re-extracted");
   assert.equal(stale.extraction.facts[0].extracted_text, "Progress: 42%");

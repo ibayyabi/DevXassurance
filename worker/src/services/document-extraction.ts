@@ -347,7 +347,9 @@ type GroupAttemptResult = {
 type GroupAttemptError = Error & { attempts: number; errorCode: string };
 class TransientProviderError extends Error {}
 
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/16";
+// Bump whenever validation semantics change: cached extraction groups are keyed
+// by this version, so rows validated under older rules are never reused.
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/17";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -1532,6 +1534,23 @@ function validateGroupExtraction(
     observationWarnings[domain].push(warning);
   };
   const allowedSources = allowedSourceCitations(group);
+  // A date is only attributable when the cited source is a single cell. A row or
+  // table citation spans columns, so a neighbouring date (for example a due
+  // date) could be presented as the record date. Column semantics for a
+  // multi-column citation are not proved by the cited text alone, so the date
+  // stays a gap instead of being guessed from its position in the excerpt.
+  const dateAttributionErrors = (
+    citation: SourceCitation | null,
+    path: string,
+    rowErrors: string[],
+  ) => {
+    const location = citation?.source_location;
+    if (!location || location.kind !== "xlsx") return;
+    const start = location.cellRangeStart;
+    const end = location.cellRangeEnd;
+    if (typeof start === "string" && start === end) return;
+    rowErrors.push(`${path} spans more than one cell, so its date cannot be attributed to a column`);
+  };
 
   const facts: ExtractedFact[] = [];
   if (!Array.isArray(value.facts) || value.facts.length > MAX_FACTS_PER_GROUP) {
@@ -1834,6 +1853,7 @@ function validateGroupExtraction(
           if (asOfDate && !citation.excerpt.includes(asOfDate)) {
             rowErrors.push(`${path}.as_of_date is not present in the cited source`);
           }
+          if (asOfDate) dateAttributionErrors(citation, `${path}.as_of_date`, rowErrors);
         }
         if (citation && citationHasUnavailableFormula(group, citation)) {
           rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support a cost value`);
@@ -1940,6 +1960,8 @@ function validateGroupExtraction(
     const excerpt = excerptFor(item, citation, path, rowErrors);
     const date = checkedDate(item.date ?? null, excerpt, `${path}.date`, rowErrors);
     const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    if (date) dateAttributionErrors(citation, `${path}.date`, rowErrors);
+    if (asOfDate) dateAttributionErrors(citation, `${path}.as_of_date`, rowErrors);
     if (!["project", "wbs", "unknown"].includes(scopeLevel)) rowErrors.push(`${path}.scope_level is invalid`);
     if (scopeLevel === "wbs" && !scopeLabel) rowErrors.push(`${path}.scope_label is required for WBS scope`);
     if (scopeLevel !== "wbs" && scopeLabel) rowErrors.push(`${path}.scope_label is only valid for WBS scope`);
@@ -1994,6 +2016,7 @@ function validateGroupExtraction(
     if (!textIsCited(scopeLabel, excerpt)) rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
     if (!textIsCited(periodLabel, excerpt)) rowErrors.push(`${path}.period_label is not present in the cited excerpt`);
     const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    if (asOfDate) dateAttributionErrors(citation, `${path}.as_of_date`, rowErrors);
     if (rowErrors.length) {
       warnObservationInvalidRow("progress", path, rowErrors);
       return;
@@ -2036,6 +2059,8 @@ function validateGroupExtraction(
     const excerpt = excerptFor(item, citation, path, rowErrors);
     const mitigationDueDate = checkedDate(item.mitigation_due_date ?? null, excerpt, `${path}.mitigation_due_date`, rowErrors);
     const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    if (mitigationDueDate) dateAttributionErrors(citation, `${path}.mitigation_due_date`, rowErrors);
+    if (asOfDate) dateAttributionErrors(citation, `${path}.as_of_date`, rowErrors);
     for (const [field, candidate] of [
       ["risk_id", riskId], ["name", name], ["description", description], ["status", status],
       ["rating_label", ratingLabel], ["scale_label", scaleLabel], ["owner", owner],
@@ -2091,6 +2116,7 @@ function validateGroupExtraction(
     const citation = requiredCitation(item, allowedSources, path, rowErrors, fromCache);
     const excerpt = excerptFor(item, citation, path, rowErrors);
     const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    if (asOfDate) dateAttributionErrors(citation, `${path}.as_of_date`, rowErrors);
     if (!["no_open_high_or_critical", "open_risk_reported"].includes(state)) {
       rowErrors.push(`${path}.state is invalid`);
     } else if (!riskRegisterStatementMatches(state as ExtractedRiskRegisterStatement["state"], excerpt ?? "")) {

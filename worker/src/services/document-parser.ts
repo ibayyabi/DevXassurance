@@ -334,7 +334,9 @@ type ZipTextReader = {
   files: Record<string, unknown>;
 };
 
-const PARSER_VERSION = "document-parser/9";
+// Bump whenever parsed chunk/source-reference output changes: cached extraction
+// groups are keyed by this version, so older rows are never reused.
+const PARSER_VERSION = "document-parser/10";
 const MAX_CHUNK_LENGTH = 4000;
 // Growth ceiling per chunk: retained row references always fit, then cell
 // references are added row by row. Cells left uncovered stay citable through

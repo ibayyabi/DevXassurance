@@ -10,6 +10,8 @@ XLSX percent cells whose own number format unambiguously proves scaling (a plain
 
 A cost observation's period label and cut-off date must appear in the cited source, exactly like assurance observations; a period or date read from another cell or snapshot is excluded instead of trusted.
 
+An XLSX date (`as_of_date`, milestone `date`, mitigation due date, cost cut-off) is accepted only when the cited source is a single cell, because a row or table citation spans columns and a neighbouring date — for example a due date — could otherwise pass as the record date. Multi-cell citations therefore keep the date a gap until an explicit header/column mapping exists. Non-spreadsheet sources keep the cited-unit rule. `PARSER_VERSION` and `EXTRACTION_SCHEMA_VERSION` are both bumped by this change, so completed extraction groups cached under earlier versions are never reused.
+
 Image OCR uses local PP-OCRv6 tiny (RapidOCR 3.10.0 on ONNX Runtime CPU 1.31.0); scanned-PDF OCR adds Ghostscript rasterization. The configured PP-OCRv6 route is `id` for Indonesian/English text; it is fixed configuration, not language detection. Indonesian/English quality must pass the human-verified corpus before production. Missing local model assets return `ocr_model_unavailable`, and unreadable scans return `ocr_no_text`; every OCR failure fails the whole document instead of producing successful empty extraction. All scanned page images for one document go to one helper process and one engine initialization.
 
 Local setup (localhost pilot, Python 3.11, macOS/Linux):
