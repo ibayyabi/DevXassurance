@@ -98,6 +98,24 @@ async function syntheticFormulaWorkbook() {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 }
 
+async function syntheticLocalizedWeeklyWorkbook() {
+  const zip = new JSZip();
+  zip.file(
+    "xl/workbook.xml",
+    `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Laporan Mingguan" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+  );
+  zip.file(
+    "xl/_rels/workbook.xml.rels",
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>`,
+  );
+  zip.file(
+    "xl/worksheets/sheet1.xml",
+    `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Weekly progress report - Alarm Kebencanaan</t></is></c><c r="C1" t="inlineStr"><is><t>Report Date: 2026-10-09</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Realisasi %</t></is></c><c r="B3" t="inlineStr"><is><t>Minggu</t></is></c><c r="C3" t="inlineStr"><is><t>Cut-off Date</t></is></c><c r="D3" t="inlineStr"><is><t>Due Date</t></is></c><c r="E3" t="inlineStr"><is><t>ID</t></is></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>12.5%</t></is></c><c r="B4" t="inlineStr"><is><t>W4</t></is></c><c r="C4" t="inlineStr"><is><t>2026-10-09</t></is></c><c r="D4" t="inlineStr"><is><t>2026-10-15</t></is></c><c r="E4"><v>1</v></c></row></sheetData></worksheet>`,
+  );
+  const buffer = await zip.generateAsync({ type: "nodebuffer" });
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+}
+
 function documentContextFromPrompt(prompt) {
   const match = prompt.match(/^SOURCE_REFERENCES_JSON=(.+)$/m);
   assert.ok(match, "the model request carries source references");
@@ -484,7 +502,7 @@ test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived 
       await processDocumentJob(job(buffer), store),
     );
     assert.equal(jobResult.status, "completed", jobResult.processing_error);
-    assert.equal(jobResult.parser_version, "document-parser/15");
+    assert.equal(jobResult.parser_version, "document-parser/16");
     assert.equal(jobResult.assurance_observations.progress.length, 1);
     const coldGroupRows = [...store.rows.values()];
     const completedGroupIndexes = coldGroupRows
@@ -667,6 +685,61 @@ test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived 
   );
 });
 
+test("localized period labels and a sparse workbook layout validate through the extraction seam", async () => {
+  const buffer = await syntheticLocalizedWeeklyWorkbook();
+  const parsed = await parseDocumentBuffer("progress-mingguan.xlsx", buffer);
+  assert.equal(parsed.ok, true, parsed.ok ? undefined : parsed.errorMessage);
+  if (!parsed.ok) return;
+  assert.deepEqual(parsed.parserMetadata.sheetTitles["Laporan Mingguan"], {
+    text: "A: Weekly progress report - Alarm Kebencanaan",
+    cell: "A1",
+  });
+
+  const result = await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    const output = baseGroupOutput(references);
+    const row = references.find(
+      (reference) =>
+        reference.source_location?.sheetName === "Laporan Mingguan" &&
+        reference.source_location?.rowStart === 4 &&
+        reference.text.includes("Realisasi %: 12.5%"),
+    );
+    if (row) {
+      output.assurance_observations.progress = [{
+        raw_value: "12.5%",
+        percent: 12.5,
+        scope_level: "unknown",
+        scope_label: null,
+        period_label: "W4",
+        as_of_date: "2026-10-09",
+        excerpt: row.text,
+        source_id: row.source_id,
+      }];
+    }
+    return modelResponse(output);
+  }, async () =>
+    await extractDocumentGroups(
+      job(buffer, { fileName: "progress-mingguan.xlsx", title: "Laporan Mingguan" }),
+      parsed.chunks,
+      parsed.parserMetadata,
+      memoryGroupStore(),
+    ),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  assert.deepEqual(
+    result.extraction.assurance_observations.progress.map(
+      ({ percent, period_label, as_of_date }) => [percent, period_label, as_of_date],
+    ),
+    [[12.5, "W4", "2026-10-09"]],
+  );
+});
+
 test("colliding source IDs are rejected before model calls", async () => {
   const text = "Two different references cannot share a citation ID.";
   const reference = (value) => ({
@@ -801,7 +874,7 @@ test("a generated XLSX keeps a literal cell while a sibling formula has no cache
     ),
   );
   assert.equal(result.status, "completed", result.processing_error);
-  assert.equal(result.parser_version, "document-parser/15");
+  assert.equal(result.parser_version, "document-parser/16");
   assert.equal(result.processing_status, "needs_review");
   assert.match(result.processing_error ?? "", /Formula results are unavailable/);
   assert.ok(groupCalls > 0);
@@ -1225,6 +1298,26 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
       ],
     },
   ];
+  const cellReference = (sourceId, sourceCell) => ({
+    sourceId,
+    chunkIndex: 0,
+    text: `${sourceCell.label}: ${sourceCell.value}`,
+    modelText: `${sourceCell.label}: ${sourceCell.value}`,
+    sourceLocation: {
+      kind: "xlsx",
+      sheetName: WEEKLY,
+      tableNumber: 0,
+      rowStart: sourceCell.row,
+      rowEnd: sourceCell.row,
+      cellRangeStart: sourceCell.cell,
+      cellRangeEnd: sourceCell.cell,
+    },
+    cell: sourceCell,
+    rowCells: rows.find((row) => row.row === sourceCell.row).cells,
+  });
+  const reportDateCell = cellReference("cell-report-date", rows[2].cells[2]);
+  const actualPercentCell = cellReference("cell-actual", rows[2].cells[4]);
+
   const chunks = [
     {
       chunkIndex: 0,
@@ -1306,6 +1399,8 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
           },
           cell: cell(8, "A", "Cut-off Date", "2026-10-16", "46311", "2026-10-16"),
         },
+        reportDateCell,
+        actualPercentCell,
       ],
     },
   ];
@@ -1343,6 +1438,10 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
       progress("20.4%", 20.4, "2026-10-16", "row-8", "W4"),
       // A cell whose column has no label cannot prove it is a record date.
       progress("15%", 15, "2026-11-05", "cell-unlabelled"),
+      // A single record-date cell does not hide a competing date column on its row.
+      progress("30%", 30, "2026-10-31", "cell-report-date"),
+      // A percentage cell still inherits sibling Week/Month ambiguity.
+      progress("30%", 30, null, "cell-actual", "W4"),
     ];
     const milestone = (date, sourceId) => ({
       label: date === "2026-10-23" ? "Due Date" : "Cut-off Date",
@@ -1427,7 +1526,7 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
     const result = await extractDocumentGroups(
       job("weekly.txt"),
       chunks,
-      { parserVersion: "document-parser/15" },
+      { parserVersion: "document-parser/16" },
       memoryGroupStore(),
     );
     assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
@@ -1465,6 +1564,14 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
     assert.match(
       warnings,
       /progress\[2\]\.period_label is ambiguous: the cited row has more than one period column \(Week, Month\)/,
+    );
+    assert.match(
+      warnings,
+      /progress\[5\]\.as_of_date is ambiguous: the cited row has more than one cut-off or period date column \(Report Date, Cut-off Date\)/,
+    );
+    assert.match(
+      warnings,
+      /progress\[6\]\.period_label is ambiguous: the cited row has more than one period column \(Week, Month\)/,
     );
     assert.match(
       warnings,
@@ -1595,7 +1702,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
       ),
     );
 
-  const cold = await runOnce("document-parser/15");
+  const cold = await runOnce("document-parser/16");
   assert.equal(cold.ok, true, cold.ok ? undefined : cold.errorMessage);
   assert.equal(calls, 1);
   assert.equal(cold.extraction.assurance_observations.progress[0].percent, 42);
@@ -1607,8 +1714,8 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // Every completed row records the parser and validation versions that produced
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
-  assert.equal(cached.parserVersion, "document-parser/15");
-  assert.equal(cached.schemaVersion, "phase6-document-extraction/25");
+  assert.equal(cached.parserVersion, "document-parser/16");
+  assert.equal(cached.schemaVersion, "phase6-document-extraction/27");
 
   assert.equal(cached.status, "completed");
   assert.deepEqual(
@@ -1628,7 +1735,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   delete withoutLocation.assurance_observations.progress[0].scope_provenance;
   store.rows.set(cached.groupKey, { ...cached, result: withoutLocation });
   calls = 0;
-  const warm = await runOnce("document-parser/15");
+  const warm = await runOnce("document-parser/16");
   assert.equal(warm.ok, true, warm.ok ? undefined : warm.errorMessage);
   assert.equal(calls, 0, "the completed group is reused without a model call");
   assert.deepEqual(
@@ -1652,7 +1759,8 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
 });
 
 test("a cost period and cut-off must be traceable to the cited source", async () => {
-  const text = "Approved project budget IDR 1,000,000,000 approved on 2026-01-05 for January 2026.";
+  const text =
+    "Approved project budget IDR 1,000,000,000 | Report Date: 2026-01-05 | Reporting Period: January 2026 | Due Date: 2026-02-01";
   const chunks = [{ chunkIndex: 0, chunkText: text, sectionLabel: "Cost summary" }];
   const cost = (overrides) => ({
     measure: "approved_baseline",
@@ -1693,7 +1801,168 @@ test("a cost period and cut-off must be traceable to the cited source", async ()
     assert.equal(observations[0].as_of_date, "2026-01-05");
     assert.equal(observations[0].period_label, "January 2026");
     const warnings = result.extraction.quality_warnings.join(" ");
-    assert.match(warnings, /cost_observations\[1\].*period_label is not present in the cited source/);
-    assert.match(warnings, /cost_observations\[2\].*as_of_date is not present in the cited source/);
+    assert.match(warnings, /cost_observations\[1\].*period_label cannot be attributed to a matching explicitly labelled period/);
+    assert.match(warnings, /cost_observations\[2\].*as_of_date is the cited narrative's due or event date, not a record date/);
   });
+});
+
+test("narrative scope, period, and date claims stay tied to their source fields", async () => {
+  const ambiguousText =
+    "Work package A progress 80%; Work package B progress 20%; Report Date: 2026-10-16; Due Date: 2026-10-23; Week: W4; Month: October 2026";
+  const clearText = "Work package A progress 80%; Report Date: 2026-10-16; Week: W4";
+  const chunks = [{
+    chunkIndex: 0,
+    chunkText: `${ambiguousText}\n\n${clearText}`,
+    sourceReferences: [ambiguousText, clearText].map((text, index) => ({
+      sourceId: index === 0 ? "narrative-ambiguous" : "narrative-clear",
+      chunkIndex: 0,
+      text,
+      modelText: text,
+    })),
+  }];
+
+  const result = await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    const output = baseGroupOutput(references);
+    const progress = (sourceId, rawValue, scopeLabel, periodLabel = null, asOfDate = null) => ({
+      raw_value: rawValue,
+      percent: Number(rawValue.replace("%", "")),
+      scope_level: "wbs",
+      scope_label: scopeLabel,
+      period_label: periodLabel,
+      as_of_date: asOfDate,
+      excerpt: references.find((reference) => reference.source_id === sourceId).text,
+      source_id: sourceId,
+    });
+    output.assurance_observations.progress = [
+      progress("narrative-ambiguous", "80%", "A"),
+      progress("narrative-ambiguous", "20%", "A"),
+      progress("narrative-ambiguous", "20%", "B"),
+      progress("narrative-ambiguous", "80%", "A", "W4", "2026-10-16"),
+      progress("narrative-ambiguous", "80%", "A", null, "2026-10-23"),
+      progress("narrative-clear", "80%", "A", "W4", "2026-10-16"),
+    ];
+    return modelResponse(output);
+  }, async () =>
+    await extractDocumentGroups(
+      job(`${ambiguousText}\n\n${clearText}`, { fileName: "weekly-narrative.txt" }),
+      chunks,
+      { parserVersion: "narrative-provenance-test-v1" },
+      memoryGroupStore(),
+    ),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  assert.deepEqual(
+    result.extraction.assurance_observations.progress.map(
+      ({ percent, scope_label, period_label, as_of_date }) =>
+        [percent, scope_label, period_label, as_of_date],
+    ),
+    [
+      [80, "A", null, null],
+      [20, "B", null, null],
+      [80, "A", "W4", "2026-10-16"],
+    ],
+  );
+  const warnings = result.extraction.quality_warnings.join(" ");
+  assert.match(warnings, /progress\[1\].*scope_label must be supported by a structural scope source/);
+  assert.match(warnings, /progress\[3\].*more than one explicitly labelled period value/);
+  assert.match(warnings, /progress\[4\].*due or event date, not a record date/);
+});
+
+test("health snapshots retain only explicit dimension statuses and record dates", async () => {
+  const text =
+    "Overall Status: Green; Schedule: Green; Report Date: 2026-10-16; Due Date: 2026-10-23; Project progress is on track.";
+  const chunks = [{
+    chunkIndex: 0,
+    chunkText: text,
+    sourceReferences: [{
+      sourceId: "health-source",
+      chunkIndex: 0,
+      text,
+      modelText: text,
+    }],
+  }];
+  const result = await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    const output = baseGroupOutput(references);
+    output.health_snapshots = output.health_snapshots.map((snapshot) => {
+      if (snapshot.dimension === "overall") {
+        return {
+          ...snapshot,
+          status: "green",
+          score: 98,
+          evidence_coverage: 0.9,
+          status_text: "The project is Green.",
+          source_summary: "The project is healthy.",
+          snapshot_date: "2026-10-23",
+          source_id: "health-source",
+        };
+      }
+      if (snapshot.dimension === "schedule") {
+        return {
+          ...snapshot,
+          status: "red",
+          score: 20,
+          evidence_coverage: 0.2,
+          status_text: "Schedule is red.",
+          source_summary: "The schedule is in trouble.",
+          snapshot_date: "2026-10-16",
+          source_id: "health-source",
+        };
+      }
+      if (snapshot.dimension === "cost") {
+        return {
+          ...snapshot,
+          status: "green",
+          score: 95,
+          evidence_coverage: 0.8,
+          status_text: "Cost Status: Green",
+          source_summary: "The cost is healthy.",
+          snapshot_date: "2026-10-16",
+          source_id: "health-source",
+        };
+      }
+      return snapshot;
+    });
+    return modelResponse(output);
+  }, async () =>
+    await extractDocumentGroups(
+      job(text, { fileName: "health-status.txt" }),
+      chunks,
+      { parserVersion: "health-provenance-test-v1" },
+      memoryGroupStore(),
+    ),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  const snapshots = Object.fromEntries(
+    result.extraction.health_snapshots.map((snapshot) => [snapshot.dimension, snapshot]),
+  );
+  assert.equal(snapshots.overall.status, "green");
+  assert.equal(snapshots.overall.score, null);
+  assert.equal(snapshots.overall.evidence_coverage, null);
+  assert.equal(snapshots.overall.status_text, "Overall Status: Green");
+  assert.equal(snapshots.overall.snapshot_date, null);
+  assert.equal(snapshots.schedule.status, "green");
+  assert.equal(snapshots.schedule.score, null);
+  assert.equal(snapshots.schedule.evidence_coverage, null);
+  assert.equal(snapshots.schedule.status_text, "Schedule: Green");
+  assert.equal(snapshots.schedule.snapshot_date, "2026-10-16");
+  assert.equal(snapshots.cost.status, "insufficient_evidence");
+  assert.equal(snapshots.cost.snapshot_date, null);
+  const warnings = result.extraction.quality_warnings.join(" ");
+  assert.match(warnings, /health_snapshots\[0\]\.snapshot_date.*due or event date, not a record date/);
+  assert.match(warnings, /health_snapshots\[1\]\.status was replaced with the source-reported green status/);
+  assert.match(warnings, /health_snapshots\[2\]\.status is not supported by an explicit dimension-specific source field/);
 });

@@ -386,6 +386,8 @@ async function persistCostObservations(
           currency: observation.currency,
           scope_level: observation.scope_level,
           scope_label: observation.scope_label,
+          scope_source_id: observation.scope_source_id ?? null,
+          scope_provenance: observation.scope_provenance ?? null,
           wbs_code: observation.wbs_code,
           wbs_parent_code: observation.wbs_parent_code,
           wbs_name: observation.wbs_name,

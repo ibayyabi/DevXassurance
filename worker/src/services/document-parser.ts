@@ -354,6 +354,8 @@ type FormulaCell = {
 const SUBJECT_KEY_CUE = /\b(?:sub[\s-]?system|component|work\s*package|discipline|package|scope)\b/i;
 const SHEET_TITLE_CUE =
   /\b(?:project|program(?:me)?|progress|weekly|monthly|periodic|report|status|subcontractor|contractor|work\s*package|scope|overview|dashboard|schedule|plan|minutes)\b/i;
+const TITLE_METADATA_VALUE_CUE =
+  /^(?:(?:as[\s-]?of|(?:report|cut[\s-]?off|document|issued|effective)\s+date|(?:reporting\s+)?period|week|month|revision|version|prepared\s+by|project|workstream)\s*(?:[:#=-]\s*|\s+)\S|w(?:eek)?\s*[-#]?\s*\d{1,2}|(?:19|20)\d{2}(?:[-/]\d{1,2}){0,2})$/iu;
 
 type ZipTextReader = {
   file(path: string): { async(type: "text"): Promise<string> } | null;
@@ -362,7 +364,7 @@ type ZipTextReader = {
 
 // Bump whenever parsed chunk/source-reference output changes: cached extraction
 // groups are keyed by this version, so older rows are never reused.
-const PARSER_VERSION = "document-parser/15";
+const PARSER_VERSION = "document-parser/16";
 const MAX_CHUNK_LENGTH = 4000;
 // Growth ceiling per chunk: retained row references always fit, then cell
 // references are added row by row. Cells left uncovered stay citable through
@@ -759,9 +761,17 @@ async function parseXlsxDocument(
                 cell.value.trim() === firstCell.value.trim();
             });
         });
-        const titleCellCandidate = firstRow.cells.length === 1 || repeatedMergedTitle
-          ? firstCell
-          : undefined;
+        const hasExplicitTitleMetadata = firstRow.cells.length > 1 &&
+          firstRow.cells.slice(1).every((cell) =>
+            !cell.formula && (
+              (cell.textual && TITLE_METADATA_VALUE_CUE.test(cell.value.trim())) ||
+              (cell.dateFormat && Boolean(excelSerialToIsoDate(cell.value, date1904)))
+            )
+          );
+        const titleCellCandidate =
+          firstRow.cells.length === 1 || repeatedMergedTitle || hasExplicitTitleMetadata
+            ? firstCell
+            : undefined;
         const standaloneTitle =
           tableIndex === 0 &&
           titleCellCandidate !== undefined &&
@@ -1884,6 +1894,7 @@ function chunkBlockGroup(blocks: SourceBlock[]): ParsedChunk[] {
           modelText: cell.modelText,
           sourceLocation: cell.location,
           cell: cell.cell,
+          rowCells: block.rowCells,
         });
       }
     }

@@ -239,7 +239,7 @@ export type ExtractedHealthSnapshot = {
   dimension: "overall" | "schedule" | "cost" | "risk" | "governance" | "audit_readiness";
   score: number | null;
   status: "green" | "amber" | "red" | "insufficient_evidence";
-  evidence_coverage: number;
+  evidence_coverage: number | null;
   status_text: string;
   source_summary: string;
   snapshot_date: string | null;
@@ -393,7 +393,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/25";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/27";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -1472,7 +1472,7 @@ Required JSON schema:
 {
   "facts": [{"fact_type":"risk|issue|milestone|decision|owner_action","extracted_text":"...","original_value":"...","confidence":0.0,"source_id":"..."}],
   "summary": {"summary_text":"...","confidence":0.0,"quality_warning":null,"sources":[{"source_id":"..."}]},
-  "health_snapshots": [{"dimension":"overall|schedule|cost|risk|governance|audit_readiness","score":null,"status":"green|amber|red|insufficient_evidence","evidence_coverage":0.0,"status_text":"...","source_summary":"...","snapshot_date":null,"source_id":null}],
+  "health_snapshots": [{"dimension":"overall|schedule|cost|risk|governance|audit_readiness","score":null,"status":"green|amber|red|insufficient_evidence","evidence_coverage":null,"status_text":"exact source-reported status phrase or neutral gap","source_summary":"exact cited source phrase or neutral gap","snapshot_date":null,"source_id":null}],
   "alerts": [{"severity":"low|medium|high|critical","impacted_area":"...","explanation":"...","evidence_count":1,"recommended_action":"...","source_id":"..."}],
   "actions": [{"title":"...","owner_name":null,"priority":"low|medium|high","status":"open","source_id":"..."}],
   "cost_observations": [{"measure":"approved_baseline|actual_to_date|committed|eac","source_value":"exact source text of the amount","scope_level":"project|wbs","scope_label":null,"scope_source_id":null,"wbs_code":null,"wbs_parent_code":null,"wbs_name":null,"scope_description":null,"period_label":null,"as_of_date":null,"status_label":null,"source_id":"..."}],
@@ -1486,9 +1486,7 @@ Required JSON schema:
   "sheet_interpretation": {"interpretation_status":"resolved|ambiguous|unknown","structure_type":"table|key_value|timeline_gantt|narrative|instructions_template|mixed|unknown","sheet_name":"...","source_ids":["..."],"header_candidates":[{"label":"exact source header text","source_ids":["..."]}],"column_roles":[{"column":"A","role":"...","source_ids":["..."]}],"candidate_observations":[{"raw_value":"exact source value","normalized_value":null,"value_type":null,"unit":null,"period":null,"source_ids":["..."]}],"warnings":["..."]}
 }
 
-For health snapshots, return exactly one entry for every listed dimension. Use exactly one of these status strings: "green", "amber", "red", "insufficient_evidence" (exact spelling). For "insufficient_evidence", set "score" and "source_id" to null and "evidence_coverage" to exactly 0.
-Other statuses require a matching source_id and a score within green 80-100, amber 50-79, or red 0-49.
-Health status_text and source_summary fields must each be nonempty strings no longer than 500 characters.
+For health snapshots, return exactly one entry per dimension. Use green, amber, or red only when that dimension has a literal source-reported status field in the cited excerpt (for example, Schedule Status: Green); do not infer a RAG status from narrative, progress, or sentiment. Copy the exact source phrase into status_text and source_summary, and cite it with source_id. Always set score and evidence_coverage to null; no score or evidence coverage is inferred. snapshot_date must be an explicitly cited record/cut-off date, never a due date or document hint. Without an explicit dimension status, use insufficient_evidence, null score/coverage/date/source ID, and a neutral explanation.
 Group metadata suggestions are limited to document date, reporting period, and workstream. Every non-null suggestion requires a valid source_id.
 For cost observations, source_value must be text present in the cited source. WBS scope requires a parser-labelled scope column in the cited row, an explicitly marked WBS/work-package scope in the cited text, or the unique declared-subject context; a task mention alone is not scope proof. For a declared subject, set scope_source_id to its value-cell source_id. Also capture the work package's stated identity from the source: wbs_code (its own code), wbs_parent_code (its parent's code), wbs_name (its name), and scope_description (its stated deliverable or scope). Leave any of these null when the source does not state it, and never invent a code or canonical identity. For a project-total value leave all four null. Report as_of_date as YYYY-MM-DD and leave period_label as the source's own wording. Return [] when these sources state no cost value.
 - Every assurance observation requires an excerpt and citation source_id from this group. Each non-null raw value, label, status, rating, owner, mitigation, WBS, and normalized date/number must be supported by that excerpt. Use null rather than interpreting a formula without a stored cache. Return all four arrays even when empty.
@@ -1744,12 +1742,10 @@ function validateGroupExtraction(
     observationWarnings[domain].push(warning);
   };
   const allowedSources = allowedSourceCitations(group);
-  // Field semantics differ. An `as_of_date` is the row's record date, so it must
-  // come from a cut-off/period column; a milestone date or mitigation due date is
-  // legitimately a due/target/plan/actual column, so it may never be rejected for
-  // being one, and the report cut-off may not stand in for it. Only a labelled
-  // spreadsheet column proves either, so a neighbouring date can never be passed
-  // off as another field's value.
+  // An `as_of_date` is the row's record date, so it must come from a cut-off/
+  // period column or an explicitly labelled narrative date. A milestone date
+  // may instead come from a due/target/plan/actual field; neighbouring dates
+  // never prove a different field.
   const RECORD_DATE_CUE = /\b(?:cut[\s-]?off|as[\s-]?of|report(?:ing|ed)?\s*(?:date|period)|period|periode)\b/i;
   const DUE_DATE_CUE = /\b(?:due|target|start|finish|milestone|planned|actual|baseline|mitigation|submission|delivery|approval)\b/i;
   const SCOPE_COLUMN_CUE = /\b(?:sub[\s-]?system|component|work\s*package|discipline|package|scope|wbs)\b/i;
@@ -1760,6 +1756,102 @@ function validateGroupExtraction(
   const cellLabel = (cell: ParsedSourceCell) => cell.label ?? "";
   const isPeriodValue = (value: string) =>
     /^(?:w(?:eek)?\s*[-#]?\s*\d{1,2}(?:\s+(?:19|20)\d{2})?|(?:19|20)\d{2}(?:[-/]\d{1,2}){0,2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:[.,]?\s+\d{2,4})?|q[1-4](?:\s+(?:fy\s*)?\d{2,4})?|fy\s*\d{2,4}|(?:sprint|cycle)\s*\d{1,3})$/iu.test(value.trim());
+  const narrativeClauses = (excerpt: string) => excerpt.split(/[;|\n]+|[.!?]\s+/u);
+  const narrativeDateValues = (excerpt: string) =>
+    narrativeClauses(excerpt).flatMap((clause) => {
+      const cues = [
+        ...[...clause.matchAll(new RegExp(RECORD_DATE_CUE.source, "giu"))].map((match) => ({
+          index: match.index ?? 0,
+          end: (match.index ?? 0) + match[0].length,
+          role: "record" as const,
+        })),
+        ...[...clause.matchAll(new RegExp(DUE_DATE_CUE.source, "giu"))].map((match) => ({
+          index: match.index ?? 0,
+          end: (match.index ?? 0) + match[0].length,
+          role: "due" as const,
+        })),
+      ].sort((left, right) => left.index - right.index);
+      return [...clause.matchAll(/\b\d{4}-\d{2}-\d{2}\b/gu)].flatMap((match) => {
+        const value = match[0];
+        if (!isIsoDate(value)) return [];
+        const dateIndex = match.index ?? 0;
+        const preceding = cues.filter((cue) => cue.end <= dateIndex);
+        const cue = preceding.length
+          ? preceding[preceding.length - 1]
+          : cues.find((candidate) => candidate.index > dateIndex);
+        return [{ value, role: cue?.role ?? null }];
+      });
+    });
+  const narrativePeriodValues = (excerpt: string) =>
+    narrativeClauses(excerpt).flatMap((clause) => {
+      const fieldPattern =
+        /\b(?:(?:report(?:ing)?|current|this|last|previous|next|fiscal)\s+)?(?:week(?:ly)?|month(?:ly)?|period|periode|minggu|pekan|bulan|sprint|cycle|quarter)(?:\s*(?:no\.?|number|label))?\s*[:#=]\s*([^,;|]+)/giu;
+      return [...clause.matchAll(fieldPattern)]
+        .map((match) => match[1].trim())
+        .filter((value) => isPeriodValue(value));
+    });
+  const HEALTH_STATUS_DIMENSION_CUES: Record<GroupHealthSnapshot["dimension"], string> = {
+    overall: "(?:overall(?:\\s+(?:project|health|status))?|project(?:\\s+(?:health|status))?|health\\s+status|rag(?:\\s+status)?)",
+    schedule: "(?:schedule|programme?|program|progress)(?:\\s+(?:health|status))?",
+    cost: "(?:cost|budget)(?:\\s+(?:health|status))?",
+    risk: "risk(?:\\s+(?:health|status))?",
+    governance: "governance(?:\\s+(?:health|status))?",
+    audit_readiness: "audit(?:\\s+readiness)?(?:\\s+(?:health|status))?",
+  };
+  const DIMENSION_HEADER_VALUES: Record<GroupHealthSnapshot["dimension"], RegExp> = {
+    overall: /^(?:overall|project)(?:\s+health)?$/iu,
+    schedule: /^(?:schedule|programme?|program|progress)$/iu,
+    cost: /^(?:cost|budget)$/iu,
+    risk: /^risk$/iu,
+    governance: /^governance$/iu,
+    audit_readiness: /^audit(?:\s+readiness)?$/iu,
+  };
+  const healthStatusFromCitation = (
+    citation: SourceCitation | null,
+    dimension: GroupHealthSnapshot["dimension"],
+  ): { status: "green" | "amber" | "red"; text: string } | null => {
+    const reference = referenceForCitation(citation);
+    if (!citation || !reference) return null;
+    const cells = reference.rowCells?.length
+      ? reference.rowCells
+      : reference.cell
+        ? [reference.cell]
+        : [];
+    if (cells.length) {
+      const dimensionLabel = new RegExp(`^(?:${HEALTH_STATUS_DIMENSION_CUES[dimension]})$`, "iu");
+      const dimensionCells = cells.filter(
+        (cell) =>
+          /^(?:health\s+)?(?:assurance\s+)?dimension$/iu.test(cellLabel(cell).trim()) &&
+          DIMENSION_HEADER_VALUES[dimension].test(cell.value.trim()),
+      );
+      const isDimensionScopedLabel = (label: string) =>
+        dimensionLabel.test(label.trim()) ||
+        (dimension === "overall" && /^(?:health\s+status|rag(?:\s+status)?)$/iu.test(label.trim()));
+      const statusCells = cells.filter((cell) => {
+        if (reference.cell && cell.cell !== reference.cell.cell) return false;
+        if (!/^(green|amber|red)$/iu.test(cell.value.trim())) return false;
+        const label = cellLabel(cell).trim();
+        return isDimensionScopedLabel(label) ||
+          (/^(?:status|rag(?:\s+status)?)$/iu.test(label) && dimensionCells.length === 1);
+      });
+      if (statusCells.length !== 1) return null;
+      const cell = statusCells[0];
+      const text = cell.value;
+      if (!citation.excerpt.toLocaleLowerCase().includes(text.trim().toLocaleLowerCase())) return null;
+      return { status: cell.value.trim().toLocaleLowerCase() as "green" | "amber" | "red", text };
+    }
+    if (reference.sourceLocation?.kind === "xlsx") return null;
+    const pattern = new RegExp(
+      `\\b(${HEALTH_STATUS_DIMENSION_CUES[dimension]})\\s*(?:[:#=-]\\s*|\\s+is\\s+)(green|amber|red)\\b`,
+      "giu",
+    );
+    const matches = [...citation.excerpt.matchAll(pattern)];
+    if (matches.length !== 1) return null;
+    return {
+      status: matches[0][2].toLocaleLowerCase() as "green" | "amber" | "red",
+      text: matches[0][0].trim(),
+    };
+  };
   const cellDateValue = (cell: ParsedSourceCell) =>
     cell.dateIso ?? (isIsoDate(cell.value.trim()) ? cell.value.trim() : null);
   const isRecordColumn = (cell: ParsedSourceCell) =>
@@ -1804,12 +1896,25 @@ function validateGroupExtraction(
       }
       return `${path} cannot be attributed to a cut-off or period column in the cited source`;
     }
-    // A spreadsheet source whose column cannot be proven (a split row or an
-    // older payload without cell metadata) keeps the date a gap; other formats
-    // keep the cited-unit rule.
-    return reference?.sourceLocation?.kind === "xlsx"
-      ? `${path} cannot be attributed to a cut-off or period column in the cited source`
-      : null;
+    if (reference?.sourceLocation?.kind === "xlsx") {
+      return `${path} cannot be attributed to a cut-off or period column in the cited source`;
+    }
+    const dates = narrativeDateValues(citation?.excerpt ?? "");
+    const recordDates = dates.filter((date) => date.role === "record");
+    if (recordDates.length > 1) {
+      return `${path} is ambiguous: the cited narrative has more than one explicitly labelled record date`;
+    }
+    if (recordDates.length === 1) {
+      if (recordDates[0].value === claimed) return null;
+      if (dates.some((date) => date.role === "due" && date.value === claimed)) {
+        return `${path} is the cited narrative's due or event date, not a record date`;
+      }
+      return `${path} is ${claimed}, but the cited narrative's record date is ${recordDates[0].value}`;
+    }
+    if (dates.some((date) => date.role === "due" && date.value === claimed)) {
+      return `${path} is the cited narrative's due or event date, not a record date`;
+    }
+    return `${path} cannot be attributed to an explicitly labelled record date in the cited text`;
   };
   // A due, target, plan, or actual column is a legitimate source for these
   // fields; the value is rejected when it provably comes from the record column
@@ -1836,9 +1941,22 @@ function validateGroupExtraction(
         ? `${path} is the cited source's "${cellLabel(cell)}" value, not a due or event date`
         : `${path} cannot be attributed to a due or event date column in the cited source`;
     }
-    return reference?.sourceLocation?.kind === "xlsx"
-      ? `${path} cannot be attributed to a due or event date column in the cited source`
-      : null;
+    if (reference?.sourceLocation?.kind === "xlsx") {
+      return `${path} cannot be attributed to a due or event date column in the cited source`;
+    }
+    const dates = narrativeDateValues(citation?.excerpt ?? "");
+    const dueDates = dates.filter((date) => date.role === "due");
+    if (dueDates.length > 1) {
+      return `${path} is ambiguous: the cited narrative has more than one explicitly labelled due or event date`;
+    }
+    if (dueDates.length === 1) {
+      return dueDates[0].value === claimed
+        ? null
+        : `${path} is ${claimed}, but the cited narrative's due or event date is ${dueDates[0].value}`;
+    }
+    return dates.some((date) => date.role === "record" && date.value === claimed)
+      ? `${path} is the cited narrative's record date, not a due or event date`
+      : `${path} cannot be attributed to an explicitly labelled due or event date in the cited text`;
   };
   const checkDate = (
     citation: SourceCitation | null,
@@ -1882,9 +2000,17 @@ function validateGroupExtraction(
         ? null
         : `${path} cannot be attributed to a matching period column in the cited source`;
     }
-    return reference?.sourceLocation?.kind === "xlsx"
-      ? `${path} cannot be attributed to a period column in the cited source`
-      : null;
+    if (reference?.sourceLocation?.kind === "xlsx") {
+      return `${path} cannot be attributed to a period column in the cited source`;
+    }
+    const values = narrativePeriodValues(citation?.excerpt ?? "");
+    if (values.length > 1) {
+      return `${path} is ambiguous: the cited narrative has more than one explicitly labelled period value (${values.join(", ")})`;
+    }
+    return values.length === 1 &&
+        values[0].toLocaleLowerCase() === claimed.trim().toLocaleLowerCase()
+      ? null
+      : `${path} cannot be attributed to a matching explicitly labelled period in the cited text`;
   };
   const checkPeriodLabel = (
     citation: SourceCitation | null,
@@ -1903,14 +2029,34 @@ function validateGroupExtraction(
   const hasExplicitTextScope = (
     citation: SourceCitation | null,
     scopeLabel: string,
+    evidenceAnchor: string | null,
   ) => {
     const reference = referenceForCitation(citation);
-    if (!reference || reference.sourceLocation?.kind === "xlsx") return false;
+    if (!reference || reference.sourceLocation?.kind === "xlsx" || !evidenceAnchor?.trim()) {
+      return false;
+    }
     const escaped = scopeLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(
-      `\\b(?:wbs|work[\\s-]?package|sub[\\s-]?system|component|discipline|package|scope)\\b\\s*(?:name|code)?\\s*[:#-]?\\s*${escaped}(?=$|[^\\p{L}\\p{N}_])`,
+    const scopeValuePattern = new RegExp(
+      `^\\s*${escaped}(?=$|[^\\p{L}\\p{N}_])`,
       "iu",
-    ).test(citation?.excerpt ?? "");
+    );
+    const scopeCuePattern =
+      /\b(?:wbs|work[\s-]?package|sub[\s-]?system|component|discipline|package|scope)\b\s*(?:name|code)?\s*[:#-]?\s*/giu;
+    const anchor = evidenceAnchor.trim().toLocaleLowerCase();
+    for (const clause of narrativeClauses(citation?.excerpt ?? "")) {
+      const text = clause.toLocaleLowerCase();
+      let anchorIndex = -1;
+      while ((anchorIndex = text.indexOf(anchor, anchorIndex + 1)) !== -1) {
+        const precedingCues = [...clause.matchAll(scopeCuePattern)].filter(
+          (match) => (match.index ?? 0) + match[0].length <= anchorIndex,
+        );
+        const scopeCue = precedingCues[precedingCues.length - 1];
+        if (!scopeCue) continue;
+        const scopeValueStart = (scopeCue.index ?? 0) + scopeCue[0].length;
+        if (scopeValuePattern.test(clause.slice(scopeValueStart))) return true;
+      }
+    }
+    return false;
   };
   // Scope provenance resolves through the exact source IDs and canonical texts
   // shown to the model, including both cells of a declared subject.
@@ -2078,6 +2224,19 @@ function validateGroupExtraction(
     }
   }
 
+  const insufficientHealthSnapshot = (
+    dimension: GroupHealthSnapshot["dimension"],
+  ): GroupHealthSnapshot => ({
+    dimension,
+    score: null,
+    status: "insufficient_evidence",
+    evidence_coverage: null,
+    status_text: "No source-reported health status was validated for this dimension.",
+    source_summary: "No source-reported health status was validated for this dimension.",
+    snapshot_date: null,
+    evidence_chunk_index: null,
+    excerpt: null,
+  });
   const snapshotsByDimension = new Map<string, GroupHealthSnapshot>();
   const invalidDimensions = new Set<string>();
   if (!Array.isArray(value.health_snapshots)) {
@@ -2085,7 +2244,6 @@ function validateGroupExtraction(
   } else {
     value.health_snapshots.forEach((snapshot, index) => {
       const path = `health_snapshots[${index}]`;
-      const rowErrors: string[] = [];
       if (!isRecord(snapshot)) {
         warnInvalidRow(path, [`${path} must be an object`]);
         return;
@@ -2101,49 +2259,69 @@ function validateGroupExtraction(
         qualityWarnings.push(`${path}.dimension is duplicated; ${dimension} is marked insufficient_evidence.`);
         return;
       }
-      const status = stringField(snapshot.status);
-      const validStatus = ["green", "amber", "red", "insufficient_evidence"].includes(status);
-      if (!validStatus) rowErrors.push(`${path}.status is invalid`);
-      const score = snapshot.score === null ? null : boundedScore(snapshot.score, `${path}.score`, rowErrors);
-      const evidenceCoverage = boundedNumber(snapshot.evidence_coverage, 0, 1, `${path}.evidence_coverage`, rowErrors);
-      const statusText = boundedString(snapshot.status_text, `${path}.status_text`, rowErrors, 1000);
-      const sourceSummary = boundedString(snapshot.source_summary, `${path}.source_summary`, rowErrors, MAX_MODEL_STRING_LENGTH);
-      const snapshotDate = nullableIsoDate(snapshot.snapshot_date, `${path}.snapshot_date`, rowErrors);
-      const citation = status === "insufficient_evidence"
-        ? optionalCitation(snapshot, allowedSources, path, rowErrors, fromCache)
-        : requiredCitation(snapshot, allowedSources, path, rowErrors, fromCache);
+
+      const suppliedStatus = stringField(snapshot.status).toLocaleLowerCase();
+      const citationErrors: string[] = [];
+      const citation = optionalCitation(snapshot, allowedSources, path, citationErrors, fromCache);
       if (citation && citationHasUnavailableFormula(group, citation)) {
-        rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support a health status.`);
+        citationErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support a health status.`);
       }
-      if (status === "insufficient_evidence" && score !== null) rowErrors.push(`${path}.score must be null for insufficient_evidence`);
-      if (status === "green" && (score === null || score < 80 || score > 100)) rowErrors.push(`${path}.score must be 80-100 for green`);
-      if (status === "amber" && (score === null || score < 50 || score > 79)) rowErrors.push(`${path}.score must be 50-79 for amber`);
-      if (status === "red" && (score === null || score < 0 || score > 49)) rowErrors.push(`${path}.score must be 0-49 for red`);
-      if (status === "insufficient_evidence" && evidenceCoverage !== 0) rowErrors.push(`${path}.evidence_coverage must be zero for insufficient_evidence`);
-      if (
-        rowErrors.length ||
-        !validStatus ||
-        score === undefined ||
-        evidenceCoverage === null ||
-        !statusText ||
-        !sourceSummary ||
-        snapshotDate === undefined ||
-        (status === "insufficient_evidence" ? citation !== null : !citation)
-      ) {
+      const reportedStatus = citationErrors.length
+        ? null
+        : healthStatusFromCitation(
+          citation,
+          dimension as GroupHealthSnapshot["dimension"],
+        );
+      if (!reportedStatus) {
         invalidDimensions.add(dimension);
-        warnInvalidRow(path, rowErrors.length ? rowErrors : [`${path} is incomplete`]);
+        const warnings = [
+          ...citationErrors,
+          ...(suppliedStatus && suppliedStatus !== "insufficient_evidence" && !citationErrors.length
+            ? [`${path}.status is not supported by an explicit dimension-specific source field`]
+            : []),
+        ];
+        if (warnings.length) warnInvalidRow(path, warnings);
         return;
       }
+      if (suppliedStatus !== reportedStatus.status) {
+        qualityWarnings.push(
+          `${path}.status was replaced with the source-reported ${reportedStatus.status} status.`,
+        );
+      }
+      if (snapshot.score !== null && snapshot.score !== undefined) {
+        qualityWarnings.push(`${path}.score was ignored; health scores are not inferred.`);
+      }
+      if (snapshot.evidence_coverage !== null && snapshot.evidence_coverage !== undefined) {
+        qualityWarnings.push(`${path}.evidence_coverage was ignored; evidence coverage is not inferred.`);
+      }
+
+      let snapshotDate: string | null = null;
+      const dateErrors: string[] = [];
+      const candidateDate = snapshot.snapshot_date === null
+        ? null
+        : nullableIsoDate(snapshot.snapshot_date, `${path}.snapshot_date`, dateErrors);
+      if (candidateDate === undefined) {
+        warnInvalidRow(path, dateErrors);
+      } else if (candidateDate !== null) {
+        if (!citation!.excerpt.includes(candidateDate)) {
+          warnInvalidRow(path, [`${path}.snapshot_date is not present in the cited source`]);
+        } else {
+          const dateError = asOfDateError(citation, candidateDate, `${path}.snapshot_date`);
+          if (dateError) warnInvalidRow(path, [dateError]);
+          else snapshotDate = candidateDate;
+        }
+      }
+
       snapshotsByDimension.set(dimension, {
         dimension: dimension as GroupHealthSnapshot["dimension"],
-        score: score ?? null,
-        status: status as GroupHealthSnapshot["status"],
-        evidence_coverage: evidenceCoverage,
-        status_text: statusText,
-        source_summary: sourceSummary,
+        score: null,
+        status: reportedStatus.status,
+        evidence_coverage: null,
+        status_text: reportedStatus.text,
+        source_summary: citation!.excerpt,
         snapshot_date: snapshotDate,
-        evidence_chunk_index: citation?.evidence_chunk_index ?? null,
-        excerpt: citation?.excerpt ?? null,
+        evidence_chunk_index: citation!.evidence_chunk_index,
+        excerpt: citation!.excerpt,
       });
     });
   }
@@ -2153,17 +2331,7 @@ function validateGroupExtraction(
     if (!invalidDimensions.has(dimension)) {
       qualityWarnings.push(`health_snapshots is missing valid ${dimension}; it is marked insufficient_evidence.`);
     }
-    return {
-      dimension,
-      score: null,
-      status: "insufficient_evidence",
-      evidence_coverage: 0,
-      status_text: "No validated health status is available for this dimension.",
-      source_summary: "Health evidence was not validated for this dimension.",
-      snapshot_date: null,
-      evidence_chunk_index: null,
-      excerpt: null,
-    };
+    return insufficientHealthSnapshot(dimension);
   });
 
   const alerts: ExtractedAlert[] = [];
@@ -2273,7 +2441,7 @@ function validateGroupExtraction(
         const scopeEvidence = scopeLabel
           ? scopeProvenance(citation, scopeLabel, scopeSourceId)
           : null;
-        const explicitTextScope = scopeLabel ? hasExplicitTextScope(citation, scopeLabel) : false;
+        const explicitTextScope = scopeLabel ? hasExplicitTextScope(citation, scopeLabel, sourceValue) : false;
         const measureCue = COST_MEASURE_SOURCE_CUES[measure as ExtractedCostObservation["measure"]];
         if (
           citation &&
@@ -2455,7 +2623,7 @@ function validateGroupExtraction(
     ) {
       rowErrors.push(`${path}.scope_source_id must cite the matching declared subject value cell`);
     }
-    const explicitTextScope = scopeLabel ? hasExplicitTextScope(citation, scopeLabel) : false;
+    const explicitTextScope = scopeLabel ? hasExplicitTextScope(citation, scopeLabel, rawDate ?? date) : false;
     if (scopeLevel === "wbs" && !scopeEvidence && !explicitTextScope) {
       rowErrors.push(`${path}.scope_label must be supported by a structural scope source`);
     }
@@ -2530,7 +2698,7 @@ function validateGroupExtraction(
     ) {
       rowErrors.push(`${path}.scope_source_id must cite the matching declared subject value cell`);
     }
-    const explicitTextScope = scopeLabel ? hasExplicitTextScope(citation, scopeLabel) : false;
+    const explicitTextScope = scopeLabel ? hasExplicitTextScope(citation, scopeLabel, rawValue) : false;
     if (scopeLevel === "wbs" && !scopeEvidence && !explicitTextScope) {
       rowErrors.push(`${path}.scope_label must be supported by a structural scope source`);
     }
@@ -3491,28 +3659,32 @@ function aggregateHealthSnapshots(
   groups: Array<{ value: GroupExtraction }>,
   chunkGroups: ChunkGroup[],
 ): ExtractedHealthSnapshot[] {
-  const totalChunks = chunkGroups.reduce((count, group) => count + group.chunks.length, 0);
   return DIMENSIONS.map((dimension) => {
     const snapshots = groups.map((group) => group.value.health_snapshots.find((snapshot) => snapshot.dimension === dimension)!);
     const evidenceSnapshots = snapshots.filter((snapshot) => snapshot.status !== "insufficient_evidence");
-    const status = evidenceSnapshots.some((snapshot) => snapshot.status === "red")
-      ? "red"
-      : evidenceSnapshots.some((snapshot) => snapshot.status === "amber")
-        ? "amber"
-        : evidenceSnapshots.length
-          ? "green"
-          : "insufficient_evidence";
+    const statuses = new Set(evidenceSnapshots.map((snapshot) => snapshot.status));
+    const status = statuses.size === 1
+      ? evidenceSnapshots[0].status
+      : "insufficient_evidence";
     const selected = status === "insufficient_evidence"
       ? snapshots
       : evidenceSnapshots.filter((snapshot) => snapshot.status === status);
     const scores = selected.map((snapshot) => snapshot.score).filter((score): score is number => score !== null);
     const dates = [...new Set(snapshots.map((snapshot) => snapshot.snapshot_date).filter((date): date is string => Boolean(date)))];
-    const weightedCoverage = snapshots.reduce((total, snapshot, index) =>
-      total + snapshot.evidence_coverage * chunkGroups[index].chunks.length,
-    0) / totalChunks;
+    let weightedCoverageTotal = 0;
+    let weightedCoverageChunks = 0;
+    snapshots.forEach((snapshot, index) => {
+      if (snapshot.evidence_coverage === null) return;
+      const weight = chunkGroups[index]?.chunks.length ?? 0;
+      weightedCoverageTotal += snapshot.evidence_coverage * weight;
+      weightedCoverageChunks += weight;
+    });
+    const weightedCoverage = weightedCoverageChunks
+      ? weightedCoverageTotal / weightedCoverageChunks
+      : null;
     return {
       dimension,
-      score: status === "insufficient_evidence" ? null : Math.min(...scores),
+      score: status === "insufficient_evidence" || scores.length === 0 ? null : Math.min(...scores),
       status,
       evidence_coverage: weightedCoverage,
       status_text: uniqueText(selected.map((snapshot) => snapshot.status_text)).join(" "),
@@ -3671,9 +3843,6 @@ function boundedConfidence(value: unknown, path: string, errors: string[]) {
   return boundedNumber(value, 0, 1, path, errors);
 }
 
-function boundedScore(value: unknown, path: string, errors: string[]) {
-  return boundedNumber(value, 0, 100, path, errors);
-}
 
 function boundedNumber(value: unknown, min: number, max: number, path: string, errors: string[]) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {

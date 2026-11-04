@@ -9,6 +9,8 @@ import {
   selectReportedEac,
 } from "../../src/features/assurance/lib/cost-evidence.ts";
 
+import { costObservationColumns, mapCostObservationRow } from "../../src/features/assurance/lib/cost-queries.ts";
+
 function observation(overrides = {}) {
   return {
     id: "obs-1",
@@ -69,9 +71,14 @@ function budget(overrides = {}) {
 test("normalization reads unambiguous source values and refuses the rest", () => {
   assert.equal(normalizeCostAmount("USD 1,250,000.00"), 1_250_000);
   assert.equal(normalizeCostAmount("Rp 1.250.000"), 1_250_000);
+  assert.equal(normalizeCostAmount("Rp. 1.250.000"), 1_250_000);
   assert.equal(normalizeCostAmount("IDR 1.250.000,50"), 1_250_000.5);
   assert.equal(normalizeCostCurrency("Approved budget of USD 980,000"), "USD");
+  assert.equal(normalizeCostCurrency("Rp. 1.250.000"), "IDR");
   assert.equal(normalizeCostCurrency("Rp 1.250.000"), "IDR");
+  assert.equal(normalizeCostAmount("EAC: 500 | Currency: USD"), 500);
+  assert.equal(normalizeCostCurrency("EAC: 500 | Currency: USD"), "USD");
+  assert.equal(normalizeCostCurrency("EAC: 500 | Currency: USD | Legacy currency: IDR"), null);
   assert.equal(
     normalizeCostCurrency("Approved baseline amount: 100 | Reporting currency: USD | Legacy currency: IDR"),
     null,
@@ -85,6 +92,68 @@ test("normalization reads unambiguous source values and refuses the rest", () =>
   assert.equal(normalizeCostCurrency("Total EAC is 1,250,000"), null);
 });
 
+
+test("cost observation query returns persisted scope source provenance", () => {
+  const row = mapCostObservationRow({
+    id: "observation-1",
+    document_id: "document-1",
+    measure: "eac",
+    source_value: "IDR 100",
+    normalized_amount: 100,
+    currency: "IDR",
+    scope_level: "wbs",
+    scope_label: "Alarm Kebencanaan",
+    scope_source_id: "subject-value",
+    scope_provenance: [
+      {
+        kind: "declared_subject_key",
+        source_id: "subject-key",
+        sheet_name: "Project Info",
+        cell_reference: "A5",
+        excerpt: "Subsystem / Scope",
+      },
+      {
+        kind: "declared_subject",
+        source_id: "subject-value",
+        sheet_name: "Project Info",
+        cell_reference: "B5",
+        excerpt: "Alarm Kebencanaan",
+      },
+      {
+        kind: "sheet_title",
+        source_id: "weekly-title",
+        sheet_name: "Weekly Report",
+        cell_reference: "A1",
+        excerpt: "Weekly progress report - Alarm Kebencanaan",
+      },
+    ],
+    wbs_code: null,
+    wbs_parent_code: null,
+    wbs_name: null,
+    scope_description: null,
+    period_label: "W4",
+    as_of_date: "2026-10-09",
+    status_label: null,
+    evidence_chunk_index: 0,
+    excerpt: "EAC: IDR 100",
+    page_number: null,
+    section_label: null,
+    source_location: null,
+    documents: { title: "Weekly Report" },
+  });
+  assert.match(costObservationColumns, /scope_source_id, scope_provenance/);
+  assert.equal(row.scopeSourceId, "subject-value");
+  assert.deepEqual(
+    row.scopeProvenance.map(({ kind, sourceId, sheetName, cellReference, excerpt }) =>
+      [kind, sourceId, sheetName, cellReference, excerpt],
+    ),
+    [
+      ["declared_subject_key", "subject-key", "Project Info", "A5", "Subsystem / Scope"],
+      ["declared_subject", "subject-value", "Project Info", "B5", "Alarm Kebencanaan"],
+      ["sheet_title", "weekly-title", "Weekly Report", "A1", "Weekly progress report - Alarm Kebencanaan"],
+    ],
+  );
+});
 test("only an accepted baseline effective by the reviewed period is selected", () => {
   const selected = selectAcceptedCostBaseline(
     [
