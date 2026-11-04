@@ -42,20 +42,6 @@ supported evidence files and calls the configured LLM when available.
   `202611030001_assurance_cutoff_period.sql` before deploying the application.
   Reviewers select evidence explicitly: choosing a cut-off does not filter
   documents automatically. Missing or unprocessed evidence remains a gap.
-- Reviewers decide supported observations one at a time (accept, correct, or
-  reject with a required reason) on the Assurance page. Decisions are stored
-  with their author, timestamp, and the observation fingerprint they reviewed;
-  the original extraction, its wording, and its source location never change.
-  A changed or superseded observation leaves the old decision out of the
-  analysis fingerprint, so dependent results invalidate instead of carrying a
-  stale verdict. Apply migration
-  `202611050001_assurance_observation_decisions.sql` before deploying.
-- Documents marked Needs Review are selectable for a review only when
-  observation coverage exists for their current source version; the same rule
-  is enforced again in `save_assurance_evidence` at the database boundary. A
-  needs-review selection keeps its processing warnings visible, and every
-  unprocessed domain stays an explicit evidence gap — never absent, zero, or
-  green. Processing status is distinct from assurance coverage.
 - The Advisor searches fresh project evidence with active-review, role, and
   period scope, preserves follow-up conversation context, and shows only
   citations verified against the exact retrieved chunk and source location.
