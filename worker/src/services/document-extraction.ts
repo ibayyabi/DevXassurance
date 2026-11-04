@@ -1311,7 +1311,7 @@ function percentTokenMatchesValue(token: string, percentValue: number): boolean 
 }
 
 const NARRATIVE_METRIC_WORD_PATTERN =
-  "(?:likelihood|probability|probabilitas|rating|impact|dampak|severity|risk|risiko|utilization|spent|budget|anggaran|invoice|payment|pembayaran|termin|paid|dibayar|kontrak|contract|penyerapan|absorption|cost|biaya|expenditure|slippage|delay|keterlambatan|penyimpangan)";
+  "(?:likelihood|likelihoods|probability|probabilities|probabilitas|rating|ratings|impact|impacts|dampak|severity|risk|risks|risked|risiko|utilization|utilizations|spent|budget|budgets|budgeted|anggaran|invoice|invoices|payment|payments|pembayaran|pembayarans|termin|termins|paid|dibayar|kontrak|contracts|contract|penyerapan|absorption|absorptions|cost|costs|biaya|expenditure|expenditures|slippage|slippages|delay|delays|keterlambatan|penyimpangan)";
 
 // Clause/field-level negative linkage: when the clause holding the
 // percentage names a risk or financial metric anywhere, the value stays a
@@ -1340,6 +1340,9 @@ function occurrenceIsClaimedByConflictingMetric(clause: string, start: number, e
   const marker = Math.max(labelPart.lastIndexOf(":"), labelPart.lastIndexOf("="));
   if (marker < 0) return true;
   const labelWords = labelPart.slice(0, marker);
+  // Words between the delimiter and the value belong to the value, not the
+  // label: "Progress: paid 30%" must gap even though the label is clean.
+  const valueSegment = labelPart.slice(marker + 1);
   const progressTermWord = new RegExp(
     `(?:^|[^\\p{L}\\p{N}])(?:${NARRATIVE_PROGRESS_TERM_PATTERN})(?=$|[^\\p{L}\\p{N}])`,
     "iu",
@@ -1348,6 +1351,7 @@ function occurrenceIsClaimedByConflictingMetric(clause: string, start: number, e
   return (
     !progressTermWord.test(labelWords) ||
     metricWord.test(labelWords) ||
+    metricWord.test(valueSegment) ||
     metricWord.test(after.slice(0, contentEnd))
   );
 }
