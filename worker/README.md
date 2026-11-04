@@ -6,6 +6,10 @@ XLSX formula cells keep the formula, cache status, raw cached result/type, and s
 
 Validated PMO cost and assurance observations retain the cited cell location when available; older references without a cell location fall back to their source chunk. Per-cell references do not make an unresolved formula usable or establish complete domain coverage.
 
+XLSX percent cells that use a built-in (`0%`, `0.00%`) or custom percent number format display the fraction as its percentage (`0.125` → `12.5%`) beside the unchanged `[raw value: 0.125; number format: 0%]` annotation, so a stored fraction is converted only when the cell's own format proves it and the raw value stays traceable.
+
+A cost observation's period label and cut-off date must appear in the cited source, exactly like assurance observations; a period or date read from another cell or snapshot is excluded instead of trusted.
+
 Image OCR uses local PP-OCRv6 tiny (RapidOCR 3.10.0 on ONNX Runtime CPU 1.31.0); scanned-PDF OCR adds Ghostscript rasterization. The configured PP-OCRv6 route is `id` for Indonesian/English text; it is fixed configuration, not language detection. Indonesian/English quality must pass the human-verified corpus before production. Missing local model assets return `ocr_model_unavailable`, and unreadable scans return `ocr_no_text`; every OCR failure fails the whole document instead of producing successful empty extraction. All scanned page images for one document go to one helper process and one engine initialization.
 
 Local setup (localhost pilot, Python 3.11, macOS/Linux):

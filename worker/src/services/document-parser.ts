@@ -739,13 +739,14 @@ async function parseXlsxDocument(
                     : formulaStatus === "cached_value"
                       ? ` (stored cached result: ${cell.value}; freshness not established)`
                       : "";
-            const value = cell.formula ? `${cell.formula}${formulaValueText}${formulaCacheTag}` : cell.value;
+            const displayValue = percentFormattedDisplayValue(cell, isoDate) ?? cell.value;
+            const value = cell.formula ? `${cell.formula}${formulaValueText}${formulaCacheTag}` : displayValue;
             const format = cell.numberFormat || isFormula
               ? ` [raw value: ${cell.value}; number format: ${cell.numberFormat ?? "none"}${isoDate ? `; ISO date: ${isoDate}` : invalidDate ? `; Needs Review: invalid Excel serial ${cell.value}` : cell.dateFormat ? "; Needs Review: no cached date value" : ""}${formulaCacheTag}]`
               : "";
             const compactValue = cell.formula
               ? `${cell.formula}${formulaValueText}${formulaCacheTag}`
-              : isoDate ?? cell.value;
+              : isoDate ?? displayValue;
             const compactFormat = cell.dateFormat
               ? isoDate
                 ? ""
@@ -854,7 +855,13 @@ async function readWorkbookNumberFormats(zip: ZipTextReader, parser: DOMParser) 
       format.getAttribute("formatCode"),
     ]),
   );
-  const builtinDateFormats: Record<string, string> = {
+  // Built-in formats that change how a raw value must be read. Dates drive
+  // normalization; percent formats prove a stored fraction is a percentage.
+  // Every other built-in stays unrecognized so its number format is never
+  // guessed from the display.
+  const builtinFormats: Record<string, string> = {
+    "9": "0%",
+    "10": "0.00%",
     "14": "m/d/yy",
     "15": "d-mmm-yy",
     "16": "d-mmm",
@@ -868,7 +875,7 @@ async function readWorkbookNumberFormats(zip: ZipTextReader, parser: DOMParser) 
   return Array.from(styles.getElementsByTagNameNS("*", "cellXfs")[0]?.getElementsByTagNameNS("*", "xf") ?? [])
     .map((style) => {
       const id = style.getAttribute("numFmtId");
-      const format = customFormats.get(id ?? "") ?? builtinDateFormats[id ?? ""];
+      const format = customFormats.get(id ?? "") ?? builtinFormats[id ?? ""];
       return {
         format,
         date: Boolean(format && /[yd]/i.test(format.replace(/"[^"]*"|\[[^\]]*\]/g, ""))),
@@ -1056,6 +1063,22 @@ function classifyFormulaCache(
     formulaCacheType: cacheType,
     formulaCacheRaw: rawValue,
   };
+}
+
+// A cell whose own number format is a percentage stores a fraction but displays
+// a percentage. Render that percentage only for a non-formula numeric literal
+// whose own cell format proves it, so a fraction is never converted on a guess.
+// The raw value and format stay in the same cell's annotation for provenance.
+function percentFormattedDisplayValue(
+  cell: WorkbookCell,
+  isoDate: string | undefined,
+): string | null {
+  if (cell.formula || cell.textual || isoDate || !cell.value.trim()) return null;
+  const format = cell.numberFormat;
+  if (!format || !format.replace(/"[^"]*"|\[[^\]]*\]/g, "").includes("%")) return null;
+  const numeric = Number(cell.value);
+  if (!Number.isFinite(numeric)) return null;
+  return `${Number((numeric * 100).toPrecision(12))}%`;
 }
 
 // Conservative deterministic ambiguity diagnostics. One indicator alone does not

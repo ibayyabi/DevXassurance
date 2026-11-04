@@ -1824,6 +1824,17 @@ function validateGroupExtraction(
         ) {
           rowErrors.push(`${path}.scope_label is not present in the cited source`);
         }
+        // A cost period and cut-off are only provenance when the cited source
+        // states them. A date or period copied from another cell or snapshot is
+        // not traceable, so it is excluded instead of being trusted.
+        if (citation) {
+          if (periodLabel && !citation.excerpt.toLocaleLowerCase().includes(periodLabel.toLocaleLowerCase())) {
+            rowErrors.push(`${path}.period_label is not present in the cited source`);
+          }
+          if (asOfDate && !citation.excerpt.includes(asOfDate)) {
+            rowErrors.push(`${path}.as_of_date is not present in the cited source`);
+          }
+        }
         if (citation && citationHasUnavailableFormula(group, citation)) {
           rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support a cost value`);
         }
