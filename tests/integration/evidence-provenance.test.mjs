@@ -551,6 +551,32 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
           },
           cell: cell(9, "A", "Due Date", "2026-10-30", "46325", "2026-10-30"),
         },
+        // One date cell whose column has no label at all.
+        {
+          sourceId: "cell-unlabelled",
+          chunkIndex: 0,
+          text: "2026-11-05 (15% complete)",
+          modelText: "2026-11-05 (15% complete)",
+          sourceLocation: {
+            kind: "xlsx",
+            sheetName: WEEKLY,
+            tableNumber: 0,
+            rowStart: 11,
+            rowEnd: 11,
+            cellRangeStart: "A11",
+            cellRangeEnd: "A11",
+          },
+          cell: {
+            sheetName: WEEKLY,
+            row: 11,
+            column: "A",
+            cell: "A11",
+            label: null,
+            value: "2026-11-05 (15% complete)",
+            rawValue: "2026-11-05 (15% complete)",
+            dateIso: "2026-11-05",
+          },
+        },
         {
           sourceId: "cell-cutoff",
           chunkIndex: 0,
@@ -570,6 +596,9 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
       ],
     },
   ];
+  const textBySource = new Map(
+    chunks[0].sourceReferences.map((reference) => [reference.sourceId, reference.text]),
+  );
   const progress = (rawValue, percent, asOfDate, sourceId) => ({
     raw_value: rawValue,
     percent,
@@ -577,7 +606,7 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
     scope_label: null,
     period_label: null,
     as_of_date: asOfDate,
-    excerpt: rows.find((row) => row.sourceId === sourceId).text,
+    excerpt: textBySource.get(sourceId),
     source_id: sourceId,
   });
 
@@ -599,6 +628,8 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
       progress("30%", 30, "2026-10-31", "row-10"),
       // The row's own cut-off column, which the structure proves.
       progress("20.4%", 20.4, "2026-10-16", "row-8"),
+      // A cell whose column has no label cannot prove it is a record date.
+      progress("15%", 15, "2026-11-05", "cell-unlabelled"),
     ];
     const milestone = (date, sourceId) => ({
       label: date === "2026-10-23" ? "Due Date" : "Cut-off Date",
@@ -608,7 +639,7 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
       scope_label: null,
       period_label: null,
       as_of_date: null,
-      excerpt: rows.find((row) => row.sourceId === sourceId).text,
+      excerpt: textBySource.get(sourceId),
       source_id: sourceId,
     });
     output.assurance_observations.milestones = [
@@ -640,6 +671,18 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
         excerpt: "Cut-off Date: 2026-10-16",
         source_id: "cell-cutoff",
       },
+      // An unlabelled date cell cannot prove it is a due or event date.
+      {
+        label: "complete",
+        raw_date: "2026-11-05",
+        date: "2026-11-05",
+        scope_level: "unknown",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: textBySource.get("cell-unlabelled"),
+        source_id: "cell-unlabelled",
+      },
     ];
     const risk = (mitigationDueDate) => ({
       risk_id: null,
@@ -657,7 +700,7 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
       period_label: null,
       as_of_date: null,
       raw_value: "20.4%",
-      excerpt: rows.find((row) => row.sourceId === "row-8").text,
+      excerpt: textBySource.get("row-8"),
       source_id: "row-8",
     });
     output.assurance_observations.risk_snapshots = [
@@ -684,6 +727,8 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
       ["Due Date", "2026-10-23"],
       ["Due Date", "2026-10-30"],
     ]);
+    assert.equal(accepted.some((item) => item.as_of_date === "2026-11-05"), false);
+    assert.equal(milestones.some((item) => item.date === "2026-11-05"), false);
     const risks = result.extraction.assurance_observations.risk_snapshots;
     assert.deepEqual(risks.map((item) => item.mitigation_due_date), ["2026-10-23"]);
     const warnings = result.extraction.quality_warnings.join(" ");
@@ -710,6 +755,16 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
     assert.match(
       warnings,
       /risk_snapshots\[1\]\.mitigation_due_date is the cited row's "Cut-off Date" value, not a due or event date/,
+    );
+    // An unlabelled spreadsheet column proves neither role, so both claims stay
+    // gaps instead of becoming validated dates.
+    assert.match(
+      warnings,
+      /progress\[4\]\.as_of_date cannot be attributed to a cut-off or period column in the cited source/,
+    );
+    assert.match(
+      warnings,
+      /milestones\[4\]\.date cannot be attributed to a due or event date column in the cited source/,
     );
   });
 });
@@ -795,7 +850,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
   assert.equal(cached.parserVersion, "document-parser/12");
-  assert.equal(cached.schemaVersion, "phase6-document-extraction/20");
+  assert.equal(cached.schemaVersion, "phase6-document-extraction/21");
 
   // A cache hit re-derives the location from the live chunk instead of trusting
   // a stored payload that dropped it.

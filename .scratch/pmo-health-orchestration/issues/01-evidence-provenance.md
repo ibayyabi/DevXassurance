@@ -16,6 +16,14 @@ Baca [rencana dan kontrak bersama](../plan.md), khususnya constraint model dan k
 
 ## Comments
 
+**Handoff 7 — kontradiksi unlabelled XLSX diperbaiki.**
+
+Laporan handoff 6 menyebut tanggal XLSX tanpa label menjadi gap, tetapi kode untuk **sel tunggal** masih menerima (return null) saat kolom tidak terbukti. Sekarang: untuk sumber `kind: "xlsx"`, tanggal hanya diterima bila kolomnya terbukti — `as_of_date` butuh kolom record (cut-off/periode), `date`/`mitigation_due_date` butuh kolom due/target/plan/baseline/actual; sel tanpa label, sel berlabel tak relevan, baris tanpa metadata sel (baris terpecah / payload lama) menjadi **gap** (ditolak dengan alasan eksplisit), bukan tanggal tervalidasi. Sumber non-spreadsheet tetap memakai aturan excerpt seperti sebelumnya. `EXTRACTION_SCHEMA_VERSION` → `phase6-document-extraction/21`; `PARSER_VERSION` tetap `document-parser/12`.
+
+Test: skenario negatif sel tanpa label ditambahkan pada test metadata baris — klaim `as_of_date` dan klaim tanggal milestone dari sel tanpa label sama-sama ditolak dengan pesan "cannot be attributed to a … column in the cited source", dan assert memastikan tanggal itu tidak muncul pada evidence yang diterima. Assertion lama tidak dilonggarkan.
+
+Koreksi klaim: `scope_provenance` **dipersist** di JSON observation (jsonb) tetapi belum dibaca oleh read model/UI review — wiring review ada di tiket 03. README dan laporan diperbaiki agar tidak menyebutnya sudah dapat ditinjau di UI.
+
 **Handoff 6 — diagnosis dua kegagalan offline pada handoff 5.**
 
 1. `keeps the plan date cell locator` (actual undefined): test menyiapkan milestone dari sel `Baseline Start` sheet **Workplan & Gantt**, tetapi sheet itu tidak punya header terdeteksi — baris 4 (header asli) berada tepat di bawah baris timeline 3 sehingga parser menganggapnya baris data, dan baris data berikutnya dirender dengan prefiks huruf kolom (`F: 2026-09-18`), bukan label `Baseline Start`. Jadi **tidak ada** referensi valid/label yang pernah dibuat parser; produksi tidak salah (sel tanpa label → tanpa atribusi kolom → aturan excerpt tetap berlaku, tidak ada penerimaan keliru). Perbaikan di test: milestone memakai sel Due Date milik baris yang sama (`L7` W4 / `L8` W5 di sheet Weekly Report) yang memang berlabel, dengan label dan tanggal diturunkan dari teks prompt, bukan dari koordinat tetap. Bukti tambahan: assert `milestone.label` = label kolom due.

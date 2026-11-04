@@ -368,7 +368,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/20";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/21";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -1641,14 +1641,23 @@ function validateGroupExtraction(
     // A single cited cell proves its own column through its label; the claimed
     // date is already required to be inside that cell's text.
     const cell = reference?.cell;
-    if (cell && isDueColumn(cell)) {
-      return `${path} is the value of the cited source's "${cellLabel(cell)}" column, not a cut-off or period date`;
+    if (cell) {
+      if (isRecordColumn(cell)) return null;
+      if (isDueColumn(cell)) {
+        return `${path} is the value of the cited source's "${cellLabel(cell)}" column, not a cut-off or period date`;
+      }
+      return `${path} cannot be attributed to a cut-off or period column in the cited source`;
     }
-    return null;
+    // A spreadsheet source whose column cannot be proven (a split row or an
+    // older payload without cell metadata) keeps the date a gap; other formats
+    // keep the cited-unit rule.
+    return reference?.sourceLocation?.kind === "xlsx"
+      ? `${path} cannot be attributed to a cut-off or period column in the cited source`
+      : null;
   };
-  // Returns an error string only when the claimed due/event date provably comes
-  // from the record column instead; a due, target, plan, or actual column is a
-  // legitimate source for these fields.
+  // A due, target, plan, or actual column is a legitimate source for these
+  // fields; the value is rejected when it provably comes from the record column
+  // and stays a gap when no relevant column can be proven.
   const dueDateError = (
     citation: SourceCitation | null,
     claimed: string,
@@ -1662,11 +1671,17 @@ function validateGroupExtraction(
       const record = dateCells.find((cell) => isRecordColumn(cell) && cell.dateIso === claimed);
       return record
         ? `${path} is the cited row's "${cellLabel(record)}" value, not a due or event date`
-        : null;
+        : `${path} cannot be attributed to a due or event date column in the cited row`;
     }
     const cell = reference?.cell;
-    return cell && isRecordColumn(cell)
-      ? `${path} is the cited source's "${cellLabel(cell)}" value, not a due or event date`
+    if (cell) {
+      if (isDueColumn(cell)) return null;
+      return isRecordColumn(cell)
+        ? `${path} is the cited source's "${cellLabel(cell)}" value, not a due or event date`
+        : `${path} cannot be attributed to a due or event date column in the cited source`;
+    }
+    return reference?.sourceLocation?.kind === "xlsx"
+      ? `${path} cannot be attributed to a due or event date column in the cited source`
       : null;
   };
   const checkDate = (
