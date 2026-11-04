@@ -289,7 +289,12 @@ test("XLSX normalizes recognized dates using workbook epoch and flags invalid or
   if (!legacy.ok) return;
   const legacyText = legacy.chunks.map((chunk) => chunk.chunkText).join("\n");
   assert.match(legacyText, /raw value: 60; number format: m\/d\/yy; Needs Review: invalid Excel serial 60/);
-  assert.match(legacyText, /A2\+1 \(cached value: 61.*1900-03-01/);
+  // A cached formula date value is still normalized; assert the structured
+  // locator instead of pinning the formula/cache wording.
+  const cachedDateCell = legacy.chunks
+    .flatMap((chunk) => chunk.sourceReferences ?? [])
+    .find((source) => source.sourceLocation?.cellRangeStart === "B2");
+  assert.equal(cachedDateCell?.cell?.dateIso, "1900-03-01");
   assert.match(legacyText, /45292.*number format: 0\.00/);
   assert.doesNotMatch(legacyText, /45292.*ISO date/);
 

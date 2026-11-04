@@ -829,15 +829,17 @@ async function parseXlsxDocument(
           const keyCell = row.cells[0];
           if (keyCell?.textual && SUBJECT_KEY_CUE.test(keyCell.value)) {
             const subjectCell = row.cells.slice(1).find((cell) => cell.value.trim());
-            const value = subjectCell?.value.trim();
+            const subjectValue = subjectCell?.value.trim();
             if (
-              value &&
+              subjectCell &&
+              subjectValue &&
               !workbookSubjects.some(
-                (subject) => subject.value === value && subject.sheetName === sheet.name,
+                (subject) =>
+                  subject.value === subjectValue && subject.sheetName === sheet.name,
               )
             ) {
               workbookSubjects.push({
-                value,
+                value: subjectValue,
                 key: keyCell.value.trim(),
                 sheetName: sheet.name,
                 valueCell: subjectCell.reference,
