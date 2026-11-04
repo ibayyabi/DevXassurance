@@ -1997,7 +1997,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
   assert.equal(cached.parserVersion, "document-parser/18");
-  assert.equal(cached.schemaVersion, "phase6-document-extraction/33");
+  assert.equal(cached.schemaVersion, "phase6-document-extraction/34");
 
   assert.equal(cached.status, "completed");
   assert.deepEqual(
@@ -2352,6 +2352,22 @@ test("narrative progress needs explicit progress wording tied to its percentage"
     "complete-suffix": "25% complete",
     "actual-prefix": "Actual progress: 25%",
     "unclear-percent": "Budget utilization: 25%",
+    "physical-of": "Physical progress of the works: 25%",
+    "progress-reached": "Progress has reached 25%",
+    "kemajuan-fisik": "Kemajuan fisik telah mencapai 25%",
+    "kemajuan-proyek": "Kemajuan proyek sebesar 25%",
+    "progres-proyek": "Progres proyek adalah 25%",
+    "realisasi-pekerjaan": "Realisasi pekerjaan mencapai 25%",
+    "penyelesaian-pekerjaan": "Penyelesaian pekerjaan 25%",
+    "kemajuan-pekerjaan": "Kemajuan pekerjaan: 25%",
+    "risk-after-progress": "Progress: 40% likelihood that the schedule delay extends into Q3",
+    "completion-likelihood": "Milestone completion 60% likelihood of slippage",
+    "pembayaran-selesai": "Pembayaran selesai 80% dari nilai kontrak",
+    "penyerapan-target": "Target penyerapan dana tercapai 90%",
+    "termin-pembayaran": "Penyelesaian pembayaran termin 3 mencapai 60%",
+    "invoice-completion": "Completion of 60% of invoice payments received",
+    "budget-spent": "Actual: 45% of budget has been spent",
+    "risk-progress-label": "Risk progress: 25%",
   };
   const chunks = [{
     chunkIndex: 0,
@@ -2402,6 +2418,26 @@ test("narrative progress needs explicit progress wording tied to its percentage"
       row("unclear-percent", "25%"),
       row("complete-suffix", "25% complete"),
       row("actual-prefix", "25%"),
+      // Ordinary English and Indonesian word orders between the progress
+      // term and its percentage stay accepted.
+      row("physical-of", "25%"),
+      row("progress-reached", "25%"),
+      row("kemajuan-fisik", "25%"),
+      row("kemajuan-proyek", "25%"),
+      row("progres-proyek", "25%"),
+      row("realisasi-pekerjaan", "25%"),
+      row("penyelesaian-pekerjaan", "25%"),
+      row("kemajuan-pekerjaan", "25%"),
+      // A risk or financial metric named beside the progress wording claims
+      // the percentage, so these stay gaps.
+      row("risk-after-progress", "40%", 40),
+      row("completion-likelihood", "60%", 60),
+      row("pembayaran-selesai", "80%", 80),
+      row("penyerapan-target", "90%", 90),
+      row("termin-pembayaran", "60%", 60),
+      row("invoice-completion", "60%", 60),
+      row("budget-spent", "45%", 45),
+      row("risk-progress-label", "25%"),
     ];
     return modelResponse(output);
   }, async () =>
@@ -2424,10 +2460,18 @@ test("narrative progress needs explicit progress wording tied to its percentage"
       ["25%", 25, sources["realisasi-only"]],
       ["25% complete", 25, sources["complete-suffix"]],
       ["25%", 25, sources["actual-prefix"]],
+      ["25%", 25, sources["physical-of"]],
+      ["25%", 25, sources["progress-reached"]],
+      ["25%", 25, sources["kemajuan-fisik"]],
+      ["25%", 25, sources["kemajuan-proyek"]],
+      ["25%", 25, sources["progres-proyek"]],
+      ["25%", 25, sources["realisasi-pekerjaan"]],
+      ["25%", 25, sources["penyelesaian-pekerjaan"]],
+      ["25%", 25, sources["kemajuan-pekerjaan"]],
     ],
   );
   const warnings = result.extraction.quality_warnings.join(" ");
-  for (const index of [0, 1, 2, 3, 4, 6, 7, 8, 12]) {
+  for (const index of [0, 1, 2, 3, 4, 6, 7, 8, 12, 23, 24, 25, 26, 27, 28, 29, 30]) {
     assert.match(
       warnings,
       new RegExp(`progress\\[${index}\\].*not linked to explicit progress`),

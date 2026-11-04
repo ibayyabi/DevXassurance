@@ -393,7 +393,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/33";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/34";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -1294,12 +1294,47 @@ function citedPercentCellForClaim(
 }
 const NARRATIVE_PROGRESS_TERM_PATTERN =
   "(?:progress|progres|kemajuan|completion|complete|completed|actual|aktual|realisasi|penyelesaian|selesai|tercapai)";
+const NARRATIVE_QUALIFIER_PATTERN =
+  "(?:project|proyek|overall|physical|fisik|total|reported|cumulative|kumulatif|work|pekerjaan|package|paket|kontrak|contract)";
+const NARRATIVE_CONNECTOR_PATTERN =
+  "(?:is|was|are|were|at|of|reached|reaches|stand|stands|mencapai|sebesar|adalah|ialah|telah|sudah|dari|untuk|khususnya)";
+// Non-metric filler allowed between a progress term and its percentage, so
+// ordinary wording like "Physical progress of the works: 25%" or
+// "Kemajuan fisik telah mencapai 25%" still counts as linked.
+const NARRATIVE_GAP_PATTERN = "(?:\\s|[\\p{L}\\p{N}%-]){1,24}?";
 
 function percentTokenMatchesValue(token: string, percentValue: number): boolean {
   const numeric = token.match(/\d+(?:[.,]\d+)?/u)?.[0];
   if (!numeric) return false;
   const value = Number(numeric.replace(",", "."));
   return Number.isFinite(value) && Math.abs(value - percentValue) < 1e-9;
+}
+
+// Clause-local negative linkage: a risk/likelihood/rating or financial
+// metric within a few words of the progress wording claims the percentage
+// for that metric, so the value stays a gap instead of project progress.
+function clauseHasConflictingMetricLinkage(clause: string, start: number, end: number): boolean {
+  const metricPattern =
+    "(?:likelihood|probability|probabilitas|rating|impact|dampak|severity|risk|risiko|utilization|spent|budget|anggaran|invoice|payment|pembayaran|termin|paid|dibayar|kontrak|contract|penyerapan|absorption|cost|biaya|expenditure|slippage|delay|keterlambatan|penyimpangan)";
+  const connectors = "(?:is|was|are|were|that|yang|dari|of|for|untuk)";
+  // Right window: the token right after the value (and after one trailing
+  // preposition) must not name a metric.
+  const metricSuffix = new RegExp(
+    `^\\s*(?:${connectors})?\\s*(?:${metricPattern})\\b`,
+    "iu",
+  );
+  // Left window: last up-to-three words before the value or the progress
+  // phrase must not name a metric (e.g. "Pembayaran selesai 80%", "budget
+  // utilization").
+  const metricPrefix = new RegExp(
+    `(?:^|[^\\p{L}\\p{N}])(?:${metricPattern})(?:\\s+[\\p{L}\\p{N}]+){0,2}\\s*(?:is|was|are|were|that|yang|dari|of|for|untuk)?\\s*(?::|=)?\\s*$`,
+    "iu",
+  );
+  return (
+    metricSuffix.test(clause.slice(end)) ||
+    metricPrefix.test(clause.slice(0, start)) ||
+    metricPrefix.test(clause.slice(0, Math.max(0, start - 20)))
+  );
 }
 
 function narrativeProgressPercentIsSourceLinked(
@@ -1314,13 +1349,22 @@ function narrativeProgressPercentIsSourceLinked(
   if (!percentTokens.length) return false;
   // Narrative progress needs a progress/completion/actual word tied to this
   // percentage. A risk or other word elsewhere in the field or excerpt is not
-  // enough, so only narrow connectors may sit between the term and the value.
+  // enough, so only a short plain-word gap, listed qualifiers, and narrow
+  // connectors may sit between the term and the value.
   const progressBefore = new RegExp(
-    `(?:^|[^\\p{L}\\p{N}])(?:(?:project|overall|physical|total|reported|cumulative)\\s+)?${NARRATIVE_PROGRESS_TERM_PATTERN}\\s*(?:(?:is|was|are|were|at|of|reached|reaches|stands?|mencapai|sebesar|adalah|telah|sudah)\\s+)*(?:%|percent(?:age)?|persen)?\\s*[:=]?\\s*$`,
+    `(?:^|[^\\p{L}\\p{N}])(?:(?:${NARRATIVE_QUALIFIER_PATTERN})\\s+)?${NARRATIVE_PROGRESS_TERM_PATTERN}\\s*(?:(?:${NARRATIVE_CONNECTOR_PATTERN})\\s+)*(?:%|percent(?:age)?|persen)?\\s*[:=]?\\s*$`,
     "iu",
   );
   const progressAfter = new RegExp(
-    `^\\s*(?:(?:project|overall|physical|total|reported|cumulative|is|was)\\s+)*${NARRATIVE_PROGRESS_TERM_PATTERN}\\b`,
+    `^\\s*(?:(?:${NARRATIVE_QUALIFIER_PATTERN}|is|was)\\s+)*${NARRATIVE_PROGRESS_TERM_PATTERN}\\b`,
+    "iu",
+  );
+  // Same association across a bounded plain-word window, for word orders the
+  // strict patterns above cannot cover ("Progress has reached 25%",
+  // "Kemajuan fisik telah mencapai 25%"). The window still fails when the gap
+  // carries a metric of its own ("progress of invoice payments").
+  const progressLinked = new RegExp(
+    `${NARRATIVE_PROGRESS_TERM_PATTERN}${NARRATIVE_GAP_PATTERN}(?:(?:${NARRATIVE_QUALIFIER_PATTERN})${NARRATIVE_GAP_PATTERN})?(?:(?:${NARRATIVE_CONNECTOR_PATTERN})${NARRATIVE_GAP_PATTERN})?(?:%|percent(?:age)?|persen)?\\s*[:=]?\\s*$`,
     "iu",
   );
   for (const clause of excerpt.split(/[;|\n]+|[.!?]\s+/u)) {
@@ -1330,7 +1374,12 @@ function narrativeProgressPercentIsSourceLinked(
       for (const token of percentTokens) {
         const start = valueIndex + (token.index ?? 0);
         const end = start + token[0].length;
-        if (progressBefore.test(text.slice(0, start)) || progressAfter.test(text.slice(end))) {
+        if (clauseHasConflictingMetricLinkage(text, start, end)) continue;
+        if (
+          progressBefore.test(text.slice(0, start)) ||
+          progressAfter.test(text.slice(end)) ||
+          progressLinked.test(text.slice(0, start))
+        ) {
           return true;
         }
       }
