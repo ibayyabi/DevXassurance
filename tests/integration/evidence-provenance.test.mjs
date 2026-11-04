@@ -2328,10 +2328,10 @@ test("risk likelihood percentages need a separate unambiguous progress field", a
   );
   assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
   assert.deepEqual(
-    result.extraction.assurance_observations.progress.map(({ percent, source_id }) =>
-      [percent, source_id],
+    result.extraction.assurance_observations.progress.map(
+      ({ percent, evidence_chunk_index, excerpt }) => [percent, evidence_chunk_index, excerpt],
     ),
-    [[25, "mixed-risk-and-progress"]],
+    [[25, 0, mixedText]],
   );
   assert.match(
     result.extraction.quality_warnings.join(" "),
