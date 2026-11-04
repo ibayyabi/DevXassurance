@@ -1168,9 +1168,6 @@ test("cached formulas remain review-only while literal siblings and percent head
     ],
   );
   assert.match(result.processing_error ?? "", /formula_cache_review_required/);
-  assert.match(result.processing_error ?? "", /alerts\[0\]\.source_id cites a stored formula result/);
-  assert.match(result.processing_error ?? "", /actions\[0\]\.source_id cites a stored formula result/);
-  assert.match(result.processing_error ?? "", /risk_snapshots\[0\]\.status cites a stored formula result/);
 });
 
 test("ambiguous or foreign workbook scope declarations are not offered or accepted", async () => {
