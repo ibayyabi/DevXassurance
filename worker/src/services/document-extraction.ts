@@ -393,7 +393,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/31";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/32";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -1194,7 +1194,7 @@ function sourceCellMatchesCandidate(sourceCell: ParsedSourceCell, candidate: str
   const normalized = candidate.trim();
   if (!normalized) return false;
   if (
-    sourceCell.rawValue.trim() === normalized ||
+    sourceCell.rawValue.trim().toLocaleLowerCase() === normalized.toLocaleLowerCase() ||
     sourceCell.dateIso === normalized
   ) {
     return true;
@@ -1291,6 +1291,48 @@ function citedPercentCellForClaim(
       citedTextSupportsNumericValue(String(percentValue), cell.rawValue),
   );
   return matches.length === 1 ? matches[0] : null;
+}
+function citedProgressValueHasRiskContext(
+  group: ChunkGroup,
+  citation: SourceCitation | null,
+  rawValue: string,
+): boolean {
+  const cited = citedReference(group, citation);
+  if (!cited) return false;
+  const location = cited.reference.sourceLocation;
+  if (location?.kind === "xlsx") {
+    const exactCell =
+      cited.reference.cell &&
+      location.cellRangeStart === cited.reference.cell.cell &&
+      location.cellRangeEnd === cited.reference.cell.cell
+        ? cited.reference.cell
+        : null;
+    const sourceCells = exactCell
+      ? [exactCell]
+      : cited.reference.rowCells?.length
+        ? cited.reference.rowCells
+        : cited.reference.cell
+          ? [cited.reference.cell]
+          : [];
+    const riskMetricLabel = /\b(?:risk|likelihood|probability|rating|impact|severity)\b/iu;
+    const candidate = rawValue.trim().toLocaleLowerCase();
+    return sourceCells.some((cell) =>
+      riskMetricLabel.test(cell.label ?? "") &&
+      [cell.rawValue, cell.value].some((value) => value.trim().toLocaleLowerCase() === candidate),
+    );
+  }
+  const riskMetricField =
+    /(?:^|[^\p{L}\p{N}])(?:risk(?:\s+(?:likelihood|probability|rating|score|impact|severity))?|likelihood|probability|rating|impact|severity)\s*(?:%|percent(?:age)?|score|rating)?\s*[:=]?\s*$/iu;
+  const candidate = rawValue.trim().toLocaleLowerCase();
+  return citation.excerpt.split(/[;|\n]+|[.!?]\s+/u).some((clause) => {
+    const text = clause.toLocaleLowerCase();
+    let valueIndex = text.indexOf(candidate);
+    while (valueIndex >= 0) {
+      if (riskMetricField.test(text.slice(0, valueIndex))) return true;
+      valueIndex = text.indexOf(candidate, valueIndex + candidate.length);
+    }
+    return false;
+  });
 }
 function resolveSheetSourceLocations(
   group: ChunkGroup,
@@ -3056,6 +3098,15 @@ function validateGroupExtraction(
     const citedPercentCell = percentValue === null || percentValue === undefined
       ? null
       : citedPercentCellForClaim(group, citation, rawValue, percentValue);
+    if (
+      percentValue !== null &&
+      percentValue !== undefined &&
+      citation &&
+      rawValue &&
+      citedProgressValueHasRiskContext(group, citation, rawValue)
+    ) {
+      rowErrors.push(`${path}.percent is a risk likelihood or rating, not progress evidence`);
+    }
     if (percentValue !== null && percentValue !== undefined && excerpt &&
       !citedTextSupportsNumericValue(`${percentValue}%`, rawValue ?? "") &&
       !citedPercentCell) {

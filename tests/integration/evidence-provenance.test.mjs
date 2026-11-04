@@ -110,7 +110,7 @@ async function syntheticCachedFormulaWorkbook() {
   );
   zip.file(
     "xl/worksheets/sheet1.xml",
-    `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Record</t></is></c><c r="B1" t="inlineStr"><is><t>EAC Literal</t></is></c><c r="C1" t="inlineStr"><is><t>EAC Formula</t></is></c><c r="D1" t="inlineStr"><is><t>Report Date</t></is></c><c r="E1" t="inlineStr"><is><t>Schedule Status</t></is></c><c r="F1" t="inlineStr"><is><t>Cost Status</t></is></c><c r="G1" t="inlineStr"><is><t>Actual %</t></is></c><c r="H1" t="inlineStr"><is><t>Likelihood %</t></is></c><c r="I1" t="inlineStr"><is><t>Metadata</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Formula row</t></is></c><c r="B2"><v>500</v></c><c r="C2"><f>200+300</f><v>500</v></c><c r="D2" t="str"><f>TEXT(DATE(2026,10,16),&quot;yyyy-mm-dd&quot;)</f><v>2026-10-16</v></c><c r="E2" t="str"><f>IF(TRUE(),&quot;Green&quot;,&quot;Red&quot;)</f><v>Green</v></c><c r="F2" t="inlineStr"><is><t>Green</t></is></c><c r="G2"><v>0.125</v></c><c r="H2"><v>25</v></c><c r="I2" t="inlineStr"><is><t>2026-10-01</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Literal row</t></is></c><c r="B3"><v>750</v></c><c r="D3" t="inlineStr"><is><t>2026-10-09</t></is></c><c r="E3" t="inlineStr"><is><t>Amber</t></is></c><c r="F3" t="inlineStr"><is><t>Green</t></is></c><c r="G3"><v>12.5</v></c><c r="H3"><v>20.4</v></c></row></sheetData></worksheet>`,
+    `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Record</t></is></c><c r="B1" t="inlineStr"><is><t>EAC Literal</t></is></c><c r="C1" t="inlineStr"><is><t>EAC Formula</t></is></c><c r="D1" t="inlineStr"><is><t>Report Date</t></is></c><c r="E1" t="inlineStr"><is><t>Schedule Status</t></is></c><c r="F1" t="inlineStr"><is><t>Cost Status</t></is></c><c r="G1" t="inlineStr"><is><t>Actual %</t></is></c><c r="H1" t="inlineStr"><is><t>Likelihood %</t></is></c><c r="I1" t="inlineStr"><is><t>Metadata</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Formula row</t></is></c><c r="B2"><v>500</v></c><c r="C2"><f>200+300</f><v>500</v></c><c r="D2" t="str"><f>TEXT(DATE(2026,10,16),&quot;yyyy-mm-dd&quot;)</f><v>2026-10-16</v></c><c r="E2" t="str"><f>IF(TRUE(),&quot;Green&quot;,&quot;Red&quot;)</f><v>Green</v></c><c r="F2" t="inlineStr"><is><t>Green</t></is></c><c r="G2"><v>0.125</v></c><c r="H2" t="inlineStr"><is><t>25%</t></is></c><c r="I2" t="inlineStr"><is><t>2026-10-01</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Literal row</t></is></c><c r="B3"><v>750</v></c><c r="D3" t="inlineStr"><is><t>2026-10-09</t></is></c><c r="E3" t="inlineStr"><is><t>Amber</t></is></c><c r="F3" t="inlineStr"><is><t>Green</t></is></c><c r="G3"><v>12.5</v></c><c r="H3"><v>20.4</v></c></row></sheetData></worksheet>`,
   );
   const buffer = await zip.generateAsync({ type: "nodebuffer" });
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
@@ -1014,9 +1014,9 @@ test("cached formulas remain review-only while literal siblings and percent head
     }];
     output.assurance_observations.risk_snapshots = [{
       risk_id: null,
-      name: "Formula status risk",
-      description: "Green",
-      status: "Green",
+      name: "Schedule Status",
+      description: "green",
+      status: "green",
       rating_label: null,
       rating_value: null,
       scale_label: null,
@@ -1027,8 +1027,9 @@ test("cached formulas remain review-only while literal siblings and percent head
       wbs: null,
       period_label: null,
       as_of_date: null,
-      raw_value: "Green",
-      ...cachedStatusClaims,
+      raw_value: "green",
+      source_id: formulaRow.source_id,
+      excerpt: formulaRow.text,
     }];
     output.cost_observations = [
       {
@@ -1109,7 +1110,7 @@ test("cached formulas remain review-only while literal siblings and percent head
         source_id: actualPercent.source_id,
       },
       {
-        raw_value: "25",
+        raw_value: "25%",
         percent: 25,
         scope_level: "project",
         scope_label: null,
@@ -1985,7 +1986,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
   assert.equal(cached.parserVersion, "document-parser/18");
-  assert.equal(cached.schemaVersion, "phase6-document-extraction/31");
+  assert.equal(cached.schemaVersion, "phase6-document-extraction/32");
 
   assert.equal(cached.status, "completed");
   assert.deepEqual(
@@ -2227,6 +2228,50 @@ test("narrative scope labels must match the complete explicit field value", asyn
     /progress\[0\].*scope_label must be supported by a structural scope source/,
   );
 });
+test("narrative risk likelihood percentages are not progress evidence", async () => {
+  const text = "Risk likelihood: 25%";
+  const source = {
+    sourceId: "risk-likelihood",
+    chunkIndex: 0,
+    text,
+    modelText: text,
+  };
+  const result = await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    const output = baseGroupOutput(references);
+    output.assurance_observations.progress = [{
+      raw_value: "25%",
+      percent: 25,
+      scope_level: "project",
+      scope_label: null,
+      period_label: null,
+      as_of_date: null,
+      excerpt: text,
+      source_id: "risk-likelihood",
+    }];
+    return modelResponse(output);
+  }, async () =>
+    await extractDocumentGroups(
+      job(text, { fileName: "risk-likelihood.txt" }),
+      [{ chunkIndex: 0, chunkText: text, sourceReferences: [source] }],
+      { parserVersion: "narrative-risk-percent-v1" },
+      memoryGroupStore(),
+    ),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  assert.deepEqual(result.extraction.assurance_observations.progress, []);
+  assert.match(
+    result.extraction.quality_warnings.join(" "),
+    /risk likelihood or rating, not progress evidence/,
+  );
+});
+
 
 test("health snapshots retain only explicit dimension statuses and record dates", async () => {
   const text =
