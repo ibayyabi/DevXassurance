@@ -79,6 +79,7 @@ export type ExtractedAction = {
 };
 
 export type SourceCitation = {
+  source_id?: string;
   evidence_chunk_index: number;
   excerpt: string;
   source_location?: ParsedSourceReference["sourceLocation"];
@@ -122,7 +123,8 @@ export const ASSURANCE_OBSERVATION_CONTRACT_VERSION = "pmo-assurance-observation
  * carries its own exact locator here so a reviewer can trace it.
  */
 export type ObservationScopeProvenance = {
-  kind: "cited_row_column" | "declared_subject" | "sheet_title";
+  kind: "cited_row_column" | "declared_subject_key" | "declared_subject" | "sheet_title";
+  source_id: string;
   sheet_name: string;
   cell_reference: string;
   excerpt: string;
@@ -340,22 +342,27 @@ type GroupExtraction = {
   sheet_interpretation?: SheetInterpretation;
   quality_warnings: string[];
 };
-type WorkbookSubject = { value: string; key: string; sheetName: string; valueCell: string };
+type WorkbookSubject = {
+  value: string;
+  key: string;
+  sheetName: string;
+  keyCell: string;
+  valueCell: string;
+};
 type SheetTitle = { text: string; cell: string };
 /**
  * A parser-authored workbook declaration the model may cite for a work-package
- * scope: the declared subject, or the title block of a sheet in this group.
- * Both carry a real source id and an exact cell locator, so a scope claim stays
- * traceable instead of resting on an uncited parser string.
+ * scope. Key, value, and title are separate source references with exact cells.
  */
 type GroupContextSource = {
   sourceId: string;
   chunkIndex: number;
-  kind: "declared_subject" | "sheet_title";
+  kind: "declared_subject_key" | "declared_subject" | "sheet_title";
   sheetName: string;
   cellReference: string;
   text: string;
   subjectValue: string | null;
+  pairedSourceId?: string;
 };
 type ChunkGroup = {
   groupIndex: number;
@@ -384,7 +391,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/22";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/23";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -501,6 +508,21 @@ export async function extractDocumentGroups(
   )) {
     return failure("invalid_parser_output", "The parser returned missing, nonsequential, or oversized source chunks.");
   }
+  const sourceIds = new Set<string>();
+  for (const chunk of chunks) {
+    for (const source of sourceReferencesForChunk(chunk)) {
+      if (
+        typeof source.sourceId !== "string" ||
+        !source.sourceId.trim() ||
+        source.sourceId !== source.sourceId.trim() ||
+        sourceIds.has(source.sourceId)
+      ) {
+        return failure("invalid_parser_output", "The parser returned missing or colliding source IDs.");
+      }
+      sourceIds.add(source.sourceId);
+    }
+  }
+
 
   if (chunks.length > MAX_DOCUMENT_CHUNKS) {
     return failure(
@@ -682,6 +704,11 @@ export async function extractDocumentGroups(
   };
 }
 
+function containsSourcePhrase(text: string, phrase: string) {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped}(?=$|[^\\p{L}\\p{N}_])`, "iu").test(text);
+}
+
 function buildChunkGroups(
   chunks: ParsedChunk[],
   contentHash: string,
@@ -700,13 +727,15 @@ function buildChunkGroups(
       const value = subject.value;
       const key = subject.key;
       const sheetName = subject.sheetName;
+      const keyCell = subject.keyCell;
       const valueCell = subject.valueCell;
       return typeof value === "string" &&
         value.trim().length > 0 &&
         typeof key === "string" &&
         typeof sheetName === "string" &&
+        typeof keyCell === "string" &&
         typeof valueCell === "string"
-        ? [{ value: value.trim(), key, sheetName, valueCell }]
+        ? [{ value: value.trim(), key, sheetName, keyCell, valueCell }]
         : [];
     });
   const sheetTitles = Object.fromEntries(
@@ -728,17 +757,27 @@ function buildChunkGroups(
     allReferences.find(
       (reference) =>
         reference.sourceLocation?.sheetName === sheetName &&
-        reference.sourceLocation?.cellRangeStart === cell,
+        reference.sourceLocation?.cellRangeStart === cell &&
+        reference.sourceLocation?.cellRangeEnd === cell,
     );
-  // Only the subjects a sheet in this group itself states may be offered to the
-  // model; a subject that only another sheet states would be a cross-sheet guess.
-  const statedSubjects = (groupSheets: Set<string>) =>
-    subjects.filter((subject) =>
-      [...groupSheets].some((sheetName) =>
-        (sheetTitles[sheetName]?.text ?? "").toLocaleLowerCase()
-          .includes(subject.value.toLocaleLowerCase()),
-      ),
-    );
+  // Only one distinct key/value association may match this group's exact
+  // sheet title. Repeated identical declarations are redundant; conflicting
+  // matches are ambiguous and provide no scope context.
+  const statedSubjects = (groupSheets: Set<string>) => {
+    const associations = new Map<string, WorkbookSubject>();
+    for (const subject of subjects) {
+      const statedByGroupTitle = [...groupSheets].some((sheetName) => {
+        const title = sheetTitles[sheetName];
+        const reference = title ? referenceAt(sheetName, title.cell) : undefined;
+        return reference && containsSourcePhrase(reference.modelText, subject.value);
+      });
+      if (!statedByGroupTitle) continue;
+      const key = `${subject.key.trim().toLocaleLowerCase()}\0${subject.value.trim().toLocaleLowerCase()}`;
+      if (!associations.has(key)) associations.set(key, subject);
+    }
+    return associations.size === 1 ? [...associations.values()] : [];
+  };
+
 
   const flush = () => {
     if (!current.length) return;
@@ -770,39 +809,72 @@ function buildChunkGroups(
         .map((chunk) => chunk.sourceLocation?.sheetName)
         .filter((sheetName): sheetName is string => typeof sheetName === "string"),
     );
-    const contextSources = [
-      ...statedSubjects(groupSheets).flatMap((subject): GroupContextSource[] => {
-        const reference = referenceAt(subject.sheetName, subject.valueCell);
-        return reference
-          ? [{
-              sourceId: reference.sourceId,
-              chunkIndex: reference.chunkIndex,
-              kind: "declared_subject",
-              sheetName: subject.sheetName,
-              cellReference: subject.valueCell,
-              text: `${subject.key}: ${subject.value}`.slice(0, 300),
-              subjectValue: subject.value,
-            }]
-          : [];
-      }),
-      ...[...groupSheets].flatMap((sheetName): GroupContextSource[] => {
-        const title = sheetTitles[sheetName];
-        const reference = title ? referenceAt(sheetName, title.cell) : undefined;
-        return title && reference
-          ? [{
-              sourceId: reference.sourceId,
-              chunkIndex: reference.chunkIndex,
-              kind: "sheet_title",
-              sheetName,
-              cellReference: title.cell,
-              text: reference.modelText.slice(0, 300),
-              subjectValue: null,
-            }]
-          : [];
-      }),
-    ].filter(
-      (entry, index, all) => all.findIndex((other) => other.sourceId === entry.sourceId) === index,
-    ).slice(0, 6);
+    const titleContexts = [...groupSheets].flatMap((sheetName): GroupContextSource[] => {
+      const title = sheetTitles[sheetName];
+      const reference = title ? referenceAt(sheetName, title.cell) : undefined;
+      return reference && reference.modelText.trim() && reference.modelText.length <= 300
+        ? [{
+            sourceId: reference.sourceId,
+            chunkIndex: reference.chunkIndex,
+            kind: "sheet_title",
+            sheetName,
+            cellReference: title!.cell,
+            text: reference.modelText,
+            subjectValue: null,
+          }]
+        : [];
+    });
+    const contextSources: GroupContextSource[] = [];
+    for (const subject of statedSubjects(groupSheets)) {
+      const keyReference = referenceAt(subject.sheetName, subject.keyCell);
+      const valueReference = referenceAt(subject.sheetName, subject.valueCell);
+      const title = titleContexts.find((context) =>
+        containsSourcePhrase(context.text, subject.value),
+      );
+      if (
+        !keyReference ||
+        !valueReference ||
+        !keyReference.modelText.trim() ||
+        !valueReference.modelText.trim() ||
+        keyReference.modelText.length > 300 ||
+        valueReference.modelText.length > 300 ||
+        !title ||
+        keyReference.cell?.rawValue.trim() !== subject.key.trim() ||
+        valueReference.cell?.rawValue.trim() !== subject.value
+      ) {
+        continue;
+      }
+      const keyContext: GroupContextSource = {
+        sourceId: keyReference.sourceId,
+        chunkIndex: keyReference.chunkIndex,
+        kind: "declared_subject_key",
+        sheetName: subject.sheetName,
+        cellReference: subject.keyCell,
+        text: keyReference.modelText,
+        subjectValue: subject.value,
+        pairedSourceId: valueReference.sourceId,
+      };
+      const valueContext: GroupContextSource = {
+        sourceId: valueReference.sourceId,
+        chunkIndex: valueReference.chunkIndex,
+        kind: "declared_subject",
+        sheetName: subject.sheetName,
+        cellReference: subject.valueCell,
+        text: valueReference.modelText,
+        subjectValue: subject.value,
+        pairedSourceId: keyReference.sourceId,
+      };
+      const additions = [keyContext, valueContext, title].filter(
+        (context) => !contextSources.some((entry) => entry.sourceId === context.sourceId),
+      );
+      if (contextSources.length + additions.length <= 6) contextSources.push(...additions);
+    }
+    for (const title of titleContexts) {
+      if (contextSources.length >= 6) break;
+      if (!contextSources.some((entry) => entry.sourceId === title.sourceId)) {
+        contextSources.push(title);
+      }
+    }
     groups.push({
       groupIndex,
       chunkStartIndex,
@@ -1002,7 +1074,12 @@ function allowedSourceCitations(group: ChunkGroup) {
     group.chunks.flatMap((chunk) =>
       sourceReferencesForChunk(chunk).map((source) => [
         source.sourceId,
-        { evidence_chunk_index: source.chunkIndex, excerpt: source.text, source_location: source.sourceLocation },
+        {
+          source_id: source.sourceId,
+          evidence_chunk_index: source.chunkIndex,
+          excerpt: source.text,
+          source_location: source.sourceLocation,
+        },
       ] as const),
     ),
   );
@@ -1069,14 +1146,7 @@ function citationHasUnavailableFormula(
   group: ChunkGroup,
   citation: SourceCitation | null,
 ): boolean {
-  if (!citation) return false;
-  return group.chunks.some((chunk) =>
-    sourceReferencesForChunk(chunk).some((reference) =>
-      reference.chunkIndex === citation.evidence_chunk_index &&
-      reference.text === citation.excerpt &&
-      referenceHasUnavailableFormula(chunk, reference),
-    ),
-  );
+  return citation ? sourceHasUnavailableFormula(group, citation.source_id) : false;
 }
 
 function resolveSheetSourceLocations(
@@ -1386,6 +1456,7 @@ ${group.contextSources.length ? `DOCUMENT_CONTEXT_REFERENCES_JSON=${JSON.stringi
   sheet_name: context.sheetName,
   cell: context.cellReference,
   text: context.text,
+  paired_source_id: context.pairedSourceId ?? null,
 })))}
 ` : ""}
 Required JSON schema:
@@ -1412,7 +1483,7 @@ Health status_text and source_summary fields must each be nonempty strings no lo
 Group metadata suggestions are limited to document date, reporting period, and workstream. Every non-null suggestion requires a valid source_id.
 For cost observations, source_value must be text present in the cited source and scope_level "wbs" requires the work-package code or name in scope_label. For a WBS value, also capture the work package's stated identity from the source: wbs_code (its own code), wbs_parent_code (its parent's code), wbs_name (its name), and scope_description (its stated deliverable or scope). Leave any of these null when the source does not state it, and never invent a code or a canonical identity. For a project-total value leave all four null. Report as_of_date as YYYY-MM-DD and leave period_label as the source's own wording. Return [] when these sources state no cost value.
 - Every assurance observation requires an excerpt and citation source_id from this group. Each non-null raw value, label, status, rating, owner, mitigation, WBS, and normalized date/number must be supported by that excerpt. Use null rather than interpreting a formula without a stored cache. Return all four arrays even when empty.
-- DOCUMENT_CONTEXT_REFERENCES_JSON lists parser-authored workbook declarations for this artifact: a declared subject and the title block of a sheet in this group. Use them only for a work-package scope: copy the exact subject wording into scope_label and cite that subject reference in scope_source_id. Never cite them for values, dates, facts, or summaries, and never invent a scope the supplied references do not state.
+- DOCUMENT_CONTEXT_REFERENCES_JSON exposes parser-authored key and value cells separately, each with its own source_id, exact cell, and verbatim model-visible text. Their reciprocal paired_source_id fields link only the parser-authored key/value pair. Use them only to establish a work-package scope. For a declared subject, set scope_source_id to the declared_subject value-cell source_id; the paired declared_subject_key cell and the cited sheet_title cell prove the association. Never concatenate key/value text into a citation or use context references for values, dates, facts, or summaries.
 Report document dates as YYYY-MM-DD and reporting periods as their first day YYYY-MM-01.
 sheet_interpretation is candidate-only and may appear only for parser-flagged ambiguous XLSX groups. Never invent cells, sheets, headers, cached values, dates, owners, or formula results. Cite each header, column role, and observation with source_ids from this group. The worker resolves those IDs to parser-authored sheet/cell/range locators; never provide locators yourself. Each header label and observation raw_value must be exact text present in its cited source. Normalized values remain candidates and must not replace raw evidence. If the group is not flagged ambiguous, omit the field.${correction}`;
 }
@@ -1673,17 +1744,9 @@ function validateGroupExtraction(
   const RECORD_DATE_CUE = /\b(?:cut[\s-]?off|as[\s-]?of|report(?:ing|ed)?\s*(?:date|period)|period|periode)\b/i;
   const DUE_DATE_CUE = /\b(?:due|target|start|finish|milestone|planned|actual|baseline|mitigation|submission|delivery|approval)\b/i;
   const SCOPE_COLUMN_CUE = /\b(?:sub[\s-]?system|component|work\s*package|discipline|package|scope|activity|task|wbs)\b/i;
+  const PERIOD_COLUMN_CUE = /\b(?:week|weekly|report(?:ing)?\s*period|period|periode|month|monthly|minggu|pekan|bulan)\b/i;
   const referenceForCitation = (citation: SourceCitation | null) => {
-    if (!citation) return undefined;
-    for (const chunk of group.chunks) {
-      const reference = sourceReferencesForChunk(chunk).find(
-        (source) =>
-          source.chunkIndex === citation.evidence_chunk_index &&
-          source.text === citation.excerpt,
-      );
-      if (reference) return reference;
-    }
-    return undefined;
+    return citation?.source_id ? findSourceReference(group, citation.source_id) : undefined;
   };
   const cellLabel = (cell: ParsedSourceCell) => cell.label ?? "";
   const isRecordColumn = (cell: ParsedSourceCell) =>
@@ -1776,11 +1839,50 @@ function validateGroupExtraction(
       : dueDateError(citation, date, path);
     if (error) rowErrors.push(error);
   };
-  // Where a proven scope came from, or null when the cited source cannot prove
-  // it. Every returned location is exact and is persisted with the observation.
-  // The document-context branch requires the model to cite the declared subject
-  // itself (scope_source_id) and that a sheet in this group titles that subject,
-  // so neither an uncited parser string nor another sheet's scope can be used.
+  const periodLabelError = (
+    citation: SourceCitation | null,
+    claimed: string,
+    path: string,
+  ): string | null => {
+    const reference = referenceForCitation(citation);
+    const rowCells = reference?.rowCells;
+    if (rowCells?.length) {
+      const periodColumns = rowCells.filter((cell) => PERIOD_COLUMN_CUE.test(cellLabel(cell)));
+      if (periodColumns.length > 1) {
+        return `${path} is ambiguous: the cited row has more than one period column (${periodColumns.map(cellLabel).join(", ")})`;
+      }
+      const periodCell = periodColumns[0];
+      return periodCell?.value.trim().toLocaleLowerCase() === claimed.trim().toLocaleLowerCase()
+        ? null
+        : `${path} cannot be attributed to a matching period column in the cited row`;
+    }
+    const cell = reference?.cell;
+    if (cell) {
+      return PERIOD_COLUMN_CUE.test(cellLabel(cell)) &&
+          cell.value.trim().toLocaleLowerCase() === claimed.trim().toLocaleLowerCase()
+        ? null
+        : `${path} cannot be attributed to a matching period column in the cited source`;
+    }
+    return reference?.sourceLocation?.kind === "xlsx"
+      ? `${path} cannot be attributed to a period column in the cited source`
+      : null;
+  };
+  const checkPeriodLabel = (
+    citation: SourceCitation | null,
+    periodLabel: string | null,
+    path: string,
+    rowErrors: string[],
+  ) => {
+    if (!periodLabel) return;
+    const error = periodLabelError(citation, periodLabel, path);
+    if (error) {
+      rowErrors.push(error);
+    } else if (citation && !citation.excerpt.toLocaleLowerCase().includes(periodLabel.toLocaleLowerCase())) {
+      rowErrors.push(`${path} is not present in the cited source`);
+    }
+  };
+  // Scope provenance resolves through the exact source IDs and canonical texts
+  // shown to the model, including both cells of a declared subject.
   const scopeProvenance = (
     citation: SourceCitation | null,
     scopeLabel: string,
@@ -1793,20 +1895,39 @@ function validateGroupExtraction(
         SCOPE_COLUMN_CUE.test(cell.label) &&
         cell.value.trim().toLocaleLowerCase() === scopeLabel.toLocaleLowerCase(),
     );
-    if (rowColumn) {
+    const rowColumnReference = rowColumn
+      ? group.chunks.flatMap((chunk) => sourceReferencesForChunk(chunk)).find(
+          (source) =>
+            source.cell?.cell === rowColumn.cell &&
+            source.sourceLocation?.sheetName === rowColumn.sheetName &&
+            source.sourceLocation.cellRangeStart === rowColumn.cell &&
+            source.sourceLocation.cellRangeEnd === rowColumn.cell,
+        )
+      : undefined;
+    if (rowColumn && rowColumnReference) {
       return [{
         kind: "cited_row_column",
+        source_id: rowColumnReference.sourceId,
         sheet_name: rowColumn.sheetName,
         cell_reference: rowColumn.cell,
-        excerpt: rowColumn.value,
+        excerpt: rowColumnReference.modelText,
       }];
     }
     const subject = scopeSourceId
       ? group.contextSources.find((context) => context.sourceId === scopeSourceId)
       : undefined;
+    const subjectKey = subject?.pairedSourceId
+      ? group.contextSources.find(
+          (context) =>
+            context.sourceId === subject.pairedSourceId &&
+            context.pairedSourceId === subject.sourceId &&
+            context.kind === "declared_subject_key",
+        )
+      : undefined;
     if (
       !subject ||
       subject.kind !== "declared_subject" ||
+      !subjectKey ||
       subject.subjectValue === null ||
       subject.subjectValue.toLocaleLowerCase() !== scopeLabel.toLocaleLowerCase()
     ) {
@@ -1819,18 +1940,27 @@ function validateGroupExtraction(
       (context) =>
         context.kind === "sheet_title" &&
         context.sheetName === sheetName &&
-        context.text.toLocaleLowerCase().includes(subjectValue.toLocaleLowerCase()),
+        containsSourcePhrase(context.text, subjectValue),
     );
     if (!title) return null;
     return [
       {
+        kind: "declared_subject_key",
+        source_id: subjectKey.sourceId,
+        sheet_name: subjectKey.sheetName,
+        cell_reference: subjectKey.cellReference,
+        excerpt: subjectKey.text,
+      },
+      {
         kind: "declared_subject",
+        source_id: subject.sourceId,
         sheet_name: subject.sheetName,
         cell_reference: subject.cellReference,
         excerpt: subject.text,
       },
       {
         kind: "sheet_title",
+        source_id: title.sourceId,
         sheet_name: title.sheetName,
         cell_reference: title.cellReference,
         excerpt: title.text,
@@ -2133,9 +2263,7 @@ function validateGroupExtraction(
         // states them. A date or period copied from another cell or snapshot is
         // not traceable, so it is excluded instead of being trusted.
         if (citation) {
-          if (periodLabel && !citation.excerpt.toLocaleLowerCase().includes(periodLabel.toLocaleLowerCase())) {
-            rowErrors.push(`${path}.period_label is not present in the cited source`);
-          }
+          checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors);
           if (asOfDate && !citation.excerpt.includes(asOfDate)) {
             rowErrors.push(`${path}.as_of_date is not present in the cited source`);
           }
@@ -2263,10 +2391,13 @@ function validateGroupExtraction(
     const scopeEvidence = scopeLabel
       ? scopeProvenance(citation, scopeLabel, scopeSourceId)
       : null;
+    if (scopeSourceId && (!scopeEvidence || scopeEvidence[0].kind !== "declared_subject")) {
+      rowErrors.push(`${path}.scope_source_id must cite the matching declared subject value cell`);
+    }
     if (scopeLabel && !textIsCited(scopeLabel, excerpt) && !scopeEvidence) {
       rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
     }
-    if (!textIsCited(periodLabel, excerpt)) rowErrors.push(`${path}.period_label is not present in the cited excerpt`);
+    checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors);
     if (!rawDate && !date) rowErrors.push(`${path} must contain a source-reported date`);
     if (rowErrors.length) {
       warnObservationInvalidRow("schedule", path, rowErrors);
@@ -2321,10 +2452,13 @@ function validateGroupExtraction(
     const scopeEvidence = scopeLabel
       ? scopeProvenance(citation, scopeLabel, scopeSourceId)
       : null;
+    if (scopeSourceId && (!scopeEvidence || scopeEvidence[0].kind !== "declared_subject")) {
+      rowErrors.push(`${path}.scope_source_id must cite the matching declared subject value cell`);
+    }
     if (scopeLabel && !textIsCited(scopeLabel, excerpt) && !scopeEvidence) {
       rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
     }
-    if (!textIsCited(periodLabel, excerpt)) rowErrors.push(`${path}.period_label is not present in the cited excerpt`);
+    checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors);
     const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
     checkDate(citation, asOfDate, `${path}.as_of_date`, rowErrors, "record");
     if (rowErrors.length) {
@@ -2373,10 +2507,11 @@ function validateGroupExtraction(
     const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
     checkDate(citation, mitigationDueDate, `${path}.mitigation_due_date`, rowErrors, "due");
     checkDate(citation, asOfDate, `${path}.as_of_date`, rowErrors, "record");
+    checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors);
     for (const [field, candidate] of [
       ["risk_id", riskId], ["name", name], ["description", description], ["status", status],
       ["rating_label", ratingLabel], ["scale_label", scaleLabel], ["owner", owner],
-      ["mitigation", mitigation], ["wbs", wbs], ["period_label", periodLabel],
+      ["mitigation", mitigation], ["wbs", wbs],
       ["raw_mitigation_due_date", rawMitigationDueDate], ["raw_value", rawValue],
     ] as const) {
       if (!textIsCited(candidate, excerpt)) rowErrors.push(`${path}.${field} is not present in the cited excerpt`);
@@ -2435,7 +2570,7 @@ function validateGroupExtraction(
       rowErrors.push(`${path}.state is not supported by its cited wording`);
     }
     if (rawValue && !excerpt?.includes(rawValue)) rowErrors.push(`${path}.raw_value is not present in the cited excerpt`);
-    if (!textIsCited(periodLabel, excerpt)) rowErrors.push(`${path}.period_label is not present in the cited excerpt`);
+    checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors);
     if (rowErrors.length) {
       warnObservationInvalidRow("risk", path, rowErrors);
       return;
@@ -2907,17 +3042,21 @@ function requiredCitation(
   fromCache = false,
 ): SourceCitation | null {
   if (fromCache && value.source_id === undefined) {
-    for (const citation of allowedSources.values()) {
-      if (
+    const matches = [...allowedSources.values()].filter(
+      (citation) =>
         citation.evidence_chunk_index === value.evidence_chunk_index &&
-        typeof value.excerpt === "string" && value.excerpt.length > 0 && citation.excerpt.includes(value.excerpt) &&
+        typeof value.excerpt === "string" &&
+        value.excerpt.length > 0 &&
+        citation.excerpt.includes(value.excerpt) &&
         (value.source_location === undefined ||
-          JSON.stringify(citation.source_location) === JSON.stringify(value.source_location))
-      ) {
-        return citation;
-      }
-    }
-    errors.push(`${path}.cached citation does not match a supplied source reference`);
+          JSON.stringify(citation.source_location) === JSON.stringify(value.source_location)),
+    );
+    if (matches.length === 1) return matches[0];
+    errors.push(
+      matches.length
+        ? `${path}.cached citation is ambiguous across supplied source references`
+        : `${path}.cached citation does not match a supplied source reference`,
+    );
     return null;
   }
   const sourceId = value.source_id;
@@ -3358,7 +3497,10 @@ function aggregateSuggestions(
 }
 
 function uniqueCitations<T extends SourceCitation>(citations: T[]): T[] {
-  return uniqueBy(citations, (citation) => `${citation.evidence_chunk_index}\0${citation.excerpt}`);
+  return uniqueBy(
+    citations,
+    (citation) => citation.source_id ?? `${citation.evidence_chunk_index}\0${citation.excerpt}`,
+  );
 }
 
 function uniqueBy<T>(values: T[], keyFor: (value: T) => string): T[] {

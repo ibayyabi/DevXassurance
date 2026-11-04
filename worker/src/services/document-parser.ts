@@ -360,7 +360,7 @@ type ZipTextReader = {
 
 // Bump whenever parsed chunk/source-reference output changes: cached extraction
 // groups are keyed by this version, so older rows are never reused.
-const PARSER_VERSION = "document-parser/12";
+const PARSER_VERSION = "document-parser/13";
 const MAX_CHUNK_LENGTH = 4000;
 // Growth ceiling per chunk: retained row references always fit, then cell
 // references are added row by row. Cells left uncovered stay citable through
@@ -643,6 +643,7 @@ async function parseXlsxDocument(
       value: string;
       key: string;
       sheetName: string;
+      keyCell: string;
       valueCell: string;
     }> = [];
     const sheetTitles: Record<string, { text: string; cell: string }> = {};
@@ -733,11 +734,44 @@ async function parseXlsxDocument(
           .sort(([left], [right]) => left - right)
           .map(([column, label]) => `${columnLetters(column)}: ${label}`)
           .join(" | ");
-        // The first table header of a sheet is its title block, which names the
-        // sheet's own subject.
-        if (!(sheet.name in sheetTitles)) {
-          sheetTitles[sheet.name] = { text: headerText, cell: headerCells[0].reference };
+        // A title citation must name one literal cell, not the concatenated
+        // header row that happens to begin at that cell.
+        const titleCell = tableRows
+          .slice(0, headerCount)
+          .flatMap((row) => row.cells.map((cell) => ({ row, cell })))
+          .find(({ cell }) => cell.textual && !cell.formula && cell.value.trim());
+        const titleCellText = titleCell
+          ? `${columnLetters(columnNumber(titleCell.cell.reference) ?? 0) || "Cell"}: ${titleCell.cell.value}`
+          : null;
+        if (!(sheet.name in sheetTitles) && titleCell && titleCellText) {
+          sheetTitles[sheet.name] = { text: titleCellText, cell: titleCell.cell.reference };
         }
+        const titleCellReferences: SourceCellReference[] =
+          titleCell && titleCellText
+            ? [{
+                text: titleCellText,
+                modelText: titleCellText,
+                location: {
+                  kind: "xlsx",
+                  sheetName: sheet.name,
+                  tableNumber: tableIndex,
+                  rowStart: titleCell.row.number,
+                  rowEnd: titleCell.row.number,
+                  cellRangeStart: titleCell.cell.reference,
+                  cellRangeEnd: titleCell.cell.reference,
+                },
+                cell: {
+                  sheetName: sheet.name,
+                  row: titleCell.row.number,
+                  column: columnLetters(columnNumber(titleCell.cell.reference) ?? 0),
+                  cell: titleCell.cell.reference,
+                  label: null,
+                  value: titleCell.cell.value,
+                  rawValue: titleCell.cell.value,
+                  dateIso: null,
+                },
+              }]
+            : [];
         blocks.push({
           text: headerText,
           kind: "table-header",
@@ -751,6 +785,7 @@ async function parseXlsxDocument(
             cellRangeStart: headerCells[0].reference,
             cellRangeEnd: headerCells[headerCells.length - 1].reference,
           },
+          cellReferences: titleCellReferences,
           groupKey: `sheet:${sheet.name}:table:${tableIndex}`,
           sectionLabel: sheet.name,
         });
@@ -824,27 +859,37 @@ async function parseXlsxDocument(
           // reference stays citable against exactly what the model was shown.
           const text = `${modelText}${cells.map((cell) => cell.annotation).filter(Boolean).join("")}`;
           const rowCells = cells.map((cell) => cell.sourceCell);
-          // A key-value row whose key names the artifact's own subject declares
-          // the workbook's subject; only a data row (never a header) counts.
+          // A key-value row declares a workbook subject only when its cue and
+          // exactly one literal value share the row; multiple candidates or a
+          // formula result are ambiguous evidence, not a scope declaration.
           const keyCell = row.cells[0];
-          if (keyCell?.textual && SUBJECT_KEY_CUE.test(keyCell.value)) {
-            const subjectCell = row.cells.slice(1).find((cell) => cell.value.trim());
-            const subjectValue = subjectCell?.value.trim();
-            if (
-              subjectCell &&
-              subjectValue &&
-              !workbookSubjects.some(
-                (subject) =>
-                  subject.value === subjectValue && subject.sheetName === sheet.name,
-              )
-            ) {
-              workbookSubjects.push({
-                value: subjectValue,
-                key: keyCell.value.trim(),
-                sheetName: sheet.name,
-                valueCell: subjectCell.reference,
-              });
-            }
+          const subjectCells = row.cells.slice(1).filter(
+            (cell) => cell.value.trim() || cell.formulaCacheStatus !== "not_formula",
+          );
+          const subjectCell = subjectCells.length === 1 &&
+              subjectCells[0].textual &&
+              !subjectCells[0].formula
+            ? subjectCells[0]
+            : undefined;
+          const subjectValue = subjectCell?.value.trim();
+          if (
+            keyCell?.textual &&
+            !keyCell.formula &&
+            SUBJECT_KEY_CUE.test(keyCell.value) &&
+            subjectCell &&
+            subjectValue &&
+            !workbookSubjects.some(
+              (subject) =>
+                subject.value === subjectValue && subject.sheetName === sheet.name,
+            )
+          ) {
+            workbookSubjects.push({
+              value: subjectValue,
+              key: keyCell.value.trim(),
+              sheetName: sheet.name,
+              keyCell: keyCell.reference,
+              valueCell: subjectCell.reference,
+            });
           }
           if (row.cells.some((cell) => cell.dateFormat)) {
             warnings.push(`Sheet "${sheet.name}" contains date-formatted raw values; recognized dates are normalized and invalid or unavailable values need review.`);
