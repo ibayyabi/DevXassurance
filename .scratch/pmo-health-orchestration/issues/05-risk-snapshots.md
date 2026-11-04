@@ -14,3 +14,8 @@ Baca [rencana](../plan.md) dan periksa terlebih dahulu tiket/implementasi risk y
 - [ ] Kasus W6/W7 dibandingkan dengan expected-results hanya bila sumber dan identitas tersedia; tidak menghasilkan skor risiko gabungan.
 
 ## Comments
+
+- Persiapan read-only pada baseline: `buildRiskComparison` sudah ada di `src/features/assurance/lib/risk-comparison.ts`, tetapi saat ini menandai risiko yang hilang dari snapshot current sebagai `resolved`; ketiadaan evidence bukan bukti closed. Status closed eksplisit pada sumber juga perlu diperlakukan terpisah.
+- Periode observasi belum menjadi syarat pembandingan dan peran `baseline/current` belum membedakan previous snapshot dari approved baseline. Tampilkan gap untuk coverage belum diproses atau snapshot yang tidak sebanding.
+- W5 Alarm menyatakan `R-SB01-001` dan `R-SB01-002`; label skala seperti Medium/High tidak otomatis membuktikan peringkat numerik. Ikat kutipan dengan identitas file/versi dan tanggal yang terbukti.
+- Periksa kembali keselarasan mapping yang dipakai comparator dengan fingerprint analisis, serta RPC mapping atomic yang sudah ada. Temuan ini berasal dari baseline dan harus diverifikasi lagi setelah tiket 03 terintegrasi.

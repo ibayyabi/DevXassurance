@@ -14,3 +14,7 @@ Baca [rencana](../plan.md). Diagnosis `stale_claim_token` menggunakan job test t
 - [ ] Verifikasi menggunakan simulated lease/clock dan provider fixture; tidak melakukan panggilan cloud.
 
 ## Comments
+
+- Persiapan read-only pada baseline: lease job berlangsung 15 menit, sedangkan timeout workflow n8n dapat mencapai 3 jam. Checkpoint memperpanjang lease, tetapi tahapan panjang tanpa checkpoint berpotensi kehilangan claim; ini bukan bukti penyebab historis job pengguna.
+- RPC fencing dan checkpoint sudah ada. Pertahankan token/lease saat recovery; uji kehilangan lease di tengah proses serta 429 dengan provider fixture, tanpa retry massal atau mengubah coverage menjadi absent.
+- Detail dokumen masih menggabungkan queued/processing dan belum menampilkan penyebab, backoff, serta tindakan pemulihan berdasarkan status job. Setiap pembacaan diagnostik harus tetap project-scoped dan mengikuti role.
