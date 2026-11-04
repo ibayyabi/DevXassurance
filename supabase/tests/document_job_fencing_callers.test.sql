@@ -6,7 +6,7 @@
 --   psql -v ON_ERROR_STOP=1 -f supabase/tests/document_job_fencing_callers.test.sql
 
 begin;
-select plan(63);
+select plan(69);
 
 insert into auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, created_at, updated_at)
 values ('40000000-0000-4000-8000-000000000001', 'authenticated', 'authenticated', 'caller-fencing@example.invalid', '', now(), '{}'::jsonb, now(), now())
@@ -77,9 +77,27 @@ select is(
     (select id from public.ai_jobs where claim_token = 'bbbbbbbb-0000-4000-8000-0000000000bb'),
     'bbbbbbbb-0000-4000-8000-0000000000bb', repeat('a', 64), 'document-parser/6',
     'pmo-assurance-observations/1',
-    jsonb_build_array(jsonb_build_object('measure', 'eac', 'source_value', 'USD 100', 'scope_level', 'project',
+    jsonb_build_array(jsonb_build_object(
+      'measure', 'eac', 'source_value', 'USD 100', 'scope_level', 'wbs',
+      'scope_label', 'Alarm Kebencanaan', 'scope_source_id', 'subject-value',
+      'scope_provenance', jsonb_build_array(
+        jsonb_build_object('kind', 'declared_subject_key', 'source_id', 'subject-key', 'sheet_name', 'Project Info', 'cell_reference', 'A5', 'excerpt', 'Subsystem / Scope'),
+        jsonb_build_object('kind', 'declared_subject', 'source_id', 'subject-value', 'sheet_name', 'Project Info', 'cell_reference', 'B5', 'excerpt', 'Alarm Kebencanaan'),
+        jsonb_build_object('kind', 'sheet_title', 'source_id', 'weekly-title', 'sheet_name', 'Weekly Report', 'cell_reference', 'A1', 'excerpt', 'Weekly progress report - Alarm Kebencanaan')),
       'evidence_chunk_index', 0, 'excerpt', 'Owner B chunk zero.', 'provider', 'fixture', 'model', 'fixture')))),
   1, 'owner B persists versioned cost observations through the fenced RPC'
+);
+select is(
+  (select scope_source_id from public.cost_observations where document_id = '40000000-0000-4000-8000-000000000011'),
+  'subject-value', 'cost scope source id is persisted'
+);
+select is(
+  (select scope_provenance from public.cost_observations where document_id = '40000000-0000-4000-8000-000000000011'),
+  jsonb_build_array(
+    jsonb_build_object('kind', 'declared_subject_key', 'source_id', 'subject-key', 'sheet_name', 'Project Info', 'cell_reference', 'A5', 'excerpt', 'Subsystem / Scope'),
+    jsonb_build_object('kind', 'declared_subject', 'source_id', 'subject-value', 'sheet_name', 'Project Info', 'cell_reference', 'B5', 'excerpt', 'Alarm Kebencanaan'),
+    jsonb_build_object('kind', 'sheet_title', 'source_id', 'weekly-title', 'sheet_name', 'Weekly Report', 'cell_reference', 'A1', 'excerpt', 'Weekly progress report - Alarm Kebencanaan')),
+  'cost scope provenance retains exact subject and title sources'
 );
 select is(
   (select public.persist_assurance_observations(
@@ -400,7 +418,7 @@ update public.ai_jobs set claim_token = 'bbbbbbbb-0000-4000-8000-0000000000dd'
 where id = :'fallback_job_id';
 
 select is(
-  (select (public.complete_document_job(
+  (select public.complete_document_job(
     :'fallback_job_id',
     'bbbbbbbb-0000-4000-8000-0000000000dd',
     jsonb_build_object(
@@ -411,12 +429,46 @@ select is(
       'summary_sources', jsonb_build_array(),
       'alerts', jsonb_build_array(),
       'actions', jsonb_build_array(),
-      'anomalies', jsonb_build_array())))->>'status'),
+      'anomalies', jsonb_build_array(),
+      'health_snapshots', jsonb_build_array(
+        jsonb_build_object('dimension', 'overall', 'score', 95, 'status', 'green',
+          'evidence_coverage', 0.9, 'status_text', 'Overall Status: Green',
+          'source_summary', 'Overall Status: Green', 'snapshot_date', '2026-06-30'),
+        jsonb_build_object('dimension', 'schedule', 'score', 80, 'status', 'green',
+          'evidence_coverage', 0.8, 'status_text', 'Schedule: Green',
+          'source_summary', 'Schedule: Green', 'snapshot_date', null)
+      )
+    )
+  )->>'status'),
   'completed', 'needs_review publication without a summary succeeds'
 );
 select is((select processing_status::text from public.documents where id = '40000000-0000-4000-8000-000000000016'), 'needs_review', 'fallback document lands as needs_review');
 select is((select count(*) from public.document_summaries), 0::bigint, 'no invented summary row for the fallback');
 select is((select status::text from public.extraction_runs where document_id = '40000000-0000-4000-8000-000000000016'), 'needs_review', 'extraction run records the needs_review terminal state');
+select is(
+  (select status::text from public.dashboard_health_snapshots
+    where project_id = '40000000-0000-4000-8000-000000000003'
+      and dimension = 'overall' and snapshot_date = '2026-06-30'),
+  'insufficient_evidence', 'needs_review health statuses are not promoted'
+);
+select is(
+  (select score from public.dashboard_health_snapshots
+    where project_id = '40000000-0000-4000-8000-000000000003'
+      and dimension = 'overall' and snapshot_date = '2026-06-30'),
+  null::numeric, 'source-reported status has no fabricated score'
+);
+select is(
+  (select status_text from public.dashboard_health_snapshots
+    where project_id = '40000000-0000-4000-8000-000000000003'
+      and dimension = 'overall' and snapshot_date = '2026-06-30'),
+  'Overall Status: Green', 'needs_review preserves the source-reported status text'
+);
+select is(
+  (select count(*) from public.dashboard_health_snapshots
+    where project_id = '40000000-0000-4000-8000-000000000003'
+      and source_summary = 'Schedule: Green'),
+  0::bigint, 'health snapshots without a source date are not assigned a fallback date'
+);
 
 -- ---------------------------------------------------------------------------
 -- Explicit lineage wins over the legacy source_path marker
