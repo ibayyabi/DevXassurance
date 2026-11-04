@@ -98,6 +98,24 @@ async function syntheticFormulaWorkbook() {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 }
 
+async function syntheticCachedFormulaWorkbook() {
+  const zip = new JSZip();
+  zip.file(
+    "xl/workbook.xml",
+    `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Cached formulas" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+  );
+  zip.file(
+    "xl/_rels/workbook.xml.rels",
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>`,
+  );
+  zip.file(
+    "xl/worksheets/sheet1.xml",
+    `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Record</t></is></c><c r="B1" t="inlineStr"><is><t>EAC</t></is></c><c r="C1" t="inlineStr"><is><t>Report Date</t></is></c><c r="D1" t="inlineStr"><is><t>Schedule Status</t></is></c><c r="E1" t="inlineStr"><is><t>Cost Status</t></is></c><c r="F1" t="inlineStr"><is><t>Actual %</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Formula row</t></is></c><c r="B2"><f>200+300</f><v>500</v></c><c r="C2" t="str"><f>TEXT(DATE(2026,10,16),&quot;yyyy-mm-dd&quot;)</f><v>2026-10-16</v></c><c r="D2" t="str"><f>IF(TRUE(),&quot;Green&quot;,&quot;Red&quot;)</f><v>Green</v></c><c r="E2" t="inlineStr"><is><t>Green</t></is></c><c r="F2"><v>0.125</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Literal row</t></is></c><c r="B3"><v>750</v></c><c r="C3" t="inlineStr"><is><t>2026-10-09</t></is></c><c r="D3" t="inlineStr"><is><t>Amber</t></is></c><c r="E3" t="inlineStr"><is><t>Green</t></is></c><c r="F3"><v>12.5</v></c></row></sheetData></worksheet>`,
+  );
+  const buffer = await zip.generateAsync({ type: "nodebuffer" });
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+}
+
 async function syntheticLocalizedWeeklyWorkbook() {
   const zip = new JSZip();
   zip.file(
@@ -898,6 +916,184 @@ test("a generated XLSX keeps a literal cell while a sibling formula has no cache
   );
   assert.equal(result.facts.some((fact) => fact.extracted_text.includes("Formula")), false);
   assert.equal(result.assurance_observations.progress.some((item) => item.percent === 0), false);
+});
+
+test("cached formulas remain review-only while literal siblings and percent headers stay usable", async () => {
+  const buffer = await syntheticCachedFormulaWorkbook();
+  const parsed = await parseDocumentBuffer("cached-formulas.xlsx", buffer);
+  assert.equal(parsed.ok, true, parsed.ok ? undefined : parsed.errorMessage);
+  if (!parsed.ok) return;
+  for (const cellReference of ["B2", "C2", "D2"]) {
+    assert.equal(
+      parsed.chunks.flatMap((chunk) => chunk.formulaCells ?? [])
+        .find((cell) => cell.cellReference === cellReference)?.formulaCacheStatus,
+      "cached_value",
+    );
+  }
+
+  const mock = async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    const cell = (reference) => references.find(
+      (source) =>
+        source.source_location?.cellRangeStart === reference &&
+        source.source_location?.cellRangeEnd === reference,
+    );
+    const row = (number) => references.find(
+      (source) =>
+        source.source_location?.rowStart === number &&
+        source.source_location?.rowEnd === number &&
+        source.source_location?.cellRangeStart === `A${number}` &&
+        source.source_location?.cellRangeEnd === `F${number}`,
+    );
+    const formulaRow = row(2);
+    const literalRow = row(3);
+    const formulaPercent = cell("F2");
+    const literalPercent = cell("F3");
+    assert.ok(formulaRow && literalRow && formulaPercent && literalPercent);
+
+    const output = baseGroupOutput(references);
+    output.health_snapshots = output.health_snapshots.map((snapshot) => ({
+      ...snapshot,
+      evidence_coverage: null,
+    }));
+    output.health_snapshots = output.health_snapshots.map((snapshot) => {
+      if (snapshot.dimension === "schedule") {
+        return {
+          ...snapshot,
+          status: "green",
+          status_text: "Green",
+          source_summary: formulaRow.text,
+          snapshot_date: "2026-10-16",
+          source_id: formulaRow.source_id,
+        };
+      }
+      if (snapshot.dimension === "cost") {
+        return {
+          ...snapshot,
+          status: "green",
+          status_text: "Green",
+          source_summary: literalRow.text,
+          snapshot_date: "2026-10-09",
+          source_id: literalRow.source_id,
+        };
+      }
+      return snapshot;
+    });
+    output.cost_observations = [
+      {
+        measure: "eac",
+        source_value: "500",
+        scope_level: "project",
+        scope_label: null,
+        scope_source_id: null,
+        wbs_code: null,
+        wbs_parent_code: null,
+        wbs_name: null,
+        scope_description: null,
+        period_label: null,
+        as_of_date: "2026-10-16",
+        status_label: null,
+        source_id: formulaRow.source_id,
+      },
+      {
+        measure: "eac",
+        source_value: "750",
+        scope_level: "project",
+        scope_label: null,
+        scope_source_id: null,
+        wbs_code: null,
+        wbs_parent_code: null,
+        wbs_name: null,
+        scope_description: null,
+        period_label: null,
+        as_of_date: "2026-10-09",
+        status_label: null,
+        source_id: literalRow.source_id,
+      },
+    ];
+    output.assurance_observations.progress = [
+      {
+        raw_value: "0.125",
+        percent: 0.125,
+        scope_level: "project",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: formulaPercent.text,
+        source_id: formulaPercent.source_id,
+      },
+      {
+        raw_value: "12.5",
+        percent: 12.5,
+        scope_level: "project",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: literalPercent.text,
+        source_id: literalPercent.source_id,
+      },
+      {
+        raw_value: "0.125",
+        percent: 12.5,
+        scope_level: "project",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: formulaPercent.text,
+        source_id: formulaPercent.source_id,
+      },
+    ];
+    output.group_metadata_suggestions = {
+      suggested_document_date: "2026-10-16",
+      detected_reporting_period: null,
+      suggested_workstream: null,
+      source_id: formulaRow.source_id,
+    };
+    return modelResponse(output);
+  };
+
+  const result = await withLocalOllama(mock, async () =>
+    await processDocumentJob(
+      job(buffer, { fileName: "cached-formulas.xlsx" }),
+      memoryGroupStore(),
+    ),
+  );
+  assert.equal(result.status, "completed", result.processing_error);
+  assert.equal(result.processing_status, "needs_review");
+  assert.equal(result.document_suggestions.suggested_document_date, null);
+  assert.deepEqual(
+    result.cost_observations.map(({ source_value, normalized_amount, as_of_date }) =>
+      [source_value, normalized_amount, as_of_date],
+    ),
+    [
+      ["500", null, null],
+      ["750", 750, "2026-10-09"],
+    ],
+  );
+  const snapshots = Object.fromEntries(
+    result.health_snapshots.map((snapshot) => [snapshot.dimension, snapshot]),
+  );
+  assert.equal(snapshots.schedule.status, "insufficient_evidence");
+  assert.equal(snapshots.schedule.snapshot_date, null);
+  assert.match(snapshots.schedule.source_summary, /freshness not established/);
+  assert.equal(snapshots.cost.status, "green");
+  assert.equal(snapshots.cost.snapshot_date, "2026-10-09");
+  assert.deepEqual(
+    result.assurance_observations.progress.map(({ percent, raw_value, source_location }) =>
+      [percent, raw_value, source_location.cellRangeStart],
+    ),
+    [
+      [0.125, "0.125", "F2"],
+      [12.5, "12.5", "F3"],
+    ],
+  );
+  assert.match(result.processing_error ?? "", /formula_cache_review_required/);
 });
 
 test("ambiguous or foreign workbook scope declarations are not offered or accepted", async () => {
@@ -1715,7 +1911,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
   assert.equal(cached.parserVersion, "document-parser/18");
-  assert.equal(cached.schemaVersion, "phase6-document-extraction/28");
+  assert.equal(cached.schemaVersion, "phase6-document-extraction/29");
 
   assert.equal(cached.status, "completed");
   assert.deepEqual(
@@ -1872,6 +2068,75 @@ test("narrative scope, period, and date claims stay tied to their source fields"
   assert.match(warnings, /progress\[1\].*scope_label must be supported by a structural scope source/);
   assert.match(warnings, /progress\[3\].*more than one explicitly labelled period value/);
   assert.match(warnings, /progress\[4\].*due or event date, not a record date/);
+});
+
+test("narrative scope labels must match the complete explicit field value", async () => {
+  const prefixText = "WBS: Alarm Kebencanaan, Actual %: 20.4%";
+  const completeText = "Work package: Alarm Kebencanaan - Unit A, Realisasi %: 12.5%";
+  const chunks = [{
+    chunkIndex: 0,
+    chunkText: `${prefixText}\n${completeText}`,
+    sourceReferences: [
+      ["narrative-prefix", prefixText],
+      ["narrative-complete", completeText],
+    ].map(([sourceId, text]) => ({
+      sourceId,
+      chunkIndex: 0,
+      text,
+      modelText: text,
+    })),
+  }];
+  const result = await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    const output = baseGroupOutput(references);
+    output.assurance_observations.progress = [
+      {
+        raw_value: "20.4%",
+        percent: 20.4,
+        scope_level: "wbs",
+        scope_label: "Alarm",
+        period_label: null,
+        as_of_date: null,
+        excerpt: references.find((reference) => reference.source_id === "narrative-prefix").text,
+        source_id: "narrative-prefix",
+      },
+      {
+        raw_value: "12.5%",
+        percent: 12.5,
+        scope_level: "wbs",
+        scope_label: "Alarm Kebencanaan - Unit A",
+        period_label: null,
+        as_of_date: null,
+        excerpt: references.find((reference) => reference.source_id === "narrative-complete").text,
+        source_id: "narrative-complete",
+      },
+    ];
+    return modelResponse(output);
+  }, async () =>
+    await extractDocumentGroups(
+      job(`${prefixText}\n${completeText}`, { fileName: "narrative-scope.txt" }),
+      chunks,
+      { parserVersion: "narrative-scope-prefix-v1" },
+      memoryGroupStore(),
+    ),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  assert.deepEqual(
+    result.extraction.assurance_observations.progress.map(({ percent, scope_label }) =>
+      [percent, scope_label],
+    ),
+    [[12.5, "Alarm Kebencanaan - Unit A"]],
+  );
+  assert.match(
+    result.extraction.quality_warnings.join(" "),
+    /progress\[0\].*scope_label must be supported by a structural scope source/,
+  );
 });
 
 test("health snapshots retain only explicit dimension statuses and record dates", async () => {

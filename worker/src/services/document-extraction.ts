@@ -393,7 +393,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/28";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/29";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -1027,7 +1027,9 @@ async function extractGroupWithCorrection(
         continue;
       }
       const retryableWarnings = validation.value.quality_warnings.filter(
-        (warning) => !warning.includes("formula_result_unavailable"),
+        (warning) =>
+          !warning.includes("formula_result_unavailable") &&
+          !warning.includes(FORMULA_CACHE_REVIEW_MARKER),
       );
       if (retryableWarnings.length && attempt < MAX_GROUP_ATTEMPTS) {
         corrections = retryableWarnings;
@@ -1157,7 +1159,101 @@ function citationHasUnavailableFormula(
 ): boolean {
   return citation ? sourceHasUnavailableFormula(group, citation.source_id) : false;
 }
+const UNAVAILABLE_FORMULA_STATUSES = ["missing_cache", "cached_empty", "cached_error", "unknown"];
+const FORMULA_CACHE_REVIEW_MARKER = "formula_cache_review_required";
 
+function citedReference(group: ChunkGroup, citation: SourceCitation | null | undefined) {
+  if (!citation?.source_id) return null;
+  for (const chunk of group.chunks) {
+    const reference = sourceReferencesForChunk(chunk).find((source) => source.sourceId === citation.source_id);
+    if (reference) return { chunk, reference };
+  }
+  return null;
+}
+
+function formulaCacheStatusForSourceCell(
+  group: ChunkGroup,
+  citation: SourceCitation | null | undefined,
+  sourceCell: ParsedSourceCell,
+): string | null {
+  const cited = citedReference(group, citation);
+  if (!cited) return null;
+  return cited.chunk.formulaCells?.find(
+    (formula) =>
+      formula.sheetName === sourceCell.sheetName &&
+      formula.cellReference === sourceCell.cell &&
+      formula.rowStart <= sourceCell.row &&
+      formula.rowEnd >= sourceCell.row,
+  )?.formulaCacheStatus ?? null;
+}
+
+function sourceCellMatchesCandidate(sourceCell: ParsedSourceCell, candidate: string): boolean {
+  const normalized = candidate.trim();
+  if (!normalized) return false;
+  if (
+    sourceCell.rawValue.trim() === normalized ||
+    sourceCell.dateIso === normalized
+  ) {
+    return true;
+  }
+  if (
+    /^\d{4}-\d{2}-01$/u.test(normalized) &&
+    (sourceCell.dateIso?.startsWith(normalized.slice(0, 7)) ||
+      sourceCell.rawValue.trim().startsWith(normalized.slice(0, 7)))
+  ) {
+    return true;
+  }
+  return !/^\d{4}-\d{2}-\d{2}$/u.test(normalized) &&
+    containsNumericValue(normalized) &&
+    citedTextSupportsNumericValue(normalized, sourceCell.rawValue);
+}
+
+function citedFormulaCacheStatusForValue(
+  group: ChunkGroup,
+  citation: SourceCitation | null | undefined,
+  candidate: string | null | undefined,
+): string | null {
+  if (!candidate) return null;
+  const cited = citedReference(group, citation);
+  if (!cited) return null;
+  const sourceCells = cited.reference.rowCells?.length
+    ? cited.reference.rowCells
+    : cited.reference.cell
+      ? [cited.reference.cell]
+      : [];
+  const statuses = sourceCells
+    .filter((sourceCell) => sourceCellMatchesCandidate(sourceCell, candidate))
+    .map((sourceCell) => formulaCacheStatusForSourceCell(group, citation, sourceCell))
+    .filter((status): status is string => status !== null);
+  if (statuses.includes("cached_value")) return "cached_value";
+  return statuses.find((status) => UNAVAILABLE_FORMULA_STATUSES.includes(status)) ?? null;
+}
+
+function sourceValueNeedsFormulaReview(status: string | null): boolean {
+  return status === "cached_value";
+}
+
+function citedPercentCellForClaim(
+  group: ChunkGroup,
+  citation: SourceCitation | null | undefined,
+  rawValue: string | null | undefined,
+  percentValue: number,
+): ParsedSourceCell | null {
+  if (!rawValue) return null;
+  const cited = citedReference(group, citation);
+  if (cited?.reference.sourceLocation?.kind !== "xlsx") return null;
+  const sourceCells = cited.reference.cell
+    ? [cited.reference.cell]
+    : cited.reference.rowCells ?? [];
+  const percentHeader = /(?:%|\bpercent(?:age)?\b|\bpersen\b)/iu;
+  const matches = sourceCells.filter(
+    (cell) =>
+      percentHeader.test(cell.label ?? "") &&
+      cell.rawValue.trim() === rawValue.trim() &&
+      citedTextSupportsNumericValue(String(percentValue), cell.rawValue),
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
 function resolveSheetSourceLocations(
   group: ChunkGroup,
   sourceIds: string[],
@@ -1437,7 +1533,7 @@ Rules:
 - This group may suggest document date, reporting period, and workstream only. Artifact type and evidence role are classified once from the document-level preview.
 - Use insufficient_evidence when a health dimension lacks direct evidence; absence of a negative statement is not evidence of green status.
 - A source-group health assessment is not a document comparison. Do not claim change or variance unless both values appear in these sources.
-- Formula expressions are not evaluated. Only cached values explicitly labeled as stored cache may be described. Missing, empty, or error cache yields formula_result_unavailable and must not generate numeric values, statuses, variances, progress, or facts. Do not recalculate, interpolate, or infer any formula result.
+- Formula expressions are never evaluated. A stored cached formula result is only a source-reported candidate whose freshness is not established; never treat it as a current date/status or comparable cost/progress value. Preserve an explicitly reported cost source_value as review-only raw text, but do not normalize it. Do not accept formula-derived report dates or health statuses as current. Missing, empty, or error cache yields formula_result_unavailable and must not generate numeric values, statuses, variances, progress, or facts. Do not recalculate, interpolate, or infer any formula result.
 - cost_observations collect project cost evidence found anywhere in these sources, whatever the artifact's primary type. Report one entry per stated cost value, copying source_value exactly as written in its cited source, including its currency wording and digit separators. Never convert, total, or restate a value.
 - Choose the cost measure from what the source says: approved_baseline (an approved or controlled budget reference), actual_to_date (cost already incurred), committed (contractually committed or ordered cost), eac (an explicitly reported total forecast or estimate at completion). Never record an actual or committed value as eac, and never record a value whose meaning the source does not state. Return [] only after processing this complete group and finding no cost values.
 - assurance_observations collect every source-backed milestone date, explicitly reported progress value, and item-level risk snapshot in this group, whatever the artifact's primary type. Do not infer baseline/current role; reviewer selection assigns that role later. Keep source scope, period, raw wording, and exact excerpt. Return [] for each array only when this complete group contains no such observation.
@@ -1835,7 +1931,7 @@ function validateGroupExtraction(
   const healthStatusFromCitation = (
     citation: SourceCitation | null | undefined,
     dimension: GroupHealthSnapshot["dimension"],
-  ): { status: "green" | "amber" | "red"; text: string } | null => {
+  ): { status: "green" | "amber" | "red"; text: string; sourceCell?: ParsedSourceCell } | null => {
     const reference = referenceForCitation(citation);
     if (!citation || !reference) return null;
     const cells = reference.rowCells?.length
@@ -1853,18 +1949,26 @@ function validateGroupExtraction(
       const isDimensionScopedLabel = (label: string) =>
         dimensionLabel.test(label.trim()) ||
         (dimension === "overall" && /^(?:health\s+status|rag(?:\s+status)?)$/iu.test(label.trim()));
+      const statusText = (cell: ParsedSourceCell) =>
+        /^(green|amber|red)$/iu.test(cell.rawValue.trim())
+          ? cell.rawValue.trim()
+          : cell.value.trim();
       const statusCells = cells.filter((cell) => {
         if (reference.cell && cell.cell !== reference.cell.cell) return false;
-        if (!/^(green|amber|red)$/iu.test(cell.value.trim())) return false;
+        if (!/^(green|amber|red)$/iu.test(statusText(cell))) return false;
         const label = cellLabel(cell).trim();
         return isDimensionScopedLabel(label) ||
           (/^(?:status|rag(?:\s+status)?)$/iu.test(label) && dimensionCells.length === 1);
       });
       if (statusCells.length !== 1) return null;
       const cell = statusCells[0];
-      const text = cell.value;
+      const text = statusText(cell);
       if (!citation.excerpt.toLocaleLowerCase().includes(text.trim().toLocaleLowerCase())) return null;
-      return { status: cell.value.trim().toLocaleLowerCase() as "green" | "amber" | "red", text };
+      return {
+        status: text.trim().toLocaleLowerCase() as "green" | "amber" | "red",
+        text,
+        sourceCell: cell,
+      };
     }
     if (reference.sourceLocation?.kind === "xlsx") return null;
     const pattern = new RegExp(
@@ -1879,11 +1983,24 @@ function validateGroupExtraction(
     };
   };
   const cellDateValue = (cell: ParsedSourceCell) =>
-    cell.dateIso ?? (isIsoDate(cell.value.trim()) ? cell.value.trim() : null);
+    cell.dateIso ??
+    (isIsoDate(cell.rawValue.trim())
+      ? cell.rawValue.trim()
+      : isIsoDate(cell.value.trim())
+        ? cell.value.trim()
+        : null);
   const isRecordColumn = (cell: ParsedSourceCell) =>
     RECORD_DATE_CUE.test(cellLabel(cell)) && !DUE_DATE_CUE.test(cellLabel(cell));
   const isDueColumn = (cell: ParsedSourceCell) =>
     DUE_DATE_CUE.test(cellLabel(cell)) && !RECORD_DATE_CUE.test(cellLabel(cell));
+  const formulaDateReviewError = (
+    citation: SourceCitation | null | undefined,
+    cell: ParsedSourceCell,
+    path: string,
+  ) =>
+    formulaCacheStatusForSourceCell(group, citation, cell) === "cached_value"
+      ? `${path} cites a stored formula result whose freshness is not established; it remains a source-reported candidate for review (${FORMULA_CACHE_REVIEW_MARKER})`
+      : null;
   // Returns an error string when the cited source cannot support the claimed
   // record date, or null when it can (or carries no column metadata).
   const asOfDateError = (
@@ -1904,9 +2021,8 @@ function validateGroupExtraction(
       if (recordColumns.length === 1) {
         const column = recordColumns[0];
         const dateValue = cellDateValue(column);
-        return dateValue === claimed
-          ? null
-          : `${path} is ${claimed}, but the cited row's "${cellLabel(column)}" column states ${dateValue}`;
+        if (dateValue === claimed) return formulaDateReviewError(citation, column, path);
+        return `${path} is ${claimed}, but the cited row's "${cellLabel(column)}" column states ${dateValue}`;
       }
       if (allowApprovalDate) {
         const approvalColumns = dateCells.filter((cell) => APPROVAL_DATE_CUE.test(cellLabel(cell)));
@@ -1916,9 +2032,8 @@ function validateGroupExtraction(
         if (approvalColumns.length === 1) {
           const column = approvalColumns[0];
           const dateValue = cellDateValue(column);
-          return dateValue === claimed
-            ? null
-            : `${path} is ${claimed}, but the cited row's "${cellLabel(column)}" column states ${dateValue}`;
+          if (dateValue === claimed) return formulaDateReviewError(citation, column, path);
+          return `${path} is ${claimed}, but the cited row's "${cellLabel(column)}" column states ${dateValue}`;
         }
       }
       const unrelated = dateCells.find((cell) => isDueColumn(cell) && cellDateValue(cell) === claimed);
@@ -1929,8 +2044,10 @@ function validateGroupExtraction(
     }
     const cell = reference?.cell;
     if (cell) {
-      if (isRecordColumn(cell)) return null;
-      if (allowApprovalDate && APPROVAL_DATE_CUE.test(cellLabel(cell))) return null;
+      if (isRecordColumn(cell)) return formulaDateReviewError(citation, cell, path);
+      if (allowApprovalDate && APPROVAL_DATE_CUE.test(cellLabel(cell))) {
+        return formulaDateReviewError(citation, cell, path);
+      }
       if (isDueColumn(cell)) {
         return `${path} is the value of the cited source's "${cellLabel(cell)}" column, not a cut-off or period date`;
       }
@@ -2106,11 +2223,13 @@ function validateGroupExtraction(
     if (!reference || reference.sourceLocation?.kind === "xlsx" || !evidenceAnchor?.trim()) {
       return false;
     }
-    const escaped = scopeLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const scopeValuePattern = new RegExp(
-      `^\\s*${escaped}(?=$|[^\\p{L}\\p{N}_])`,
-      "iu",
-    );
+    const escaped = scopeLabel.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const scopeValuePattern = new RegExp(`^\\s*${escaped}`, "iu");
+    const labelledFieldBoundary =
+      /^\s*[,，]\s*[\p{L}\p{N}_][\p{L}\p{N}_\s().%/_-]{0,79}\s*[:=]\s*$/u;
+    const narrativeFieldBoundary =
+      /^\s*[,，]?\s*(?:actual\b(?:\s*%|\s+percent(?:age)?|\s+progress|\s+to\s+date)?|progress\b|realisasi\b|kemajuan\b|completed\b|completion\b|forecast\b|ramalan\b|estimate(?:\s+at\s+completion)?\b|estimasi\b|eac\b|baseline\b|approved\b|disetujui\b|budget\b|anggaran\b|cost\b|biaya\b|currency\b|mata\s+uang\b|amount\b|nilai\b|report(?:ed|ing)?\s+(?:date|period)\b|as[\s-]?of\b|cut[\s-]?off(?:\s+date)?\b|due(?:\s+date)?\b|target(?:\s+date)?\b|week\b|minggu\b|month\b|bulan\b|period(?:e)?\b)\s*[:#=-]?\s*$/iu;
+    const separatorBoundary = /^\s*[,;|:–—-]?\s*$/u;
     const scopeCuePattern =
       /\b(?:wbs|work[\s-]?package|sub[\s-]?system|component|discipline|package|scope)\b\s*(?:name|code)?\s*[:#-]?\s*/giu;
     const anchor = evidenceAnchor.trim().toLocaleLowerCase();
@@ -2124,7 +2243,17 @@ function validateGroupExtraction(
         const scopeCue = precedingCues[precedingCues.length - 1];
         if (!scopeCue) continue;
         const scopeValueStart = (scopeCue.index ?? 0) + scopeCue[0].length;
-        if (scopeValuePattern.test(clause.slice(scopeValueStart))) return true;
+        const prefix = clause.slice(scopeValueStart, anchorIndex);
+        const scopeMatch = scopeValuePattern.exec(prefix);
+        if (!scopeMatch) continue;
+        const afterScope = prefix.slice(scopeMatch[0].length);
+        if (
+          labelledFieldBoundary.test(afterScope) ||
+          narrativeFieldBoundary.test(afterScope) ||
+          separatorBoundary.test(afterScope)
+        ) {
+          return true;
+        }
       }
     }
     return false;
@@ -2238,6 +2367,20 @@ function validateGroupExtraction(
       if (
         citation &&
         [originalValue, extractedText].some(
+          (candidate) =>
+            candidate !== null &&
+            sourceValueNeedsFormulaReview(
+              citedFormulaCacheStatusForValue(group, citation, candidate),
+            ),
+        )
+      ) {
+        rowErrors.push(
+          `${path} cites a stored formula result whose freshness is not established; the source-reported candidate requires review (${FORMULA_CACHE_REVIEW_MARKER}).`,
+        );
+      }
+      if (
+        citation &&
+        [originalValue, extractedText].some(
           (value) => value !== null && !citedTextSupportsNumericValue(value, citation.excerpt),
         )
       ) {
@@ -2337,12 +2480,20 @@ function validateGroupExtraction(
       if (citation && citationHasUnavailableFormula(group, citation)) {
         citationErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support a health status.`);
       }
-      const reportedStatus = citationErrors.length
-        ? null
-        : healthStatusFromCitation(
-          citation,
-          dimension as GroupHealthSnapshot["dimension"],
+      const sourceStatus = healthStatusFromCitation(
+        citation,
+        dimension as GroupHealthSnapshot["dimension"],
+      );
+      if (
+        citation &&
+        sourceStatus?.sourceCell &&
+        formulaCacheStatusForSourceCell(group, citation, sourceStatus.sourceCell) === "cached_value"
+      ) {
+        citationErrors.push(
+          `${path}.source_id reports ${sourceStatus.text} from a stored formula result whose freshness is not established; it remains a source-reported candidate for review (${FORMULA_CACHE_REVIEW_MARKER}).`,
         );
+      }
+      const reportedStatus = citationErrors.length ? null : sourceStatus;
       if (!reportedStatus) {
         invalidDimensions.add(dimension);
         const warnings = [
@@ -2352,6 +2503,14 @@ function validateGroupExtraction(
             : []),
         ];
         if (warnings.length) warnInvalidRow(path, warnings);
+        if (citation && citationErrors.some((error) => error.includes(FORMULA_CACHE_REVIEW_MARKER))) {
+          snapshotsByDimension.set(dimension, {
+            ...insufficientHealthSnapshot(dimension as GroupHealthSnapshot["dimension"]),
+            source_summary: citation.excerpt,
+            evidence_chunk_index: citation.evidence_chunk_index,
+            excerpt: citation.excerpt,
+          });
+        }
         return;
       }
       if (suppliedStatus !== reportedStatus.status) {
@@ -2367,6 +2526,18 @@ function validateGroupExtraction(
       }
 
       let snapshotDate: string | null = null;
+      const sourceReference = referenceForCitation(citation);
+      const citedCells = sourceReference?.rowCells?.length
+        ? sourceReference.rowCells
+        : sourceReference?.cell
+          ? [sourceReference.cell]
+          : [];
+      let formulaDateNeedsReview = citedCells.some(
+        (cell) =>
+          isRecordColumn(cell) &&
+          cellDateValue(cell) !== null &&
+          formulaCacheStatusForSourceCell(group, citation, cell) === "cached_value",
+      );
       const dateErrors: string[] = [];
       const candidateDate = snapshot.snapshot_date === null
         ? null
@@ -2378,9 +2549,27 @@ function validateGroupExtraction(
           warnInvalidRow(path, [`${path}.snapshot_date is not present in the cited source`]);
         } else {
           const dateError = asOfDateError(citation, candidateDate, `${path}.snapshot_date`);
-          if (dateError) warnInvalidRow(path, [dateError]);
-          else snapshotDate = candidateDate;
+          if (dateError) {
+            warnInvalidRow(path, [dateError]);
+            if (dateError.includes(FORMULA_CACHE_REVIEW_MARKER)) formulaDateNeedsReview = true;
+          } else snapshotDate = candidateDate;
         }
+      } else if (formulaDateNeedsReview) {
+        qualityWarnings.push(
+          `${path}.snapshot_date cites a stored formula result whose freshness is not established; the date candidate requires review (${FORMULA_CACHE_REVIEW_MARKER}).`,
+        );
+      }
+      if (formulaDateNeedsReview) {
+        qualityWarnings.push(
+          `${path}.status ${reportedStatus.status} is retained only as source-reported evidence because its record date is a stored formula result with freshness not established; it is not accepted as current (${FORMULA_CACHE_REVIEW_MARKER}).`,
+        );
+        snapshotsByDimension.set(dimension, {
+          ...insufficientHealthSnapshot(dimension as GroupHealthSnapshot["dimension"]),
+          source_summary: citation!.excerpt,
+          evidence_chunk_index: citation!.evidence_chunk_index,
+          excerpt: citation!.excerpt,
+        });
+        return;
       }
 
       snapshotsByDimension.set(dimension, {
@@ -2499,10 +2688,44 @@ function validateGroupExtraction(
         const wbsParentCode = nullableBoundedString(observation.wbs_parent_code ?? null, `${path}.wbs_parent_code`, rowErrors, 200);
         const wbsName = nullableBoundedString(observation.wbs_name ?? null, `${path}.wbs_name`, rowErrors, 500);
         const scopeDescription = nullableBoundedString(observation.scope_description ?? null, `${path}.scope_description`, rowErrors, 2000);
-        const periodLabel = nullableBoundedString(observation.period_label, `${path}.period_label`, rowErrors, 200);
+        let periodLabel = nullableBoundedString(observation.period_label, `${path}.period_label`, rowErrors, 200);
         const statusLabel = nullableBoundedString(observation.status_label, `${path}.status_label`, rowErrors, 200);
-        const asOfDate = nullableIsoDate(observation.as_of_date ?? null, `${path}.as_of_date`, rowErrors);
+        let asOfDate = nullableIsoDate(observation.as_of_date ?? null, `${path}.as_of_date`, rowErrors);
         const citation = requiredCitation(observation, allowedSources, path, rowErrors, fromCache);
+        const cachedCostValue = Boolean(
+          citation &&
+          sourceValue &&
+          sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, sourceValue)),
+        );
+        if (cachedCostValue) {
+          qualityWarnings.push(
+            `${path}.source_value is a stored formula result whose freshness is not established; its source-reported candidate was preserved for review (${FORMULA_CACHE_REVIEW_MARKER}).`,
+          );
+        }
+        let cachedCostMetadata = false;
+        if (
+          citation &&
+          periodLabel &&
+          sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, periodLabel))
+        ) {
+          qualityWarnings.push(
+            `${path}.period_label is a stored formula result whose freshness is not established; the period was excluded and retained for review in the cited source (${FORMULA_CACHE_REVIEW_MARKER}).`,
+          );
+          periodLabel = null;
+          cachedCostMetadata = true;
+        }
+        if (
+          citation &&
+          asOfDate &&
+          sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, asOfDate))
+        ) {
+          qualityWarnings.push(
+            `${path}.as_of_date is a stored formula result whose freshness is not established; the date was excluded and retained for review in the cited source (${FORMULA_CACHE_REVIEW_MARKER}).`,
+          );
+          asOfDate = null;
+          cachedCostMetadata = true;
+        }
+        const costNeedsFormulaReview = cachedCostValue || cachedCostMetadata;
         const scopeSourceId = nullableBoundedString(
           observation.scope_source_id ?? null,
           `${path}.scope_source_id`,
@@ -2590,8 +2813,8 @@ function validateGroupExtraction(
         costObservations.push({
           measure: measure as ExtractedCostObservation["measure"],
           source_value: sourceValue!,
-          normalized_amount: normalizeCostAmount(sourceValue!),
-          currency: normalizeCostCurrency(sourceValue!),
+          normalized_amount: costNeedsFormulaReview ? null : normalizeCostAmount(sourceValue!),
+          currency: costNeedsFormulaReview ? null : normalizeCostCurrency(sourceValue!),
           scope_level: scopeLevel as ExtractedCostObservation["scope_level"],
           // A project total has one scope, so a label and any work-package
           // identity there carry no comparison meaning and are dropped to keep
@@ -2655,9 +2878,19 @@ function validateGroupExtraction(
     excerpt: string | null,
     path: string,
     rowErrors: string[],
+    citation: SourceCitation | null,
   ) => {
     const date = nullableIsoDate(value ?? null, path, rowErrors);
     if (date && !excerpt?.includes(date)) rowErrors.push(`${path} is not present as an ISO date in the cited excerpt`);
+    if (
+      date &&
+      sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, date))
+    ) {
+      qualityWarnings.push(
+        `${path} is a stored formula result whose freshness is not established; the date was excluded and retained for review in the cited source (${FORMULA_CACHE_REVIEW_MARKER}).`,
+      );
+      return null;
+    }
     return date;
   };
   const milestones = rowsFor("milestones");
@@ -2675,8 +2908,8 @@ function validateGroupExtraction(
     const periodLabel = nullableBoundedString(item.period_label ?? null, `${path}.period_label`, rowErrors, 200);
     const citation = requiredCitation(item, allowedSources, path, rowErrors, fromCache);
     const excerpt = excerptFor(item, citation, path, rowErrors);
-    const date = checkedDate(item.date ?? null, excerpt, `${path}.date`, rowErrors);
-    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    const date = checkedDate(item.date ?? null, excerpt, `${path}.date`, rowErrors, citation);
+    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors, citation);
     checkDate(citation, date, `${path}.date`, rowErrors, "due");
     checkDate(citation, asOfDate, `${path}.as_of_date`, rowErrors, "record");
     if (!["project", "wbs", "unknown"].includes(scopeLevel)) rowErrors.push(`${path}.scope_level is invalid`);
@@ -2756,9 +2989,22 @@ function validateGroupExtraction(
     if (scopeLevel !== "wbs" && scopeLabel) rowErrors.push(`${path}.scope_label is only valid for WBS scope`);
     if (percentValue === null || percentValue === undefined) rowErrors.push(`${path}.percent must be a source-backed percentage`);
     if (rawValue && !excerpt?.includes(rawValue)) rowErrors.push(`${path}.raw_value is not present in the cited excerpt`);
+    const citedPercentCell = percentValue === null || percentValue === undefined
+      ? null
+      : citedPercentCellForClaim(group, citation, rawValue, percentValue);
     if (percentValue !== null && percentValue !== undefined && excerpt &&
-      !citedTextSupportsNumericValue(`${percentValue}%`, rawValue ?? "")) {
+      !citedTextSupportsNumericValue(`${percentValue}%`, rawValue ?? "") &&
+      !citedPercentCell) {
       rowErrors.push(`${path}.percent does not match a percentage in the cited excerpt`);
+    }
+    if (
+      citation &&
+      rawValue &&
+      sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, rawValue))
+    ) {
+      rowErrors.push(
+        `${path}.raw_value is a stored formula result whose freshness is not established; it remains a source-reported candidate for review (${FORMULA_CACHE_REVIEW_MARKER})`,
+      );
     }
     const scopeSourceId = nullableBoundedString(
       item.scope_source_id ?? null,
@@ -2790,7 +3036,7 @@ function validateGroupExtraction(
       rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
     }
     checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors, rawValue);
-    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    let asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors, citation);
     checkDate(citation, asOfDate, `${path}.as_of_date`, rowErrors, "record");
     if (rowErrors.length) {
       warnObservationInvalidRow("progress", path, rowErrors);
@@ -2834,8 +3080,8 @@ function validateGroupExtraction(
     const rawValue = boundedString(item.raw_value, `${path}.raw_value`, rowErrors, 1200);
     const citation = requiredCitation(item, allowedSources, path, rowErrors, fromCache);
     const excerpt = excerptFor(item, citation, path, rowErrors);
-    const mitigationDueDate = checkedDate(item.mitigation_due_date ?? null, excerpt, `${path}.mitigation_due_date`, rowErrors);
-    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    const mitigationDueDate = checkedDate(item.mitigation_due_date ?? null, excerpt, `${path}.mitigation_due_date`, rowErrors, citation);
+    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors, citation);
     checkDate(citation, mitigationDueDate, `${path}.mitigation_due_date`, rowErrors, "due");
     checkDate(citation, asOfDate, `${path}.as_of_date`, rowErrors, "record");
     checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors, rawValue);
@@ -2893,7 +3139,7 @@ function validateGroupExtraction(
     const periodLabel = nullableBoundedString(item.period_label ?? null, `${path}.period_label`, rowErrors, 200);
     const citation = requiredCitation(item, allowedSources, path, rowErrors, fromCache);
     const excerpt = excerptFor(item, citation, path, rowErrors);
-    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors, citation);
     checkDate(citation, asOfDate, `${path}.as_of_date`, rowErrors, "record");
     if (!["no_open_high_or_critical", "open_risk_reported"].includes(state)) {
       rowErrors.push(`${path}.state is invalid`);
@@ -3284,6 +3530,26 @@ function validateGroupMetadataSuggestions(
   if (citation && citationHasUnavailableFormula(group, citation)) {
     qualityWarnings.push("Group metadata was excluded because its source has formula_result_unavailable.");
     return empty;
+  }
+  if (
+    citation &&
+    suggestedDocumentDate &&
+    sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, suggestedDocumentDate))
+  ) {
+    qualityWarnings.push(
+      `group_metadata_suggestions.suggested_document_date is a stored formula result whose freshness is not established; the source-reported date candidate was excluded pending review (${FORMULA_CACHE_REVIEW_MARKER}).`,
+    );
+    suggestedDocumentDate = null;
+  }
+  if (
+    citation &&
+    detectedReportingPeriod &&
+    sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, detectedReportingPeriod))
+  ) {
+    qualityWarnings.push(
+      `group_metadata_suggestions.detected_reporting_period is based on a stored formula result whose freshness is not established; the period candidate was excluded pending review (${FORMULA_CACHE_REVIEW_MARKER}).`,
+    );
+    detectedReportingPeriod = null;
   }
   return {
     suggested_document_date: suggestedDocumentDate,
