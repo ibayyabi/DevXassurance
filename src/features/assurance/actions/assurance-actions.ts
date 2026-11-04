@@ -1134,15 +1134,27 @@ function buildReviewExtraction(
     rowsFor(role, "schedule", "milestone").map(({ source, row }) => {
       const observation = row.observation;
       const scopeLevel = observation.scope_level;
+      const correction = corrections.get(row.id);
+      const correctedDate = snapshotText(correction?.corrected_observation?.date);
+      const accepted = decisions.some((item) =>
+        item.decision === "accepted" && item.observation_ids.includes(row.id));
       return {
         label: snapshotText(observation.label) ?? "",
-        date: snapshotText(observation.date),
+        // A reviewer-corrected date drives the comparison; the extracted date
+        // stays in sourceDate for display and audit.
+        date: correctedDate ?? snapshotText(observation.date),
+        sourceDate: snapshotText(observation.date),
         periodLabel: snapshotText(observation.period_label),
         asOfDate: snapshotText(observation.as_of_date),
         scopeLevel: scopeLevel === "project" || scopeLevel === "wbs" ? scopeLevel : "unknown",
         scopeLabel: snapshotText(observation.scope_label),
         excerpt: row.excerpt,
         sourceRef: assuranceEvidenceReference(source, row),
+        reviewDecision: correction
+          ? { decision: "corrected" as const, date: correctedDate, reason: correction.reason }
+          : accepted
+            ? { decision: "accepted" as const, date: null, reason: null }
+            : null,
       };
     });
   const progressRows = (["baseline", "current"] as const).flatMap((role) =>
@@ -1187,13 +1199,25 @@ function buildReviewExtraction(
   const riskSnapshots = (role: "baseline" | "current"): RiskSnapshot[] =>
     rowsFor(role, "risk", "risk_snapshot").map(({ source, row }) => {
       const observation = row.observation;
+      const correction = corrections.get(row.id);
+      const corrected = correction?.corrected_observation;
+      const correctedStatus = snapshotText(corrected?.status);
+      const correctedRatingLabel = snapshotText(corrected?.rating_label);
+      const correctedRatingValue = typeof corrected?.rating_value === "number"
+        ? corrected.rating_value
+        : null;
+      const accepted = decisions.some((item) =>
+        item.decision === "accepted" && item.observation_ids.includes(row.id));
       return {
         sourceId: snapshotText(observation.risk_id),
         name: snapshotText(observation.name),
         description: snapshotText(observation.description),
-        status: snapshotText(observation.status),
-        ratingLabel: snapshotText(observation.rating_label),
-        ratingValue: typeof observation.rating_value === "number" ? observation.rating_value : null,
+        // Corrected status/rating drive the comparison; the extracted values
+        // stay in sourceStatus/sourceRating* for display and audit.
+        status: correctedStatus ?? snapshotText(observation.status),
+        ratingLabel: correctedRatingLabel ?? snapshotText(observation.rating_label),
+        ratingValue: correctedRatingValue ??
+          (typeof observation.rating_value === "number" ? observation.rating_value : null),
         scaleLabel: snapshotText(observation.scale_label),
         owner: snapshotText(observation.owner),
         mitigation: snapshotText(observation.mitigation),
@@ -1203,6 +1227,20 @@ function buildReviewExtraction(
         asOfDate: snapshotText(observation.as_of_date),
         excerpt: row.excerpt,
         sourceRef: assuranceEvidenceReference(source, row),
+        reviewDecision: correction
+          ? {
+              decision: "corrected" as const,
+              status: correctedStatus,
+              ratingLabel: correctedRatingLabel,
+              ratingValue: correctedRatingValue,
+              reason: correction.reason,
+            }
+          : accepted
+            ? { decision: "accepted" as const, status: null, ratingLabel: null, ratingValue: null, reason: null }
+            : null,
+        sourceStatus: snapshotText(observation.status),
+        sourceRatingLabel: snapshotText(observation.rating_label),
+        sourceRatingValue: typeof observation.rating_value === "number" ? observation.rating_value : null,
       };
     });
   const progressSourceObservations = progressRows.map(({ source, row }) => ({

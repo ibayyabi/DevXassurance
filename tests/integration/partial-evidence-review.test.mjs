@@ -503,3 +503,108 @@ test("analysis publishes through the decision-fingerprint RPC", async () => {
     "publication records the observation-decision fingerprint it was built over",
   );
 });
+
+test("a corrected milestone date changes the actual delay comparison", async () => {
+  const milestone = (id, label, date, role) =>
+    observation(id, "schedule", "milestone", {
+      label, date, scope_level: "project", scope_label: null, period_label: null, as_of_date: null,
+    });
+  const sources = [
+    source("base", "baseline", "Baseline W4", "a".repeat(64), [milestone("m-base", "Go-live", "2026-06-30")], allProcessed),
+    source("current", "current", "Current W5", "b".repeat(64), [milestone("m-cur", "Go-live", "2026-08-10")], allProcessed),
+  ];
+  const corrected = fixture({
+    claim: {
+      attempt_id: "attempt-1", sources,
+      observation_decisions: [
+        { id: "d1", target_type: "assurance", document_id: "current", observation_fingerprint: "f".repeat(64),
+          decision: "corrected", corrected_observation: { date: "2026-07-02" }, reason: "tanggal kontrak direvisi",
+          decided_by: "user-1", decided_at: "2026-11-05T00:00:00Z", observation_ids: ["m-cur"] },
+      ],
+    },
+  });
+  await corrected.assurance.runAssuranceAnalysis(form());
+  const publication = corrected.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
+  const comparison = publication.input.p_result_metadata.schedule_milestone_comparisons
+    .find((item) => item.canonicalLabel === "Go-live");
+  assert.equal(comparison.current.date, "2026-07-02", "the comparison uses the corrected date");
+  assert.equal(comparison.current.sourceDate, "2026-08-10", "the extracted date stays for display");
+  assert.equal(comparison.current.reviewDecision.decision, "corrected");
+  assert.equal(comparison.delayDays, 2, "the delay is computed from the corrected date");
+
+  const raw = fixture({ claim: { attempt_id: "attempt-1", sources, observation_decisions: [] } });
+  await raw.assurance.runAssuranceAnalysis(form());
+  const rawPublication = raw.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
+  const rawComparison = rawPublication.input.p_result_metadata.schedule_milestone_comparisons
+    .find((item) => item.canonicalLabel === "Go-live");
+  assert.notEqual(rawComparison.delayDays, comparison.delayDays,
+    "without the correction the comparison differs, proving the correction changed the result");
+});
+
+test("a corrected risk rating changes the actual risk change detection", async () => {
+  const snapshot = (id, role, ratingLabel) =>
+    observation(id, "risk", "risk_snapshot", {
+      risk_id: "R-SB01-001", name: "Alarm", status: "Open", rating_label: ratingLabel,
+      rating_value: null, scale_label: "Low-Med-High", scope_level: null,
+    });
+  const sources = [
+    source("base", "baseline", "Baseline W4", "a".repeat(64), [snapshot("r-base", "baseline", "Low")], allProcessed),
+    source("current", "current", "Current W5", "b".repeat(64), [snapshot("r-cur", "current", "Low")], allProcessed),
+  ];
+  const corrected = fixture({
+    claim: {
+      attempt_id: "attempt-1", sources,
+      observation_decisions: [
+        { id: "d1", target_type: "assurance", document_id: "current", observation_fingerprint: "f".repeat(64),
+          decision: "corrected", corrected_observation: { rating_label: "High" }, reason: "peringkat sumber salah baca",
+          decided_by: "user-1", decided_at: "2026-11-05T00:00:00Z", observation_ids: ["r-cur"] },
+      ],
+    },
+  });
+  await corrected.assurance.runAssuranceAnalysis(form());
+  const publication = corrected.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
+  const item = publication.input.p_result_metadata.risk_item_findings.find((entry) => entry.canonicalId === "R-SB01-001");
+  assert.equal(item.current.ratingLabel, "High", "the comparison uses the corrected rating");
+  assert.equal(item.current.sourceRatingLabel, "Low", "the extracted rating stays for display");
+  assert.equal(item.changeType, "rating_changed", "the corrected rating produces an increased-risk finding");
+  const riskFinding = publication.input.p_findings.find((finding) => finding.domain === "risk");
+  assert.notEqual(riskFinding.condition, "on_track",
+    "a corrected high rating must not leave the risk assessed as on track");
+
+  const raw = fixture({ claim: { attempt_id: "attempt-1", sources, observation_decisions: [] } });
+  await raw.assurance.runAssuranceAnalysis(form());
+  const rawPublication = raw.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
+  const rawItem = rawPublication.input.p_result_metadata.risk_item_findings.find((entry) => entry.canonicalId === "R-SB01-001");
+  assert.notEqual(rawItem.changeType, item.changeType,
+    "without the correction the change detection differs, proving the correction changed the result");
+});
+
+test("a corrected risk status drives the open-risk assessment", async () => {
+  const snapshot = (id, status) =>
+    observation(id, "risk", "risk_snapshot", {
+      risk_id: "R-SB01-002", name: "Gempa", status, rating_label: "Critical",
+      rating_value: null, scale_label: null, scope_level: null,
+    });
+  const sources = [
+    source("base", "baseline", "Baseline W4", "a".repeat(64), [], allProcessed),
+    source("current", "current", "Current W5", "b".repeat(64), [snapshot("r-cur", "Closed")], allProcessed),
+  ];
+  const corrected = fixture({
+    claim: {
+      attempt_id: "attempt-1", sources,
+      observation_decisions: [
+        { id: "d1", target_type: "assurance", document_id: "current", observation_fingerprint: "f".repeat(64),
+          decision: "corrected", corrected_observation: { status: "Open" }, reason: "status register salah",
+          decided_by: "user-1", decided_at: "2026-11-05T00:00:00Z", observation_ids: ["r-cur"] },
+      ],
+    },
+  });
+  await corrected.assurance.runAssuranceAnalysis(form());
+  const publication = corrected.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
+  const item = publication.input.p_result_metadata.risk_item_findings.find((entry) => entry.canonicalId === "R-SB01-002");
+  assert.equal(item.current.status, "Open", "the comparison uses the corrected status");
+  assert.equal(item.current.sourceStatus, "Closed", "the extracted status stays for display");
+  const riskFinding = publication.input.p_findings.find((finding) => finding.domain === "risk");
+  assert.match(riskFinding.headline, /escalation|eskalasi|Kritis|kritis/,
+    "the corrected open critical risk drives the escalation headline");
+});

@@ -18,6 +18,12 @@ type MilestoneObservation = {
   periodLabel: string | null;
   asOfDate: string | null;
   excerpt: string | null;
+  reviewDecision?: {
+    decision: "accepted" | "corrected";
+    date: string | null;
+    reason: string | null;
+  } | null;
+  sourceDate?: string | null;
 };
 
 type MilestoneComparison = {
@@ -255,6 +261,15 @@ function SourceLines({
           <span className="font-medium text-ink">{line.role}:</span> “{line.observation.excerpt}”
           {line.observation.periodLabel && ` — ${line.observation.periodLabel}`}
           {line.observation.asOfDate && ` (per ${line.observation.asOfDate})`}
+          {line.observation.reviewDecision?.decision === "corrected" && (
+            <span className="mt-1 block rounded-md bg-status-warn-bg px-2 py-1 text-status-warn-text">
+              <span className="font-semibold">
+                Dikoreksi peninjau menjadi {formatDate(line.observation.date)}
+                {line.observation.reviewDecision.reason ? `: ${line.observation.reviewDecision.reason}` : ""}
+              </span>
+              {line.observation.sourceDate && ` — nilai sumber tetap ${formatDate(line.observation.sourceDate)}.`}
+            </span>
+          )}
         </li>
       ))}
     </ul>

@@ -27,6 +27,16 @@ type RiskSnapshot = {
   periodLabel: string | null;
   asOfDate: string | null;
   excerpt: string | null;
+  reviewDecision?: {
+    decision: "accepted" | "corrected";
+    status: string | null;
+    ratingLabel: string | null;
+    ratingValue: number | null;
+    reason: string | null;
+  } | null;
+  sourceStatus?: string | null;
+  sourceRatingLabel?: string | null;
+  sourceRatingValue?: number | null;
 };
 
 type RiskChangeType =
@@ -272,6 +282,25 @@ function RiskSources({
           <span className="font-medium text-ink">{line.role}:</span> “{line.snapshot.excerpt}”
           {line.snapshot.periodLabel && ` — ${line.snapshot.periodLabel}`}
           {line.snapshot.asOfDate && ` (per ${line.snapshot.asOfDate})`}
+          {line.snapshot.reviewDecision?.decision === "corrected" && (
+            <span className="mt-1 block rounded-md bg-status-warn-bg px-2 py-1 text-status-warn-text">
+              <span className="font-semibold">
+                Dikoreksi peninjau
+                {line.snapshot.reviewDecision.status && ` · status: ${line.snapshot.reviewDecision.status}`}
+                {line.snapshot.reviewDecision.ratingLabel && ` · peringkat: ${line.snapshot.reviewDecision.ratingLabel}`}
+                {line.snapshot.reviewDecision.ratingValue !== null && ` (${line.snapshot.reviewDecision.ratingValue})`}
+                {line.snapshot.reviewDecision.reason ? `: ${line.snapshot.reviewDecision.reason}` : ""}
+              </span>
+              {(line.snapshot.sourceStatus || line.snapshot.sourceRatingLabel) && (
+                <span className="mt-0.5 block">
+                  Nilai sumber tetap
+                  {line.snapshot.sourceStatus ? ` status ${line.snapshot.sourceStatus}` : ""}
+                  {line.snapshot.sourceRatingLabel ? ` peringkat ${line.snapshot.sourceRatingLabel}` : ""}
+                  {line.snapshot.sourceRatingValue !== null && line.snapshot.sourceRatingValue !== undefined ? ` (${line.snapshot.sourceRatingValue})` : ""}.
+                </span>
+              )}
+            </span>
+          )}
         </li>
       ))}
     </ul>
