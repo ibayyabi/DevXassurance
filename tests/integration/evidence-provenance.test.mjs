@@ -395,6 +395,10 @@ test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived 
     const buffer = alarmBuffer(spec.session);
     const parsed = await parseDocumentBuffer(ALARM_FILE, buffer);
     assert.equal(parsed.ok, true, parsed.ok ? undefined : parsed.errorMessage);
+    assert.ok(
+      parsed.parserMetadata.sheetTitles[WEEKLY],
+      `${spec.session} retains the merged weekly title for cross-sheet scope proof`,
+    );
 
     const sourceReferences = parsed.chunks.flatMap((chunk) => chunk.sourceReferences ?? []);
     for (const reference of sourceReferences) {
@@ -480,7 +484,7 @@ test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived 
       await processDocumentJob(job(buffer), store),
     );
     assert.equal(jobResult.status, "completed", jobResult.processing_error);
-    assert.equal(jobResult.parser_version, "document-parser/14");
+    assert.equal(jobResult.parser_version, "document-parser/15");
     assert.equal(jobResult.assurance_observations.progress.length, 1);
     const coldGroupRows = [...store.rows.values()];
     const completedGroupIndexes = coldGroupRows
@@ -514,14 +518,16 @@ test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived 
       warmResult.assurance_observations.progress[0].scope_provenance,
       jobResult.assurance_observations.progress[0].scope_provenance,
     );
-    assert.ok(
-      [...store.rows.values()].some(
-        (row) =>
-          row.status === "completed" &&
-          row.result?.assurance_observations.progress.some((item) => item.scope_provenance?.length === 3),
-      ),
-      "the validated exact scope provenance is retained in the completed group cache",
+    // The controlled response also claims the row's due date as its cut-off,
+    // so this partial group must remain failed and non-reusable.
+    const targetGroup = [...store.rows.values()].find(
+      (row) =>
+        targetRow.reference.chunkIndex >= row.chunkStartIndex &&
+        targetRow.reference.chunkIndex <= row.chunkEndIndex,
     );
+    assert.ok(targetGroup, "the target row belongs to a persisted extraction group");
+    assert.equal(targetGroup.status, "failed");
+    assert.equal(targetGroup.result, null);
 
     const negativeCapture = { targetSourceId: targetRow.reference.sourceId };
     const negative = await withLocalOllama(
@@ -794,7 +800,7 @@ test("a generated XLSX keeps a literal cell while a sibling formula has no cache
     ),
   );
   assert.equal(result.status, "completed", result.processing_error);
-  assert.equal(result.parser_version, "document-parser/14");
+  assert.equal(result.parser_version, "document-parser/15");
   assert.equal(result.processing_status, "needs_review");
   assert.match(result.processing_error ?? "", /Formula results are unavailable/);
   assert.ok(groupCalls > 0);
@@ -1306,7 +1312,7 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
     const result = await extractDocumentGroups(
       job("weekly.txt"),
       chunks,
-      { parserVersion: "document-parser/14" },
+      { parserVersion: "document-parser/15" },
       memoryGroupStore(),
     );
     assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
@@ -1371,7 +1377,7 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
 });
 
 test("a stale group cache version is not reused and a cache hit re-derives provenance", async () => {
-  const text = "Progress: 42% for October 2026.";
+  const text = "Subsystem / Scope: Alarm Kebencanaan | Progress: 42%";
   const location = {
     kind: "xlsx",
     sheetName: WEEKLY,
@@ -1379,8 +1385,21 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
     rowStart: 5,
     rowEnd: 5,
     cellRangeStart: "A5",
-    cellRangeEnd: "A5",
+    cellRangeEnd: "B5",
   };
+  const scopeCell = {
+    sheetName: WEEKLY, row: 5, column: "A", cell: "A5", label: "Subsystem / Scope",
+    value: "Alarm Kebencanaan", rawValue: "Alarm Kebencanaan", dateIso: null,
+  };
+  const progressCell = {
+    sheetName: WEEKLY, row: 5, column: "B", cell: "B5", label: "Progress",
+    value: "42%", rawValue: "42%", dateIso: null,
+  };
+  const cellLocation = (cell) => ({
+    ...location,
+    cellRangeStart: cell,
+    cellRangeEnd: cell,
+  });
   const chunks = [
     {
       chunkIndex: 0,
@@ -1388,7 +1407,30 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
       sectionLabel: WEEKLY,
       sourceLocation: location,
       sourceReferences: [
-        { sourceId: "c0s0", chunkIndex: 0, text, modelText: text, sourceLocation: location },
+        {
+          sourceId: "c0s0",
+          chunkIndex: 0,
+          text,
+          modelText: text,
+          sourceLocation: location,
+          rowCells: [scopeCell, progressCell],
+        },
+        {
+          sourceId: "c0s1",
+          chunkIndex: 0,
+          text: "Subsystem / Scope: Alarm Kebencanaan",
+          modelText: "Subsystem / Scope: Alarm Kebencanaan",
+          sourceLocation: cellLocation("A5"),
+          cell: scopeCell,
+        },
+        {
+          sourceId: "c0s2",
+          chunkIndex: 0,
+          text: "Progress: 42%",
+          modelText: "Progress: 42%",
+          sourceLocation: cellLocation("B5"),
+          cell: progressCell,
+        },
       ],
     },
   ];
@@ -1418,8 +1460,8 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
       {
         raw_value: "42%",
         percent: 42,
-        scope_level: "project",
-        scope_label: null,
+        scope_level: "wbs",
+        scope_label: "Alarm Kebencanaan",
         period_label: null,
         as_of_date: null,
         excerpt: text,
@@ -1438,7 +1480,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
       ),
     );
 
-  const cold = await runOnce("document-parser/14");
+  const cold = await runOnce("document-parser/15");
   assert.equal(cold.ok, true, cold.ok ? undefined : cold.errorMessage);
   assert.equal(calls, 1);
   assert.equal(cold.extraction.assurance_observations.progress[0].percent, 42);
@@ -1450,28 +1492,44 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // Every completed row records the parser and validation versions that produced
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
-  assert.equal(cached.parserVersion, "document-parser/14");
+  assert.equal(cached.parserVersion, "document-parser/15");
   assert.equal(cached.schemaVersion, "phase6-document-extraction/24");
 
-  // A cache hit re-derives the location from the live chunk instead of trusting
-  // a stored payload that dropped it.
+  assert.equal(cached.status, "completed");
+  assert.deepEqual(
+    cached.result.assurance_observations.progress[0].scope_provenance,
+    [{
+      kind: "cited_row_column",
+      source_id: "c0s1",
+      sheet_name: WEEKLY,
+      cell_reference: "A5",
+      excerpt: "Subsystem / Scope: Alarm Kebencanaan",
+    }],
+  );
+
+  // A cache hit re-derives location and scope provenance from live cells.
   const withoutLocation = JSON.parse(JSON.stringify(cached.result));
   delete withoutLocation.assurance_observations.progress[0].source_location;
+  delete withoutLocation.assurance_observations.progress[0].scope_provenance;
   store.rows.set(cached.groupKey, { ...cached, result: withoutLocation });
   calls = 0;
-  const warm = await runOnce("document-parser/14");
+  const warm = await runOnce("document-parser/15");
   assert.equal(warm.ok, true, warm.ok ? undefined : warm.errorMessage);
   assert.equal(calls, 0, "the completed group is reused without a model call");
   assert.deepEqual(
     warm.extraction.assurance_observations.progress[0].source_location,
     location,
   );
+  assert.deepEqual(
+    warm.extraction.assurance_observations.progress[0].scope_provenance,
+    cached.result.assurance_observations.progress[0].scope_provenance,
+  );
 
   // A row written by an older parser version produces a different group key, so
   // the stale payload is neither selected nor trusted.
   calls = 0;
   marker = "Progress: 42%";
-  const stale = await runOnce("document-parser/13");
+  const stale = await runOnce("document-parser/14");
   assert.equal(stale.ok, true, stale.ok ? undefined : stale.errorMessage);
   assert.equal(calls, 1, "the stale cached group is re-extracted");
   assert.equal(stale.extraction.facts[0].extracted_text, "Progress: 42%");

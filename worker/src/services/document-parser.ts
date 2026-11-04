@@ -362,7 +362,7 @@ type ZipTextReader = {
 
 // Bump whenever parsed chunk/source-reference output changes: cached extraction
 // groups are keyed by this version, so older rows are never reused.
-const PARSER_VERSION = "document-parser/14";
+const PARSER_VERSION = "document-parser/15";
 const MAX_CHUNK_LENGTH = 4000;
 // Growth ceiling per chunk: retained row references always fit, then cell
 // references are added row by row. Cells left uncovered stay citable through
@@ -736,15 +736,38 @@ async function parseXlsxDocument(
           .sort(([left], [right]) => left - right)
           .map(([column, label]) => `${columnLetters(column)}: ${label}`)
           .join(" | ");
-        // A sheet title must be a literal cell in a structurally separate
+        // A sheet title must be a title-like literal in a structurally separate
         // pre-table row, never the first label in an ordinary table header.
         const firstRow = tableRows[0];
+        const firstCell = firstRow.cells[0];
+        const repeatedMergedTitle = firstRow.cells.length > 1 && merges.some((merge) => {
+          const [start, end] = merge.split(":");
+          const startRow = Number(start?.match(/\d+$/)?.[0]);
+          const endRow = Number(end?.match(/\d+$/)?.[0]);
+          const startColumn = columnNumber(start ?? "");
+          const endColumn = columnNumber(end ?? "");
+          return start === firstCell.reference &&
+            startRow === firstRow.number &&
+            endRow === firstRow.number &&
+            endColumn > startColumn &&
+            firstRow.cells.every((cell) => {
+              const column = columnNumber(cell.reference);
+              return column >= startColumn &&
+                column <= endColumn &&
+                cell.textual &&
+                !cell.formula &&
+                cell.value.trim() === firstCell.value.trim();
+            });
+        });
+        const titleCellCandidate = firstRow.cells.length === 1 || repeatedMergedTitle
+          ? firstCell
+          : undefined;
         const standaloneTitle =
           tableIndex === 0 &&
-          firstRow.cells.length === 1 &&
-          firstRow.cells[0].textual &&
-          !firstRow.cells[0].formula &&
-          SHEET_TITLE_CUE.test(firstRow.cells[0].value) &&
+          titleCellCandidate !== undefined &&
+          titleCellCandidate.textual &&
+          !titleCellCandidate.formula &&
+          SHEET_TITLE_CUE.test(titleCellCandidate.value) &&
           (
             (tableRows.length === 1 && tables.length > 1) ||
             (
@@ -754,7 +777,7 @@ async function parseXlsxDocument(
               tableRows[2].cells.some((cell) => !cell.textual)
             )
           )
-            ? { row: firstRow, cell: firstRow.cells[0] }
+            ? { row: firstRow, cell: titleCellCandidate }
             : undefined;
         const titleCell = tableRows
           .slice(0, headerCount)
