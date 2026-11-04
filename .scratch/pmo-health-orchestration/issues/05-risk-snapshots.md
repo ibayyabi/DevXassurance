@@ -4,7 +4,7 @@
 
 **Blocked by:** 03: Evidence parsial yang aman dan review. Gunakan kontrak identitas dan periode dari 01.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Baca [rencana](../plan.md) dan periksa terlebih dahulu tiket/implementasi risk yang sudah ada; jangan membuat pipeline paralel atau menutup tiket lama tanpa otorisasi.
 

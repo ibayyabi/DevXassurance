@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Evidence provenance dan reproduksi lokal; 03: Evidence parsial yang aman dan review.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Baca [rencana](../plan.md). Aturan disepakati: RAG sumber disimpan sebagai klaim bersitasi, terpisah dari status hitungan. Hitung status hanya dengan aturan per proyek yang disetujui dan berversi; tanpa aturan yang berlaku, tetap tampilkan nilai dan status belum dinilai. Ambang fixture bukan default global. Kontrak saat ini tetap melarang rollup project dari WBS.
 

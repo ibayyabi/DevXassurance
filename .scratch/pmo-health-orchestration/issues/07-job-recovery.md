@@ -4,7 +4,7 @@
 
 **Blocked by:** 03: Evidence parsial yang aman dan review.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Baca [rencana](../plan.md). Diagnosis `stale_claim_token` menggunakan job test terisolasi; jangan memutasi job proyek pengguna.
 
