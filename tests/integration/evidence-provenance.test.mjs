@@ -502,7 +502,7 @@ test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived 
       await processDocumentJob(job(buffer), store),
     );
     assert.equal(jobResult.status, "completed", jobResult.processing_error);
-    assert.equal(jobResult.parser_version, "document-parser/16");
+    assert.equal(jobResult.parser_version, "document-parser/17");
     assert.equal(jobResult.assurance_observations.progress.length, 1);
     const coldGroupRows = [...store.rows.values()];
     const completedGroupIndexes = coldGroupRows
@@ -874,7 +874,7 @@ test("a generated XLSX keeps a literal cell while a sibling formula has no cache
     ),
   );
   assert.equal(result.status, "completed", result.processing_error);
-  assert.equal(result.parser_version, "document-parser/16");
+  assert.equal(result.parser_version, "document-parser/17");
   assert.equal(result.processing_status, "needs_review");
   assert.match(result.processing_error ?? "", /Formula results are unavailable/);
   assert.ok(groupCalls > 0);
@@ -1526,7 +1526,7 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
     const result = await extractDocumentGroups(
       job("weekly.txt"),
       chunks,
-      { parserVersion: "document-parser/16" },
+      { parserVersion: "document-parser/17" },
       memoryGroupStore(),
     );
     assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
@@ -1702,7 +1702,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
       ),
     );
 
-  const cold = await runOnce("document-parser/16");
+  const cold = await runOnce("document-parser/17");
   assert.equal(cold.ok, true, cold.ok ? undefined : cold.errorMessage);
   assert.equal(calls, 1);
   assert.equal(cold.extraction.assurance_observations.progress[0].percent, 42);
@@ -1714,8 +1714,8 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // Every completed row records the parser and validation versions that produced
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
-  assert.equal(cached.parserVersion, "document-parser/16");
-  assert.equal(cached.schemaVersion, "phase6-document-extraction/27");
+  assert.equal(cached.parserVersion, "document-parser/17");
+  assert.equal(cached.schemaVersion, "phase6-document-extraction/28");
 
   assert.equal(cached.status, "completed");
   assert.deepEqual(
@@ -1735,7 +1735,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   delete withoutLocation.assurance_observations.progress[0].scope_provenance;
   store.rows.set(cached.groupKey, { ...cached, result: withoutLocation });
   calls = 0;
-  const warm = await runOnce("document-parser/16");
+  const warm = await runOnce("document-parser/17");
   assert.equal(warm.ok, true, warm.ok ? undefined : warm.errorMessage);
   assert.equal(calls, 0, "the completed group is reused without a model call");
   assert.deepEqual(

@@ -102,7 +102,7 @@ test("TXT extraction keeps headings and source-linked bounded chunks across long
   for (let index = 1; index <= 24; index += 1) {
     assert.ok(result.chunks.some((chunk) => chunk.chunkText.includes(`PARAGRAPH-${index} `)));
   }
-  assert.equal(result.parserMetadata.parserVersion, "document-parser/16");
+  assert.equal(result.parserMetadata.parserVersion, "document-parser/17");
 });
 test("a single long paragraph is bounded without losing its boundary markers", async () => {
   const paragraph =
@@ -357,7 +357,7 @@ test("XLSX cell references locate literals exactly and never claim an unresolved
 
   assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
   if (!result.ok) return;
-  assert.equal(result.parserMetadata.parserVersion, "document-parser/16");
+  assert.equal(result.parserMetadata.parserVersion, "document-parser/17");
 
   const chunk = result.chunks[0];
   const references = chunk.sourceReferences ?? [];

@@ -1139,7 +1139,7 @@ const costSource =
   "COST EVIDENCE Approved project budget USD 1,250,000 approved on 2026-01-05. " +
   "Estimate at completion is USD 1,312,500 for October 2026. " +
   "Actual cost to date USD 600,000. Committed cost is about USD 1.2 million. " +
-  "WBS 1.2 Build, code 1.2, parent 1, Build phase: Construction of the core platform. Estimate at completion USD 900,000.";
+  "WBS 1.2 Build, code 1.2, parent 1, Build phase: Construction of the core platform. Estimate at completion for WBS 1.2 Build is USD 900,000.";
 
 function costModelOutput(prompt, observations) {
   const group = validModelOutput(prompt);
