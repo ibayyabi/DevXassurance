@@ -175,7 +175,8 @@ export function ObservationReviewPanel({
 
 function roleLabel(document: AssuranceObservationReview["documents"][number]) {
   if (document.role === "baseline") return "Peran: Baseline";
-  return "Peran: Periode Berjalan";
+  if (document.role === "current") return "Peran: Periode Berjalan";
+  return "Belum dipilih dalam tinjauan";
 }
 
 function CoverageSummary({ summary }: { summary: NonNullable<ReturnType<typeof summarizeCoverage>> }) {

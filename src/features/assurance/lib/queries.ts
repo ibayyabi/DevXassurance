@@ -209,7 +209,8 @@ export type ObservationCoverageDisplayRow = {
 export type ObservationReviewDocument = {
   documentId: string;
   title: string;
-  role: "baseline" | "current";
+  /** Saved review link; "unlinked" documents are not selected in this review. */
+  role: "baseline" | "current" | "unlinked";
   processingStatus: string;
   processingError: string | null;
   coverage: ObservationCoverageDisplayRow[];
@@ -344,9 +345,9 @@ export async function getAssuranceObservationReview(
     .map((row) => ({
       documentId: row.id,
       title: row.title,
-      // Display-only default for not-yet-linked documents; nothing is saved or
-      // promoted by viewing it.
-      role: roleByDocument.get(row.id) ?? "current",
+      // "unlinked" means the document is not selected in this review; the
+      // baseline/current label is reserved for saved links only.
+      role: roleByDocument.get(row.id) ?? "unlinked",
       processingStatus: row.processing_status,
       processingError: row.processing_error,
       coverage: coverageDomains.map((domain) => {
