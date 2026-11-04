@@ -2391,7 +2391,12 @@ function validateGroupExtraction(
     const scopeEvidence = scopeLabel
       ? scopeProvenance(citation, scopeLabel, scopeSourceId)
       : null;
-    if (scopeSourceId && (!scopeEvidence || scopeEvidence[0].kind !== "declared_subject")) {
+    if (
+      scopeSourceId &&
+      !scopeEvidence?.some(
+        (entry) => entry.kind === "declared_subject" && entry.source_id === scopeSourceId,
+      )
+    ) {
       rowErrors.push(`${path}.scope_source_id must cite the matching declared subject value cell`);
     }
     if (scopeLabel && !textIsCited(scopeLabel, excerpt) && !scopeEvidence) {
@@ -2452,7 +2457,12 @@ function validateGroupExtraction(
     const scopeEvidence = scopeLabel
       ? scopeProvenance(citation, scopeLabel, scopeSourceId)
       : null;
-    if (scopeSourceId && (!scopeEvidence || scopeEvidence[0].kind !== "declared_subject")) {
+    if (
+      scopeSourceId &&
+      !scopeEvidence?.some(
+        (entry) => entry.kind === "declared_subject" && entry.source_id === scopeSourceId,
+      )
+    ) {
       rowErrors.push(`${path}.scope_source_id must cite the matching declared subject value cell`);
     }
     if (scopeLabel && !textIsCited(scopeLabel, excerpt) && !scopeEvidence) {
