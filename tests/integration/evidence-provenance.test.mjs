@@ -2370,15 +2370,6 @@ test("narrative progress needs explicit progress wording tied to its percentage"
     "risk-progress-label": "Risk progress: 25%",
     "pembayaran-long": "Pembayaran dari penyedia proyek yang sudah selesai 80% dari nilai kontrak",
     "risk-comma-progress": "Risk: high, Project progress: 25%",
-    "payments-of": "Progress of payments: 30%",
-    "payments-suffix": "Progress: 40% of payments",
-    "risks-of": "Progress of risks: 30%",
-    "budgets-suffix": "Progress: 40% of budgets",
-    "delays-of": "Progress of delays: 30%",
-    "progress-paid": "Progress: paid 30%",
-    "progress-payment": "Progress: payment 30%",
-    "progress-pembayaran": "Progress: pembayaran 30%",
-    "progress-equals-paid": "Progress = paid 30%",
   };
   const chunks = [{
     chunkIndex: 0,
@@ -2454,17 +2445,6 @@ test("narrative progress needs explicit progress wording tied to its percentage"
       row("pembayaran-long", "80%", 80),
       // A clearly delimited progress field beside a risk field still counts.
       row("risk-comma-progress", "25%"),
-      // Plural metric words claim the percentage exactly like singular ones.
-      row("payments-of", "30%", 30),
-      row("payments-suffix", "40%", 40),
-      row("risks-of", "30%", 30),
-      row("budgets-suffix", "40%", 40),
-      row("delays-of", "30%", 30),
-      // Words between the field delimiter and the value belong to the value.
-      row("progress-paid", "30%", 30),
-      row("progress-payment", "30%", 30),
-      row("progress-pembayaran", "30%", 30),
-      row("progress-equals-paid", "30%", 30),
     ];
     return modelResponse(output);
   }, async () =>
@@ -2499,7 +2479,90 @@ test("narrative progress needs explicit progress wording tied to its percentage"
     ],
   );
   const warnings = result.extraction.quality_warnings.join(" ");
-  for (const index of [0, 1, 2, 3, 4, 6, 7, 8, 12, 23, 24, 25, 26, 27, 28, 29, 30, 31, 33, 34, 35, 36, 37, 38, 39, 40, 41]) {
+  for (const index of [0, 1, 2, 3, 4, 6, 7, 8, 12, 23, 24, 25, 26, 27, 28, 29, 30, 31]) {
+    assert.match(
+      warnings,
+      new RegExp(`progress\\[${index}\\].*not linked to explicit progress`),
+    );
+  }
+});
+
+test("plural metrics and delimiter-to-value wording claim the percentage", async () => {
+  const sources = {
+    "payments-of": "Progress of payments: 30%",
+    "payments-suffix": "Progress: 40% of payments",
+    "risks-of": "Progress of risks: 30%",
+    "budgets-suffix": "Progress: 40% of budgets",
+    "delays-of": "Progress of delays: 30%",
+    "progress-paid": "Progress: paid 30%",
+    "progress-payment": "Progress: payment 30%",
+    "progress-pembayaran": "Progress: pembayaran 30%",
+    "progress-equals-paid": "Progress = paid 30%",
+    // The same guard must not reject a clearly delimited progress field.
+    "risk-comma-progress": "Risk: high, Project progress: 25%",
+  };
+  const chunks = [{
+    chunkIndex: 0,
+    chunkText: Object.values(sources).join("; "),
+    sourceReferences: Object.entries(sources).map(([sourceId, text]) => ({
+      sourceId,
+      chunkIndex: 0,
+      text,
+      modelText: text,
+    })),
+  }];
+  const result = await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    const output = baseGroupOutput(references);
+    const row = (sourceId, rawValue, percent = 25) => ({
+      raw_value: rawValue,
+      percent,
+      scope_level: "project",
+      scope_label: null,
+      period_label: null,
+      as_of_date: null,
+      excerpt: sources[sourceId],
+      source_id: sourceId,
+    });
+    output.assurance_observations.progress = [
+      // Plural metric words claim the percentage exactly like singular ones.
+      row("payments-of", "30%", 30),
+      row("payments-suffix", "40%", 40),
+      row("risks-of", "30%", 30),
+      row("budgets-suffix", "40%", 40),
+      row("delays-of", "30%", 30),
+      // Words between the field delimiter and the value belong to the value.
+      row("progress-paid", "30%", 30),
+      row("progress-payment", "30%", 30),
+      row("progress-pembayaran", "30%", 30),
+      row("progress-equals-paid", "30%", 30),
+      // A clearly delimited progress field beside a risk field still counts.
+      row("risk-comma-progress", "25%"),
+    ];
+    return modelResponse(output);
+  }, async () =>
+    await extractDocumentGroups(
+      job(chunks[0].chunkText, { fileName: "narrative-progress-plurals.txt" }),
+      chunks,
+      { parserVersion: "narrative-progress-plurals-v1" },
+      memoryGroupStore(),
+    ),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  assert.deepEqual(
+    result.extraction.assurance_observations.progress.map(
+      ({ raw_value, percent, excerpt }) => [raw_value, percent, excerpt],
+    ),
+    [["25%", 25, sources["risk-comma-progress"]]],
+  );
+  const warnings = result.extraction.quality_warnings.join(" ");
+  for (const index of [0, 1, 2, 3, 4, 5, 6, 7, 8]) {
     assert.match(
       warnings,
       new RegExp(`progress\\[${index}\\].*not linked to explicit progress`),
