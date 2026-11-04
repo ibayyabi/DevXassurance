@@ -1997,7 +1997,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
   assert.equal(cached.parserVersion, "document-parser/18");
-  assert.equal(cached.schemaVersion, "phase6-document-extraction/32");
+  assert.equal(cached.schemaVersion, "phase6-document-extraction/33");
 
   assert.equal(cached.status, "completed");
   assert.deepEqual(
@@ -2337,6 +2337,96 @@ test("risk likelihood percentages need a separate unambiguous progress field", a
     result.extraction.quality_warnings.join(" "),
     /risk likelihood or rating, not progress evidence/,
   );
+});
+
+test("narrative progress needs explicit progress wording tied to its percentage", async () => {
+  const sources = {
+    "risk-colon": "Risk likelihood: 25%",
+    "risk-suffix": "25% likelihood",
+    "risk-is": "Risk likelihood is 25%",
+    "risk-and-progress": "Risk likelihood is 25%; Project progress: 25%",
+    "suffix-and-progress": "25% likelihood; Project progress: 25%",
+    "risk-and-other-progress": "Risk likelihood is 25%; Project progress: 30%",
+    "progress-only": "Project progress: 25%",
+    "realisasi-only": "Realisasi: 25%",
+    "unclear-percent": "Budget utilization: 25%",
+  };
+  const chunks = [{
+    chunkIndex: 0,
+    chunkText: Object.values(sources).join("; "),
+    sourceReferences: Object.entries(sources).map(([sourceId, text]) => ({
+      sourceId,
+      chunkIndex: 0,
+      text,
+      modelText: text,
+    })),
+  }];
+  const result = await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    const output = baseGroupOutput(references);
+    const row = (sourceId, rawValue, percent = 25) => ({
+      raw_value: rawValue,
+      percent,
+      scope_level: "project",
+      scope_label: null,
+      period_label: null,
+      as_of_date: null,
+      excerpt: sources[sourceId],
+      source_id: sourceId,
+    });
+    output.assurance_observations.progress = [
+      row("risk-colon", "25%"),
+      row("risk-suffix", "25%"),
+      row("risk-suffix", "25% likelihood"),
+      // A risk sentence with a copula used to slip through the denylist.
+      row("risk-is", "25%"),
+      row("risk-is", "Risk likelihood is 25%"),
+      row("risk-and-progress", "25%"),
+      // A whole-field risk value stays a gap even when the same source reports
+      // the same percentage as progress in another clause.
+      row("risk-and-progress", "Risk likelihood is 25%"),
+      row("suffix-and-progress", "25% likelihood"),
+      // The cited risk percentage must not borrow the other clause's progress.
+      row("risk-and-other-progress", "25%"),
+      row("risk-and-other-progress", "30%", 30),
+      row("progress-only", "25%"),
+      row("realisasi-only", "25%"),
+      row("unclear-percent", "25%"),
+    ];
+    return modelResponse(output);
+  }, async () =>
+    await extractDocumentGroups(
+      job(chunks[0].chunkText, { fileName: "narrative-progress-semantics.txt" }),
+      chunks,
+      { parserVersion: "narrative-progress-semantics-v1" },
+      memoryGroupStore(),
+    ),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  assert.deepEqual(
+    result.extraction.assurance_observations.progress.map(
+      ({ raw_value, percent, excerpt }) => [raw_value, percent, excerpt],
+    ),
+    [
+      ["25%", 25, sources["risk-and-progress"]],
+      ["30%", 30, sources["risk-and-other-progress"]],
+      ["25%", 25, sources["progress-only"]],
+      ["25%", 25, sources["realisasi-only"]],
+    ],
+  );
+  const warnings = result.extraction.quality_warnings.join(" ");
+  for (const index of [0, 1, 2, 3, 4, 6, 7, 8, 12]) {
+    assert.match(
+      warnings,
+      new RegExp(`progress\\[${index}\\].*not linked to explicit progress`),
+    );
+  }
 });
 
 

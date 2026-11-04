@@ -393,7 +393,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/32";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/33";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -1292,14 +1292,64 @@ function citedPercentCellForClaim(
   );
   return matches.length === 1 ? matches[0] : null;
 }
-function citedProgressValueHasRiskContext(
+const NARRATIVE_PROGRESS_TERM_PATTERN =
+  "(?:progress|progres|kemajuan|completion|complete|completed|actual|aktual|realisasi|penyelesaian|selesai|tercapai)";
+
+function percentTokenMatchesValue(token: string, percentValue: number): boolean {
+  const numeric = token.match(/\d+(?:[.,]\d+)?/u)?.[0];
+  if (!numeric) return false;
+  const value = Number(numeric.replace(",", "."));
+  return Number.isFinite(value) && Math.abs(value - percentValue) < 1e-9;
+}
+
+function narrativeProgressPercentIsSourceLinked(
+  excerpt: string,
+  rawValue: string,
+  percentValue: number,
+): boolean {
+  const candidate = rawValue.trim().toLocaleLowerCase();
+  if (!candidate) return false;
+  const percentTokens = [...candidate.matchAll(/\d+(?:[.,]\d+)?\s*(?:%|percent(?:age)?|persen)/giu)]
+    .filter((token) => percentTokenMatchesValue(token[0], percentValue));
+  if (!percentTokens.length) return false;
+  // Narrative progress needs a progress/completion/actual word tied to this
+  // percentage. A risk or other word elsewhere in the field or excerpt is not
+  // enough, so only narrow connectors may sit between the term and the value.
+  const progressBefore = new RegExp(
+    `(?:^|[^\\p{L}\\p{N}])(?:(?:project|overall|physical|total|reported|cumulative)\\s+)?${NARRATIVE_PROGRESS_TERM_PATTERN}\\s*(?:(?:is|was|are|were|at|of|reached|reaches|stands?|mencapai|sebesar|adalah|telah|sudah)\\s+)*(?:%|percent(?:age)?|persen)?\\s*[:=]?\\s*$`,
+    "iu",
+  );
+  const progressAfter = new RegExp(
+    `^\\s*(?:(?:project|overall|physical|total|reported|cumulative|is|was)\\s+)*${NARRATIVE_PROGRESS_TERM_PATTERN}\\b`,
+    "iu",
+  );
+  for (const clause of excerpt.split(/[;|\n]+|[.!?]\s+/u)) {
+    const text = clause.toLocaleLowerCase();
+    let valueIndex = text.indexOf(candidate);
+    while (valueIndex >= 0) {
+      for (const token of percentTokens) {
+        const start = valueIndex + (token.index ?? 0);
+        const end = start + token[0].length;
+        if (progressBefore.test(text.slice(0, start)) || progressAfter.test(text.slice(end))) {
+          return true;
+        }
+      }
+      valueIndex = text.indexOf(candidate, valueIndex + candidate.length);
+    }
+  }
+  return false;
+}
+
+function citedProgressPercentSemanticsError(
   group: ChunkGroup,
   citation: SourceCitation | null,
   rawValue: string,
-): boolean {
-  if (!citation) return false;
+  percentValue: number,
+  path: string,
+): string | null {
+  if (!citation) return null;
   const cited = citedReference(group, citation);
-  if (!cited) return false;
+  if (!cited) return null;
   const location = cited.reference.sourceLocation;
   if (location?.kind === "xlsx") {
     const exactCell =
@@ -1326,47 +1376,13 @@ function citedProgressValueHasRiskContext(
     const progressCellCount = matchingCells.filter(
       (cell) => progressMetricLabel.test(cell.label ?? "") && !riskMetricLabel.test(cell.label ?? ""),
     ).length;
-    return progressCellCount > 1 || (riskCellCount > 0 && progressCellCount !== 1);
+    return progressCellCount > 1 || (riskCellCount > 0 && progressCellCount !== 1)
+      ? `${path}.percent is a risk likelihood or rating, not progress evidence`
+      : null;
   }
-  const riskMetricBefore =
-    /(?:^|[^\p{L}\p{N}])(?:risk(?:\s+(?:likelihood|probability|rating|score|impact|severity|progress))?|likelihood|probability|rating|impact|severity)\s*(?:%|percent(?:age)?|score|rating)?\s*[:=]?\s*$/iu;
-  const riskMetricAfter =
-    /^\s*(?:risk\s+)?(?:likelihood|probability|rating|impact|severity|risk)\b/iu;
-  const progressMetricBefore =
-    /(?:^|[^\p{L}\p{N}])(?:project\s+)?(?:actual|progress|completion|completed|complete|realisasi|kemajuan)\s*(?:%|percent(?:age)?|persen)?\s*[:=]?\s*$/iu;
-  const progressMetricAfter =
-    /^\s*(?:project\s+)?(?:actual|progress|completion|completed|complete|realisasi|kemajuan)\b/iu;
-  const candidate = rawValue.trim().toLocaleLowerCase();
-  if (!candidate) return false;
-  const percentTokens = [...candidate.matchAll(/\d+(?:[.,]\d+)?\s*(?:%|percent(?:age)?|persen)/giu)];
-  if (percentTokens.length === 0) return false;
-  let riskSupportCount = 0;
-  let progressSupportCount = 0;
-  let ambiguousRole = false;
-  for (const clause of citation.excerpt.split(/[;|\n]+|[.!?]\s+/u)) {
-    const text = clause.toLocaleLowerCase();
-    let valueIndex = text.indexOf(candidate);
-    while (valueIndex >= 0) {
-      for (const token of percentTokens) {
-        const tokenIndex = token.index ?? 0;
-        const start = valueIndex + tokenIndex;
-        const end = start + token[0].length;
-        const prefix = text.slice(0, start);
-        const suffix = text.slice(end);
-        const isRisk = riskMetricBefore.test(prefix) || riskMetricAfter.test(suffix);
-        const isProgress = progressMetricBefore.test(prefix) || progressMetricAfter.test(suffix);
-        if (isRisk) riskSupportCount += 1;
-        if (isProgress) progressSupportCount += 1;
-        if (isRisk && isProgress) ambiguousRole = true;
-      }
-      valueIndex = text.indexOf(candidate, valueIndex + candidate.length);
-    }
-  }
-  return (
-    ambiguousRole ||
-    progressSupportCount > 1 ||
-    (riskSupportCount > 0 && progressSupportCount !== 1)
-  );
+  return narrativeProgressPercentIsSourceLinked(citation.excerpt, rawValue, percentValue)
+    ? null
+    : `${path}.percent is not linked to explicit progress, completion, or actual-reported wording; risk likelihood or rating, not progress evidence`;
 }
 function resolveSheetSourceLocations(
   group: ChunkGroup,
@@ -1652,7 +1668,7 @@ Rules:
 - Choose the cost measure from what the source says: approved_baseline (an approved or controlled budget reference), actual_to_date (cost already incurred), committed (contractually committed or ordered cost), eac (an explicitly reported total forecast or estimate at completion). Never record an actual or committed value as eac, and never record a value whose meaning the source does not state. Return [] only after processing this complete group and finding no cost values.
 - assurance_observations collect every source-backed milestone date, explicitly reported progress value, and item-level risk snapshot in this group, whatever the artifact's primary type. Do not infer baseline/current role; reviewer selection assigns that role later. Keep source scope, period, raw wording, and exact excerpt. Return [] for each array only when this complete group contains no such observation.
 - Milestones: keep the source label and raw date text. Normalize date only when the source explicitly gives an ISO YYYY-MM-DD date; do not convert locale dates. Set scope_level to project, wbs, or unknown from the source; WBS requires its exact scope_label.
-- Progress: report one entry per stated percentage, preserving 0 and the stated project/WBS scope. raw_value must be exact source wording; percent is the same percentage-point value (0–100), never a fraction, sum, average, or forecast. A General-formatted numeric cell requires a unique progress-semantics percent header (for example, Actual %); risk likelihood/probability percentages are not progress. Omit non-numeric or unclear values; use unknown only when the scope is unclear.
+- Progress: report one entry per stated percentage, preserving 0 and the stated project/WBS scope. raw_value must be exact source wording; percent is the same percentage-point value (0–100), never a fraction, sum, average, or forecast. A General-formatted numeric cell requires a unique progress-semantics percent header (for example, Actual %); risk likelihood/probability percentages are not progress. For narrative sources, the percentage needs explicit progress/completion/actual wording in the same statement (for example, progress, completion, actual, realisasi, kemajuan); an unclear percentage or one belonging to a risk likelihood/rating is not progress. Omit non-numeric or unclear values; use unknown only when the scope is unclear.
 - Risk: report each item separately with its source risk ID, status, source rating label/value/scale, owner, mitigation, mitigation due date, WBS, and period when stated. raw_value and excerpt must be verbatim source text. A register statement may say no_open_high_or_critical only when it explicitly states that no open high or critical risks exist; otherwise use open_risk_reported only for an explicit open-risk statement.
 - Never derive risk counts, conditions, changes, or dates. Do not turn no extracted rows into a claim that no risks exist. Unsupported values are omitted; the application validates the raw value and computes comparisons.
 - The application decides which cost values are comparable, normalizes amounts, and accepts baselines. Do not compare, calculate a variance, or claim that any value is approved for comparison.
@@ -3132,14 +3148,15 @@ function validateGroupExtraction(
     const citedPercentCell = percentValue === null || percentValue === undefined
       ? null
       : citedPercentCellForClaim(group, citation, rawValue, percentValue);
-    if (
-      percentValue !== null &&
-      percentValue !== undefined &&
-      citation &&
-      rawValue &&
-      citedProgressValueHasRiskContext(group, citation, rawValue)
-    ) {
-      rowErrors.push(`${path}.percent is a risk likelihood or rating, not progress evidence`);
+    if (percentValue !== null && percentValue !== undefined && citation && rawValue) {
+      const progressSemanticsError = citedProgressPercentSemanticsError(
+        group,
+        citation,
+        rawValue,
+        percentValue,
+        path,
+      );
+      if (progressSemanticsError) rowErrors.push(progressSemanticsError);
     }
     if (percentValue !== null && percentValue !== undefined && excerpt &&
       !citedTextSupportsNumericValue(`${percentValue}%`, rawValue ?? "") &&
