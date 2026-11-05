@@ -418,7 +418,9 @@ revoke all on function public.assurance_reference_snapshot(uuid, uuid) from publ
 -- A claim begun against the new reference fingerprint supersedes an older
 -- successful result. Do not let that stale success invalidate the fresh claim
 -- when the claim's row update invokes reference invalidation.
-create or replace function public.invalidate_assurance_reference_results(p_project_id uuid)
+create function public.invalidate_assurance_reference_results(
+  p_project_id uuid, p_include_source_changes boolean
+)
 returns void language plpgsql security definer set search_path = '' as $$
 declare
   r record;
@@ -442,8 +444,8 @@ begin
       r.status = 'analyzing' and attempt->>'outcome' = 'analyzing'
     ) then continue; end if;
     begin
-      source_snapshot := public.assurance_source_snapshot(p_project_id, r.id);
-      refs := public.assurance_reference_snapshot(p_project_id, r.id);
+      source_snapshot := case when p_include_source_changes
+        then public.assurance_source_snapshot(p_project_id, r.id) else null end;
     exception when others then
       source_snapshot := null;
       refs := null;
@@ -455,9 +457,11 @@ begin
       and attempt->>'reference_fingerprint' is not distinct from refs->>'fingerprint' then
       continue;
     end if;
-    source_changed := success->>'id' is not null and success->>'fingerprint' is not null
+    source_changed := p_include_source_changes and success->>'id' is not null
+      and success->>'fingerprint' is not null
       and success->>'fingerprint' is distinct from source_snapshot->>'fingerprint';
-    source_changed := source_changed or (r.status = 'analyzing' and attempt->>'outcome' = 'analyzing'
+    source_changed := source_changed or (p_include_source_changes
+      and r.status = 'analyzing' and attempt->>'outcome' = 'analyzing'
       and attempt->>'fingerprint' is not null
       and attempt->>'fingerprint' is distinct from source_snapshot->>'fingerprint');
     reference_changed := success->>'id' is not null and success->>'reference_fingerprint' is not null
@@ -484,8 +488,14 @@ begin
     where id = r.id and project_id = p_project_id;
   end loop;
 end;
+revoke all on function public.invalidate_assurance_reference_results(uuid, boolean)
+  from public, anon, authenticated;
+create or replace function public.invalidate_assurance_reference_results(p_project_id uuid)
+returns void language sql security definer set search_path = '' as $$
+  select public.invalidate_assurance_reference_results(p_project_id, true);
 $$;
-revoke all on function public.invalidate_assurance_reference_results(uuid) from public, anon, authenticated;
+revoke all on function public.invalidate_assurance_reference_results(uuid)
+  from public, anon, authenticated;
 -- Prevent direct authenticated review updates from locking a review before the
 -- project. Review mutations must use the project-first security-definer RPCs.
 drop policy if exists "assurance_reviews_update_by_project_uploaders" on public.assurance_reviews;
@@ -569,7 +579,14 @@ begin
       -- invalidation makes the same result inactive.
       perform public.invalidate_assurance_observation_results(project_id);
     end if;
-    perform public.invalidate_assurance_reference_results(project_id);
+    if tg_table_name = 'assurance_observation_decisions' then
+      -- Ticket 03 owns invalidation for selected decisions. Ticket 05 checks
+      -- only comparison references here (prior decisions/newer review), so its
+      -- source-change reason cannot overwrite ticket 03's reviewer-specific one.
+      perform public.invalidate_assurance_reference_results(project_id, false);
+    else
+      perform public.invalidate_assurance_reference_results(project_id);
+    end if;
   end loop;
   return null;
 end;

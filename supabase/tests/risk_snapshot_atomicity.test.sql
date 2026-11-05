@@ -11,7 +11,8 @@
 -- deadlock. pgTAP runs after migrations 202611050001, 202611050002, and 003.
 --   psql -v ON_ERROR_STOP=1 -f supabase/tests/risk_snapshot_atomicity.test.sql
 begin;
-select extensions.plan(38);
+select set_config('storage.allow_delete_query', 'true', true);
+select extensions.plan(40);
 select ok((
   select lock_position > 0 and lock_position < review_position
   from (
@@ -263,6 +264,21 @@ select is(public.assurance_analysis_is_current('51000000-0000-4000-8000-00000000
 select pg_temp.add_claim(6);
 select is(pg_temp.finish_current((select claim from risk_claims where stage=6)), true,
   'analysis can publish after the changed prior decision is included');
+insert into public.assurance_observation_decisions (
+  id, project_id, target_type, document_id, source_content_hash, parser_version,
+  contract_version, observation_fingerprint, decision, reason, decided_by
+)
+select '51000000-0000-4000-8000-000000000054', o.project_id, 'assurance', o.document_id,
+  o.source_content_hash, o.parser_version, o.contract_version, o.observation_fingerprint,
+  'accepted', 'Current risk verified', '51000000-0000-4000-8000-000000000001'
+from public.assurance_observations o where o.id = '51000000-0000-4000-8000-000000000042';
+select is((select analysis_error from public.assurance_reviews
+  where id = '51000000-0000-4000-8000-000000000022'),
+  'Reviewer decisions changed. Run the analysis again.',
+  'ticket 05 preserves ticket 03 reviewer-specific invalidation reason');
+select ok((select analysis_metadata->'observation_decision_invalidation'->>'reason'
+  from public.assurance_reviews where id = '51000000-0000-4000-8000-000000000022')
+  = 'Reviewer decisions changed', 'ticket 03 decision invalidation metadata remains intact');
 update public.documents set file_name = 'current-reviewed.pdf',
   confirmed_workstream = 'Electrical'
 where id = '51000000-0000-4000-8000-000000000033';
