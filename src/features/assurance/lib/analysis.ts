@@ -50,11 +50,11 @@ export type MilestoneObservation = {
 };
 
 /**
- * A reported progress percentage at project or WBS level, preserved exactly as
- * one source states it. The role records which evidence group it came from so a
- * cross-period comparison can use the reviewer-selected current period against a
- * prior baseline period for the same scope. Progress is never aggregated from
- * WBS percentages into a project total and never converted into a forecast date.
+ * A normalized percentage at project or WBS level, preserved from one source.
+ * Role identifies the reviewer-selected evidence group: older dated
+ * current-role observations may provide a prior snapshot, while baseline-role
+ * evidence stays a separate approved baseline. Progress is never aggregated
+ * from WBS percentages into a project total or converted into a forecast date.
  */
 export type ProgressObservation = {
   role: "baseline" | "current";
@@ -69,7 +69,7 @@ export type ProgressObservation = {
    */
   measureKind: "actual" | "planned" | "unspecified";
   periodLabel: string | null;
-  /** Source-proven time basis for this value; absent legacy claims stay unassessed. */
+  /** Source-proven measurement/period basis; absent legacy claims stay unassessed. */
   periodBasis: ProgressPeriodBasis | null;
   asOfDate: string | null;
   excerpt: string | null;

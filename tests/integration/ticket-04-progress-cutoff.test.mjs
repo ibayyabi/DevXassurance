@@ -87,7 +87,7 @@ test("W4/W5 SB01 actual progress produces +7.90 pp across the two cut-offs", () 
   const results = buildProgressComparison({
     observations: [
       progress({
-        role: "baseline", measureKind: "actual", percent: 12.5,
+        role: "current", measureKind: "actual", percent: 12.5,
         periodLabel: "W4", asOfDate: "2026-10-09",
         excerpt: "Actual %: 12.5% — Cut-off Date: 2026-10-09",
         sourceRef: { observationId: "sb01-w4-actual", documentId: "w4", sourceContentHash: "a".repeat(64), parserVersion: "document-parser/18", contractVersion: "pmo-assurance-observations/1", evidenceChunkIndex: 0, pageNumber: null, sectionLabel: "Weekly Report", sourceLocation: { sheetName: "Weekly Report", cellRangeStart: "D7", cellRangeEnd: "D7" }, excerpt: "Actual %: 12.5%" },
@@ -117,8 +117,8 @@ test("W4/W5 SB01 actual progress produces +7.90 pp across the two cut-offs", () 
 test("planned and actual stay separate rows with separate deltas", () => {
   const results = buildProgressComparison({
     observations: [
-      progress({ role: "baseline", measureKind: "planned", percent: 11.45, asOfDate: "2026-10-09" }),
-      progress({ role: "baseline", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
+      progress({ role: "current", measureKind: "planned", percent: 11.45, asOfDate: "2026-10-09" }),
+      progress({ role: "current", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
       progress({ role: "current", measureKind: "planned", percent: 18.13, asOfDate: "2026-10-16" }),
       progress({ role: "current", measureKind: "actual", percent: 20.4, asOfDate: "2026-10-16" }),
     ],
@@ -139,7 +139,7 @@ test("planned and actual stay separate rows with separate deltas", () => {
 test("planned and actual values are never paired as the same measurement", () => {
   const results = buildProgressComparison({
     observations: [
-      progress({ role: "baseline", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
+      progress({ role: "current", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
       progress({ role: "current", measureKind: "planned", percent: 18.13, asOfDate: "2026-10-16" }),
     ],
     cutoffDate: "2026-10-16",
@@ -159,7 +159,7 @@ test("planned and actual values are never paired as the same measurement", () =>
 test("unspecified measurement kind is preserved but never compared", () => {
   const results = buildProgressComparison({
     observations: [
-      progress({ role: "baseline", measureKind: "unspecified", percent: 12.5, asOfDate: "2026-10-09" }),
+      progress({ role: "current", measureKind: "unspecified", percent: 12.5, asOfDate: "2026-10-09" }),
       progress({ role: "current", measureKind: "unspecified", percent: 20.4, asOfDate: "2026-10-16" }),
     ],
     cutoffDate: "2026-10-16",
@@ -173,7 +173,8 @@ test("the prior snapshot is distinct from the approved baseline", () => {
   const results = buildProgressComparison({
     observations: [
       progress({ role: "baseline", measureKind: "planned", percent: 60, periodLabel: "Baseline 18 Sep" }),
-      progress({ role: "baseline", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
+      progress({ role: "baseline", measureKind: "actual", percent: 5, asOfDate: "2026-10-02" }),
+      progress({ role: "current", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
       progress({ role: "current", measureKind: "actual", percent: 20.4, asOfDate: "2026-10-16" }),
     ],
     cutoffDate: "2026-10-16",
@@ -181,50 +182,86 @@ test("the prior snapshot is distinct from the approved baseline", () => {
   });
   const actual = results.find((result) => result.measureKind === "actual");
   const planned = results.find((result) => result.measureKind === "planned");
-  assert.equal(actual.prior.percent, 12.5, "the dated W4 snapshot is the prior leg");
-  assert.equal(planned.baseline.percent, 60, "the undated approved baseline is reported separately");
-  assert.equal(actual.baseline, null);
-  assert.ok(Math.abs(actual.deltaPercentPoints - 7.9) < 1e-9, "baseline does not participate in the delta");
+  assert.equal(actual.prior.percent, 12.5, "the current-role W4 snapshot is the prior leg");
+  assert.equal(actual.baseline.percent, 5, "a dated baseline-role value remains a separate baseline");
+  assert.equal(planned.baseline.percent, 60, "the approved plan is reported separately");
+  assert.ok(Math.abs(actual.deltaPercentPoints - 7.9) < 1e-9, "baseline never participates in the delta");
 });
 
-test("future and equal-dated evidence stays a gap instead of becoming the prior", () => {
+test("baseline-role-only history is not promoted to a prior snapshot", () => {
+  const result = buildProgressComparison({
+    observations: [
+      progress({ role: "baseline", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
+      progress({ role: "current", measureKind: "actual", percent: 20.4, asOfDate: "2026-10-16" }),
+    ],
+    cutoffDate: "2026-10-16",
+    wbsMappings: [],
+  })[0];
+  assert.equal(result.baseline.percent, 12.5);
+  assert.equal(result.prior, null);
+  assert.equal(result.deltaPercentPoints, null);
+  assert.equal(result.deltaGapReason, "no_prior_snapshot");
+});
+
+test("cross-period progress requires a source-proven matching percent basis", () => {
+  const compare = (priorBasis, currentBasis) => buildProgressComparison({
+    observations: [
+      progress({ role: "current", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09", periodBasis: priorBasis }),
+      progress({ role: "current", measureKind: "actual", percent: 20.4, asOfDate: "2026-10-16", periodBasis: currentBasis }),
+    ],
+    cutoffDate: "2026-10-16",
+    wbsMappings: [],
+  })[0];
+  const mismatch = compare("weekly", "cumulative");
+  assert.equal(mismatch.prior.percent, 12.5);
+  assert.equal(mismatch.deltaPercentPoints, null);
+  assert.equal(mismatch.deltaGapReason, "measurement_basis_mismatch");
+  const unknown = compare(null, "weekly");
+  assert.equal(unknown.prior.percent, 12.5);
+  assert.equal(unknown.deltaPercentPoints, null);
+  assert.equal(unknown.deltaGapReason, "unproven_measurement_basis");
+});
+
+test("future and equal-dated current evidence stays a gap instead of becoming the prior", () => {
   const results = buildProgressComparison({
     observations: [
-      progress({ role: "baseline", measureKind: "actual", percent: 99, asOfDate: "2026-10-30" }),
-      progress({ role: "baseline", measureKind: "actual", percent: 20.4, asOfDate: "2026-10-16" }),
+      progress({ role: "current", measureKind: "actual", percent: 99, asOfDate: "2026-10-30" }),
       progress({ role: "current", measureKind: "actual", percent: 20.4, asOfDate: "2026-10-16" }),
+      progress({ role: "baseline", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
     ],
     cutoffDate: "2026-10-16",
     wbsMappings: [],
   });
   const scope = results[0];
-  assert.equal(scope.prior, null, "equal/later cut-offs are not silently mixed in");
+  assert.equal(scope.current.percent, 20.4);
+  assert.equal(scope.baseline.percent, 12.5, "dated baseline-role evidence stays separate");
+  assert.equal(scope.prior, null, "the baseline is not promoted to a prior snapshot");
   assert.equal(scope.deltaPercentPoints, null);
   assert.ok(scope.gaps.some(({ reason, observation }) =>
-    reason === "snapshot_not_earlier" && observation.percent === 99));
+    reason === "current_cutoff_mismatch" && observation.percent === 99));
 });
 
 test("month-only metadata never fabricates a cut-off pairing", () => {
   const results = buildProgressComparison({
     observations: [
-      progress({ role: "baseline", measureKind: "actual", percent: 12.5, periodLabel: "Oktober 2026", asOfDate: null }),
+      progress({ role: "current", measureKind: "actual", percent: 12.5, periodLabel: "Oktober 2026", asOfDate: null }),
       progress({ role: "current", measureKind: "actual", percent: 20.4, asOfDate: "2026-10-16" }),
     ],
     cutoffDate: "2026-10-16",
     wbsMappings: [],
   });
   const scope = results[0];
-  assert.equal(scope.baseline, null, "a month-only timestamp is not an approved undated baseline");
+  assert.equal(scope.baseline, null);
   assert.equal(scope.prior, null);
   assert.equal(scope.deltaPercentPoints, null);
-  assert.ok(scope.gaps.some(({ reason }) => reason === "snapshot_cutoff_unknown"));
+  assert.ok(scope.gaps.some(({ reason }) => reason === "current_cutoff_unknown"));
 });
 
 test("the latest earlier snapshot wins and earlier ones stay out of the way", () => {
   const results = buildProgressComparison({
     observations: [
-      progress({ role: "baseline", measureKind: "actual", percent: 5, asOfDate: "2026-10-02" }),
-      progress({ role: "baseline", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
+      progress({ role: "current", measureKind: "actual", percent: 5, asOfDate: "2026-10-02" }),
+      progress({ role: "current", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
       progress({ role: "current", measureKind: "actual", percent: 20.4, asOfDate: "2026-10-16" }),
     ],
     cutoffDate: "2026-10-16",
@@ -237,7 +274,7 @@ test("the latest earlier snapshot wins and earlier ones stay out of the way", ()
 test("differing WBS labels stay separate until a mapping is accepted", () => {
   const results = buildProgressComparison({
     observations: [
-      progress({ role: "baseline", scopeLevel: "wbs", scopeLabel: "Alarm", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
+      progress({ role: "current", scopeLevel: "wbs", scopeLabel: "Alarm", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
       progress({ role: "current", scopeLevel: "wbs", scopeLabel: "SB01", measureKind: "actual", percent: 20.4, asOfDate: "2026-10-16" }),
     ],
     wbsMappings: [],
@@ -247,7 +284,7 @@ test("differing WBS labels stay separate until a mapping is accepted", () => {
 
   const mapped = buildProgressComparison({
     observations: [
-      progress({ role: "baseline", scopeLevel: "wbs", scopeLabel: "Alarm", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
+      progress({ role: "current", scopeLevel: "wbs", scopeLabel: "Alarm", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
       progress({ role: "current", scopeLevel: "wbs", scopeLabel: "SB01", measureKind: "actual", percent: 20.4, asOfDate: "2026-10-16" }),
     ],
     wbsMappings: [
@@ -262,7 +299,7 @@ test("differing WBS labels stay separate until a mapping is accepted", () => {
 test("unlabelled WBS observations stay separate and never imply matching scope", () => {
   const results = buildProgressComparison({
     observations: [
-      progress({ role: "baseline", scopeLevel: "wbs", scopeLabel: null, measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
+      progress({ role: "current", scopeLevel: "wbs", scopeLabel: null, measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
       progress({ role: "current", scopeLevel: "wbs", scopeLabel: null, measureKind: "actual", percent: 20.4, asOfDate: "2026-10-16" }),
     ],
     cutoffDate: "2026-10-16",
@@ -275,8 +312,8 @@ test("unlabelled WBS observations stay separate and never imply matching scope",
 test("conflicting values at one scope and cut-off become an explicit gap", () => {
   const results = buildProgressComparison({
     observations: [
-      progress({ role: "baseline", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
-      progress({ role: "baseline", measureKind: "actual", percent: 13.5, asOfDate: "2026-10-09" }),
+      progress({ role: "current", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
+      progress({ role: "current", measureKind: "actual", percent: 13.5, asOfDate: "2026-10-09" }),
       progress({ role: "current", measureKind: "actual", percent: 20.4, asOfDate: "2026-10-16" }),
     ],
     cutoffDate: "2026-10-16",
@@ -290,7 +327,7 @@ test("conflicting values at one scope and cut-off become an explicit gap", () =>
 test("a future current value cannot satisfy the review cut-off", () => {
   const results = buildProgressComparison({
     observations: [
-      progress({ role: "baseline", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
+      progress({ role: "current", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
       progress({ role: "current", measureKind: "actual", percent: 20.4, asOfDate: "2026-10-30" }),
     ],
     cutoffDate: "2026-10-16",
@@ -304,7 +341,7 @@ test("a future current value cannot satisfy the review cut-off", () => {
 test("a correction changes the compared value but preserves the source value and decision", () => {
   const results = buildProgressComparison({
     observations: [
-      progress({ role: "baseline", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
+      progress({ role: "current", measureKind: "actual", percent: 12.5, asOfDate: "2026-10-09" }),
       progress({
         role: "current", measureKind: "actual", percent: 21.4, sourcePercent: 20.4,
         asOfDate: "2026-10-16",

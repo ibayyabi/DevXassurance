@@ -83,6 +83,8 @@ type ProgressScopeResult = {
     | "no_prior_snapshot"
     | "unproven_measure_kind"
     | "uncomparable_scope"
+    | "unproven_measurement_basis"
+    | "measurement_basis_mismatch"
     | "conflicting_observations"
     | null;
   gaps: ProgressComparisonGap[];
@@ -631,6 +633,10 @@ function progressDeltaGapReason(scope: ProgressScopeResult) {
       return "Jenis pengukuran tidak terbukti dari sumber — perubahan tidak dihitung.";
     case "uncomparable_scope":
       return "Lingkup tidak dapat dipastikan atau tidak sebanding antarperiode.";
+    case "unproven_measurement_basis":
+      return "Dasar pengukuran persentase tidak terbukti pada kedua snapshot — perubahan tidak dihitung.";
+    case "measurement_basis_mismatch":
+      return "Dasar pengukuran snapshot berbeda — perubahan tidak dihitung.";
     case "conflicting_observations":
       return "Nilai sumber untuk lingkup dan cut-off ini bertentangan — tidak ada nilai yang dipilih.";
     default:

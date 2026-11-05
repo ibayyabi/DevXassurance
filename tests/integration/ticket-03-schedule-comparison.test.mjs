@@ -99,6 +99,7 @@ function progress(overrides = {}) {
     scopeLabel: null,
     percent: 60,
     measureKind: "actual",
+    periodBasis: "weekly",
     periodLabel: role === "baseline" ? "September 2026" : "October 2026",
     asOfDate: role === "baseline" ? "2026-09-30" : "2026-10-31",
     excerpt: "Overall completion is 60%.",
@@ -216,7 +217,7 @@ test("progress is preserved as reported and compared only across comparable scop
   const results = buildProgressComparison({
     observations: [
       progress({ role: "current", scopeLevel: "project", percent: 60 }),
-      progress({ role: "baseline", scopeLevel: "project", percent: 45, periodLabel: "September 2026" }),
+      progress({ role: "current", scopeLevel: "project", percent: 45, periodLabel: "W4", asOfDate: "2026-10-30" }),
       progress({ role: "current", scopeLevel: "wbs", scopeLabel: "1.2", percent: 80 }),
     ],
     wbsMappings: [],
@@ -225,7 +226,7 @@ test("progress is preserved as reported and compared only across comparable scop
   const byScope = Object.fromEntries(
     results.map((result) => [result.scopeLevel === "project" ? "project" : result.scopeLabel, result]),
   );
-  // Project total: current preserved, prior preserved, delta in percentage points.
+  // Project total: current and prior snapshots stay visible; delta uses percentage points.
   assert.equal(byScope.project.current.percent, 60);
   assert.equal(byScope.project.prior.percent, 45);
   assert.equal(byScope.project.deltaPercentPoints, 15);
@@ -238,7 +239,7 @@ test("progress is preserved as reported and compared only across comparable scop
 test("WBS progress is compared across periods only through accepted WBS mappings", () => {
   const observations = [
     progress({ role: "current", scopeLevel: "wbs", scopeLabel: "WP-1.2", percent: 70 }),
-    progress({ role: "baseline", scopeLevel: "wbs", scopeLabel: "1.2", percent: 50, periodLabel: "September 2026" }),
+    progress({ role: "current", scopeLevel: "wbs", scopeLabel: "1.2", percent: 50, periodLabel: "W4", asOfDate: "2026-10-30" }),
   ];
   const withoutMapping = buildProgressComparison({
     observations,
@@ -264,7 +265,7 @@ test("a WBS progress value without a label is preserved but never compared", () 
   const results = buildProgressComparison({
     observations: [
       progress({ role: "current", scopeLevel: "wbs", scopeLabel: null, percent: 30 }),
-      progress({ role: "baseline", scopeLevel: "wbs", scopeLabel: null, percent: 20 }),
+      progress({ role: "current", scopeLevel: "wbs", scopeLabel: null, percent: 20 }),
     ],
     wbsMappings: [],
     cutoffDate: "2026-10-31",

@@ -263,6 +263,8 @@ export type ProgressScopeResult = {
     | "no_prior_snapshot"
     | "unproven_measure_kind"
     | "uncomparable_scope"
+    | "unproven_measurement_basis"
+    | "measurement_basis_mismatch"
     | "conflicting_observations"
     | null;
   gaps: ProgressComparisonGap[];
@@ -313,6 +315,7 @@ function addProgressCandidate(
   observation: ProgressObservation,
   key: string,
   label: string | null,
+  cutoffDate: string | null,
 ): void {
   const kind = observation.measureKind === "planned" || observation.measureKind === "actual"
     ? observation.measureKind
@@ -325,15 +328,16 @@ function addProgressCandidate(
     snapshots: [],
     approvedBaselines: [],
   };
-  if (observation.role === "current") {
-    entry.currentCandidates.push(observation);
+  if (observation.role === "baseline") {
+    entry.approvedBaselines.push(observation);
   } else if (
-    observation.asOfDate ||
-    (observation.periodLabel && !/\bbaseline\b/iu.test(observation.periodLabel))
+    cutoffDate &&
+    observation.asOfDate &&
+    observation.asOfDate < cutoffDate
   ) {
     entry.snapshots.push(observation);
   } else {
-    entry.approvedBaselines.push(observation);
+    entry.currentCandidates.push(observation);
   }
   scopes.set(key, entry);
 }
@@ -343,11 +347,11 @@ function hasConflictingPercentages(observations: readonly ProgressObservation[])
 }
 
 /**
- * Progress stays source-reported and per scope/measurement kind. Dated
- * baseline-role observations are snapshots, not approved baselines; only
- * undated baseline-role evidence occupies the separate baseline slot. A delta
- * needs an explicit current cut-off and a strictly earlier snapshot. Unknown
- * or conflicting evidence is returned as a cited gap, never silently chosen.
+ * Progress stays source-reported and per scope/measurement kind. Earlier
+ * dated current-role observations are snapshots; baseline-role evidence stays
+ * in its separate approved-baseline slot regardless of date. A delta needs a
+ * source-backed earlier snapshot and comparable percentage measurement basis.
+ * Unknown or conflicting evidence is returned as a cited gap, never chosen.
  */
 export function buildProgressComparison(input: {
   observations: readonly ProgressObservation[];
@@ -357,7 +361,7 @@ export function buildProgressComparison(input: {
   const scopes = new Map<string, ProgressScopeEntry>();
   input.observations.forEach((observation, index) => {
     const { key, label } = progressScopeKey(observation, input.wbsMappings, index);
-    addProgressCandidate(scopes, observation, key, label);
+    addProgressCandidate(scopes, observation, key, label, input.cutoffDate ?? null);
   });
 
   return [...scopes.values()]
@@ -469,11 +473,15 @@ export function buildProgressComparison(input: {
                   ? "unproven_measure_kind"
                   : !cutoffDate || !current.asOfDate
                     ? "current_cutoff_unknown"
-                    : !comparableScope
-                      ? "uncomparable_scope"
-                      : !prior || !prior.asOfDate || prior.asOfDate >= current.asOfDate
-                        ? "no_prior_snapshot"
-                        : null;
+                  : !comparableScope
+                    ? "uncomparable_scope"
+                    : !prior || !prior.asOfDate || prior.asOfDate >= current.asOfDate
+                      ? "no_prior_snapshot"
+                      : !current.periodBasis || !prior.periodBasis
+                        ? "unproven_measurement_basis"
+                        : current.periodBasis !== prior.periodBasis
+                          ? "measurement_basis_mismatch"
+                          : null;
       const deltaPercentPoints = deltaGapReason === null &&
         current?.percent !== null &&
         current?.percent !== undefined &&

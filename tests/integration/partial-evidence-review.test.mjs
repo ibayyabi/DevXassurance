@@ -63,9 +63,12 @@ const observation = (id, domain, observation_type, value, excerpt = "verbatim ex
 
 function fixture(options = {}) {
   const calls = [];
+  const currentSources = options.currentSources ?? [
+    source("current", "current", "Current W5", "b".repeat(64), options.currentObservations ?? [], allProcessed),
+  ];
   const sources = [
     source("base", "baseline", "Baseline W4", "a".repeat(64), options.baselineObservations ?? [], allProcessed),
-    source("current", "current", "Current W5", "b".repeat(64), options.currentObservations ?? [], allProcessed),
+    ...currentSources,
   ];
   const supabase = {
     rpc: async (name, input) => {
@@ -133,7 +136,7 @@ const progressObservation = (id, percent, extra = {}) => {
   const { source_row_location, ...observationExtra } = extra;
   const row = observation(id, "progress", "progress", {
     raw_value: `${percent}%`, percent, scope_level: "project", scope_label: null,
-    measure_kind: "actual",
+    measure_kind: "actual", period_basis: "weekly",
     period_label: null, as_of_date: id.includes("base") ? "2026-10-09" : "2026-10-16",
     ...observationExtra,
   });
@@ -162,31 +165,120 @@ test("rejected observations are excluded from analysis while accepted ones stay 
   assert.ok(!currentPercent.includes(40), "the rejected observation is excluded from the analysis");
 });
 
-test("correction replaces the compared percent; the metadata keeps the original value", async () => {
-  const f = fixture({
-    baselineObservations: [progressObservation("p-base", 12.5)],
-    currentObservations: [progressObservation("p-cur", 20.4, {
+test("two dated current-role sources supply prior/current while approved baseline stays separate", async () => {
+  const progressCell = (id, percent, week, date, row) =>
+    progressObservation(id, percent, {
+      period_label: week,
+      as_of_date: date,
+      period_basis: "paired_variance_formula",
       source_row_location: {
         kind: "xlsx", sheetName: "Weekly Report",
-        rowStart: 8, rowEnd: 8, cellRangeStart: "A8", cellRangeEnd: "H8",
+        rowStart: row, rowEnd: row, cellRangeStart: `A${row}`, cellRangeEnd: `H${row}`,
       },
       value_source_location: {
         kind: "xlsx", sheetName: "Weekly Report",
-        rowStart: 8, rowEnd: 8, cellRangeStart: "D8", cellRangeEnd: "D8",
+        rowStart: row, rowEnd: row, cellRangeStart: `D${row}`, cellRangeEnd: `D${row}`,
       },
-      source_rag_claim: {
-        label: "Green",
-        evidence_chunk_index: 0,
-        excerpt: "RAG: Green",
-        page_number: null,
-        section_label: "Weekly Report",
-        freshness: "cached_formula_unverified",
-        source_location: {
-          kind: "xlsx", sheetName: "Weekly Report",
-          rowStart: 8, rowEnd: 8, cellRangeStart: "F8", cellRangeEnd: "F8",
-        },
+    });
+  const f = fixture({
+    baselineObservations: [
+      progressObservation("p-approved-baseline", 5, {
+        as_of_date: null,
+        period_label: "Approved baseline",
+      }),
+    ],
+    currentSources: [
+      source("w4", "current", "Alarm weekly.xlsx", "a".repeat(64), [
+        progressCell("p-w4", 12.5, "W4", "2026-10-09", 7),
+      ], allProcessed),
+      source("current", "current", "Alarm weekly.xlsx", "b".repeat(64), [
+        progressCell("p-w5", 20.4, "W5", "2026-10-16", 8),
+      ], allProcessed),
+    ],
+  });
+
+  await f.assurance.runAssuranceAnalysis(form());
+  const publication = f.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
+  const scope = publication.input.p_result_metadata.progress_observations.find(
+    (entry) => entry.measureKind === "actual",
+  );
+  assert.equal(scope.prior.percent, 12.5);
+  assert.equal(scope.prior.asOfDate, "2026-10-09");
+  assert.equal(scope.prior.measureKind, "actual");
+  assert.equal(scope.prior.scopeLevel, "project");
+  assert.equal(scope.prior.periodBasis, "paired_variance_formula");
+  assert.equal(scope.prior.sourceRef.sourceLocation.cellRangeStart, "A7");
+  assert.equal(scope.prior.sourceRef.valueSourceLocation.cellRangeStart, "D7");
+  assert.equal(scope.prior.role, "current");
+  assert.equal(scope.prior.sourceRef.sourceContentHash, "a".repeat(64));
+  assert.equal(scope.current.percent, 20.4);
+  assert.equal(scope.current.asOfDate, "2026-10-16");
+  assert.equal(scope.current.scopeLevel, "project");
+  assert.equal(scope.current.periodBasis, "paired_variance_formula");
+  assert.equal(scope.current.sourceRef.sourceLocation.cellRangeStart, "A8");
+  assert.equal(scope.current.sourceRef.valueSourceLocation.cellRangeStart, "D8");
+  assert.equal(scope.current.sourceRef.sourceContentHash, "b".repeat(64));
+  assert.equal(scope.baseline.percent, 5);
+  assert.equal(scope.prior.sourceRef.observationId, "p-w4");
+  assert.equal(scope.current.sourceRef.observationId, "p-w5");
+  assert.ok(Math.abs(scope.deltaPercentPoints - 7.9) < 1e-9);
+});
+
+test("dated baseline-role evidence alone does not satisfy the prior snapshot", async () => {
+  const f = fixture({
+    baselineObservations: [
+      progressObservation("p-base", 12.5, {
+        period_label: "W4",
+        period_basis: "weekly",
+      }),
+    ],
+    currentObservations: [
+      progressObservation("p-cur", 20.4, {
+        period_label: "W5",
+        period_basis: "weekly",
+      }),
+    ],
+  });
+  await f.assurance.runAssuranceAnalysis(form());
+  const publication = f.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
+  const scope = publication.input.p_result_metadata.progress_observations.find(
+    (entry) => entry.measureKind === "actual",
+  );
+  assert.equal(scope.baseline.percent, 12.5);
+  assert.equal(scope.prior, null);
+  assert.equal(scope.deltaPercentPoints, null);
+  assert.equal(scope.deltaGapReason, "no_prior_snapshot");
+});
+
+test("correction replaces the compared percent; the metadata keeps the original value", async () => {
+  const w4Observation = progressObservation("p-base", 12.5, { period_label: "W4" });
+  const w5Observation = progressObservation("p-cur", 20.4, {
+    source_row_location: {
+      kind: "xlsx", sheetName: "Weekly Report",
+      rowStart: 8, rowEnd: 8, cellRangeStart: "A8", cellRangeEnd: "H8",
+    },
+    value_source_location: {
+      kind: "xlsx", sheetName: "Weekly Report",
+      rowStart: 8, rowEnd: 8, cellRangeStart: "D8", cellRangeEnd: "D8",
+    },
+    source_rag_claim: {
+      label: "Green",
+      evidence_chunk_index: 0,
+      excerpt: "RAG: Green",
+      page_number: null,
+      section_label: "Weekly Report",
+      freshness: "cached_formula_unverified",
+      source_location: {
+        kind: "xlsx", sheetName: "Weekly Report",
+        rowStart: 8, rowEnd: 8, cellRangeStart: "F8", cellRangeEnd: "F8",
       },
-    })],
+    },
+  });
+  const f = fixture({
+    currentSources: [
+      source("w4", "current", "Prior W4", "a".repeat(64), [w4Observation], allProcessed),
+      source("current", "current", "Current W5", "b".repeat(64), [w5Observation], allProcessed),
+    ],
     decisions: [
       { document_id: "current", observation_fingerprint: "f".repeat(64), decision: "corrected",
         corrected_observation: { percent: 21.4 }, reason: "konfirmasi lapangan", decided_by: "user-1",
@@ -484,8 +576,8 @@ test("restricted roles cannot review observations or select evidence", async () 
 test("progress comparison still separates corrected review state from unreviewed observations", () => {
   const result = scheduleComparison.buildProgressComparison({
     observations: [
-      { role: "baseline", scopeLevel: "project", scopeLabel: null, percent: 12.5, measureKind: "actual", periodLabel: "W4", asOfDate: "2026-10-09", excerpt: "12,5%", sourceRef: null },
-      { role: "current", scopeLevel: "project", scopeLabel: null, percent: 21.4, measureKind: "actual", periodLabel: "W5", asOfDate: "2026-10-16", excerpt: "21,4%", sourceRef: null,
+      { role: "current", scopeLevel: "project", scopeLabel: null, percent: 12.5, measureKind: "actual", periodLabel: "W4", periodBasis: "weekly", asOfDate: "2026-10-09", excerpt: "12,5%", sourceRef: null },
+      { role: "current", scopeLevel: "project", scopeLabel: null, percent: 21.4, measureKind: "actual", periodLabel: "W5", periodBasis: "weekly", asOfDate: "2026-10-16", excerpt: "21,4%", sourceRef: null,
         reviewDecision: { decision: "corrected", percent: 21.4, reason: "konfirmasi lapangan" } },
       { role: "current", scopeLevel: "wbs", scopeLabel: "Alarm", percent: 40, measureKind: "actual", periodLabel: "W5", asOfDate: "2026-10-16", excerpt: "40%", sourceRef: null },
     ],
