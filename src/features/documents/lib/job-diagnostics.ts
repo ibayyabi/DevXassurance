@@ -2,9 +2,8 @@
 // parse job per document via the user's own Supabase client: RLS
 // (`ai_jobs_read_by_project_members`) keeps every row project-scoped and the
 // service-role key never reaches this path. All jobs of a project are paged
-// past the PostgREST row cap so the latest job per document is never silently
-// missing; a failed read yields no diagnostics instead of a wrong "active"
-// claim.
+// past the PostgREST row cap so the latest job per document is never silently missed;
+// a failed read returns null, distinct from a successful query with no job rows.
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type JobDiagnosticRow = {
@@ -31,14 +30,18 @@ export type JobDiagnostic = {
   retryPending: boolean;
   /** True while the lease is still live — the attempt is being worked on. */
   leaseActive: boolean;
+  /** True only when a recorded lease expiry has passed. */
   leaseExpired: boolean;
+  /** True when a processing job has no valid lease expiry to assess. */
+  leaseUnknown: boolean;
 };
 
 export const JOB_DIAGNOSTICS_PAGE_SIZE = 1000;
 
 export function mapJobDiagnostic(row: JobDiagnosticRow, now: Date = new Date()): JobDiagnostic {
   const leaseExpiry = row.lease_expires_at ? new Date(row.lease_expires_at) : null;
-  const availableAt = row.available_at ? new Date(row.available_at) : null;
+  const leaseExpiryMs = leaseExpiry?.getTime();
+  const leaseKnown = leaseExpiryMs !== undefined && Number.isFinite(leaseExpiryMs);
   return {
     jobId: row.id,
     status: row.status,
@@ -47,14 +50,16 @@ export function mapJobDiagnostic(row: JobDiagnosticRow, now: Date = new Date()):
     attemptCount: row.attempt_count ?? 0,
     maxAttempts: row.max_attempts,
     retryPending:
-      row.status === "queued" && availableAt !== null && availableAt.getTime() > now.getTime(),
+      row.status === "queued" && row.available_at !== null && new Date(row.available_at).getTime() > now.getTime(),
     leaseActive:
       row.status === "processing" &&
-      leaseExpiry !== null &&
-      leaseExpiry.getTime() > now.getTime(),
+      leaseKnown &&
+      leaseExpiryMs! > now.getTime(),
     leaseExpired:
       row.status === "processing" &&
-      (leaseExpiry === null || leaseExpiry.getTime() <= now.getTime()),
+      leaseKnown &&
+      leaseExpiryMs! <= now.getTime(),
+    leaseUnknown: row.status === "processing" && !leaseKnown,
   };
 }
 
@@ -78,26 +83,30 @@ export async function fetchJobDiagnostics(
   supabase: SupabaseClient,
   projectId: string,
   documentIds: string[],
-): Promise<Map<string, JobDiagnostic>> {
+): Promise<Map<string, JobDiagnostic> | null> {
   const byDocument = new Map<string, JobDiagnostic>();
   if (!documentIds.length) return byDocument;
   const now = new Date();
   // Ascending created_at order plus overwrite-on-repeat keeps the latest job
   // per document after full pagination. A page short of the full size ends the
   // scan; a page exactly at the cap is followed by one more range request.
-  for (let offset = 0; ; offset += JOB_DIAGNOSTICS_PAGE_SIZE) {
-    const { data, error } = await jobDiagnosticsQuery(supabase)
-      .eq("job_type", "parse_document")
-      .eq("project_id", projectId)
-      .in("document_id", documentIds)
-      .order("created_at", { ascending: true })
-      .range(offset, offset + JOB_DIAGNOSTICS_PAGE_SIZE - 1);
-    if (error) return new Map();
-    const rows = data ?? [];
-    for (const row of rows) {
-      byDocument.set(row.document_id, mapJobDiagnostic(row, now));
+  try {
+    for (let offset = 0; ; offset += JOB_DIAGNOSTICS_PAGE_SIZE) {
+      const { data, error } = await jobDiagnosticsQuery(supabase)
+        .eq("job_type", "parse_document")
+        .eq("project_id", projectId)
+        .in("document_id", documentIds)
+        .order("created_at", { ascending: true })
+        .range(offset, offset + JOB_DIAGNOSTICS_PAGE_SIZE - 1);
+      if (error) return null;
+      const rows = data ?? [];
+      for (const row of rows) {
+        byDocument.set(row.document_id, mapJobDiagnostic(row, now));
+      }
+      if (rows.length < JOB_DIAGNOSTICS_PAGE_SIZE) break;
     }
-    if (rows.length < JOB_DIAGNOSTICS_PAGE_SIZE) break;
+  } catch {
+    return null;
   }
   return byDocument;
 }

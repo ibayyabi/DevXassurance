@@ -101,6 +101,7 @@ export async function updateDocumentClassification(
 export async function retryDocumentProcessing(formData: FormData): Promise<void> {
   const projectId = String(formData.get("projectId") ?? "");
   const documentId = String(formData.get("documentId") ?? "");
+  const expectedExpiredJobId = String(formData.get("expectedExpiredJobId") ?? "");
 
   if (!projectId || !documentId) {
     throw new Error("Project and document are required to retry processing.");
@@ -112,6 +113,48 @@ export async function retryDocumentProcessing(formData: FormData): Promise<void>
     throw new Error("Your project role cannot retry document processing.");
   }
 
+  const { data: document, error: documentError } = await supabase
+    .from("documents")
+    .select("processing_status")
+    .eq("id", documentId)
+    .eq("project_id", projectId)
+    .maybeSingle();
+  if (documentError || !document) {
+    throw new Error(documentError?.message ?? "Document was not found in this project.");
+  }
+
+  const { data: latestJob, error: jobError } = await supabase
+    .from("ai_jobs")
+    .select("id, status, lease_expires_at")
+    .eq("project_id", projectId)
+    .eq("document_id", documentId)
+    .eq("job_type", "parse_document")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (jobError) throw new Error(jobError.message);
+
+  if (latestJob?.status === "processing") {
+    if (!expectedExpiredJobId) {
+      throw new Error("A processing job can only be retried after its lease is verified as expired.");
+    }
+    const leaseExpiresAt = latestJob.lease_expires_at
+      ? Date.parse(latestJob.lease_expires_at)
+      : Number.NaN;
+    if (
+      latestJob.id !== expectedExpiredJobId ||
+      !Number.isFinite(leaseExpiresAt) ||
+      leaseExpiresAt > Date.now()
+    ) {
+      throw new Error("The processing job no longer has a verifiably expired lease; wait for its current attempt.");
+    }
+  } else if (expectedExpiredJobId) {
+    throw new Error("The expired job has changed; refresh the document before retrying.");
+  } else if (document.processing_status !== "failed" || latestJob?.status === "queued") {
+    throw new Error("Only failed documents or processing jobs with an expired lease can be retried.");
+  }
+
+  // ponytail: this RPC cannot atomically bind the retry to the checked job ID/expiry; remove the TOCTOU window when its DB contract can be changed.
   const { error } = await supabase.rpc("retry_document_job", {
     retry_project_id: projectId,
     retry_document_id: documentId,

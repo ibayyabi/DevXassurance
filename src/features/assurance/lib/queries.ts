@@ -679,7 +679,7 @@ export async function getAssuranceWorkspace(projectId: string) {
         suggestedWorkstream: row.suggested_workstream,
         workstream: effective.workstream,
         confirmedWorkstream: row.confirmed_workstream,
-        jobDiagnostic: jobDiagnostics.get(row.id) ?? null,
+        jobDiagnostic: jobDiagnostics?.get(row.id) ?? null,
       };
     },
   );

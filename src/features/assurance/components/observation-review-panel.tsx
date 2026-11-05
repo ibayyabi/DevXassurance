@@ -137,7 +137,7 @@ export function ObservationReviewPanel({
                 <p className="mt-2 whitespace-pre-wrap">{document.processingError}</p>
               </details>
             )}
-            <ProcessingStatusNote status={document.processingStatus} />
+            <ProcessingStatusNote status={document.processingStatus} diagnostic={document.jobDiagnostic} processingError={document.processingError} />
             {summary && (
               <CoverageSummary summary={summary} />
             )}

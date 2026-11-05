@@ -5,6 +5,55 @@ import ts from "typescript";
 
 const source = readFileSync("src/features/documents/actions/document-actions.ts", "utf8");
 const code = ts.transpileModule(source.slice(source.indexOf("export async function updateExtractedFact("), source.indexOf("export async function generateDocumentSummary(")), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText.replace("export ", "");
+
+const retryCode = ts.transpileModule(
+  source.slice(source.indexOf("export async function retryDocumentProcessing("), source.indexOf("export async function deleteDocument(")),
+  { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+).outputText.replace("export ", "");
+function retrySetup({ role = "admin", documentStatus = "processing", latestJob = null } = {}) {
+  const rpcCalls = [];
+  const paths = [];
+  const reads = [];
+  const supabase = {
+    from(table) {
+      reads.push(table);
+      return {
+        select() { return this; },
+        eq() { return this; },
+        order() { return this; },
+        limit() { return this; },
+        async maybeSingle() {
+          return {
+            data: table === "documents" ? { processing_status: documentStatus } : latestJob,
+            error: null,
+          };
+        },
+      };
+    },
+    async rpc(name, args) {
+      rpcCalls.push({ name, args });
+      return { error: null };
+    },
+  };
+  const action = new Function(
+    "requireProjectMembership",
+    "canManageProject",
+    "revalidatePath",
+    `${retryCode}; return retryDocumentProcessing;`,
+  )(
+    async () => ({ membership: { role }, supabase }),
+    (value) => value === "admin",
+    (path) => paths.push(path),
+  );
+  return { action, paths, reads, rpcCalls };
+}
+function retryForm(expectedExpiredJobId) {
+  const data = new FormData();
+  data.set("projectId", "project-1");
+  data.set("documentId", "document-1");
+  if (expectedExpiredJobId) data.set("expectedExpiredJobId", expectedExpiredJobId);
+  return data;
+}
 function setup({ role = "admin", error = null, missing = false, reviewOwners = [], projectFacts = [] } = {}) {
   const writes = [];
   const statusWrites = [];
@@ -103,5 +152,60 @@ test("invalid reviews, insufficient permission, database failures and missing fa
     const { action, paths } = setup(options);
     await assert.rejects(action(form("accept")), /could not be saved|no longer available/);
     assert.equal(paths.length, 0);
+  }
+});
+
+test("a manual retry requires the latest processing lease to be verifiably expired", async () => {
+  const expired = retrySetup({
+    latestJob: {
+      id: "job-1",
+      status: "processing",
+      lease_expires_at: "2000-01-01T00:00:00.000Z",
+    },
+  });
+  await expired.action(retryForm("job-1"));
+  assert.deepEqual(expired.rpcCalls, [{
+    name: "retry_document_job",
+    args: { retry_project_id: "project-1", retry_document_id: "document-1" },
+  }]);
+
+  for (const latestJob of [
+    { id: "job-1", status: "processing", lease_expires_at: "2999-01-01T00:00:00.000Z" },
+    { id: "job-1", status: "processing", lease_expires_at: null },
+    { id: "new-job", status: "processing", lease_expires_at: "2000-01-01T00:00:00.000Z" },
+  ]) {
+    const candidate = retrySetup({ latestJob });
+    await assert.rejects(candidate.action(retryForm("job-1")), /verifiably expired/);
+    assert.equal(candidate.rpcCalls.length, 0);
+  }
+});
+
+test("expired-lease retries retain role authorization while failed retries remain available", async () => {
+  const denied = retrySetup({
+    role: "viewer",
+    latestJob: {
+      id: "job-1",
+      status: "processing",
+      lease_expires_at: "2000-01-01T00:00:00.000Z",
+    },
+  });
+  await assert.rejects(denied.action(retryForm("job-1")), /role cannot/);
+  assert.equal(denied.rpcCalls.length, 0);
+  assert.deepEqual(denied.reads, []);
+
+  const failed = retrySetup({ documentStatus: "failed" });
+  await failed.action(retryForm());
+  assert.equal(failed.rpcCalls.length, 1);
+  assert.deepEqual(failed.reads, ["documents", "ai_jobs"]);
+});
+
+test("failed-document retry cannot cancel a live or still-queued latest job", async () => {
+  for (const latestJob of [
+    { id: "job-active", status: "processing", lease_expires_at: "2999-01-01T00:00:00.000Z" },
+    { id: "job-queued", status: "queued", lease_expires_at: null },
+  ]) {
+    const candidate = retrySetup({ documentStatus: "failed", latestJob });
+    await assert.rejects(candidate.action(retryForm()), /processing job|Only failed documents/);
+    assert.equal(candidate.rpcCalls.length, 0);
   }
 });

@@ -36,6 +36,7 @@ export function renderLibrary({ filters = defaultFilters, search = "", items = d
     Button: ({ children, ...props }) => React.createElement("button", { ...props, variant: undefined, size: undefined }, children),
     SourceReference: ({ title }) => React.createElement("button", { type: "button" }, title),
     deleteDocument: "/delete", retryDocumentProcessing: "/retry", updateDocumentClassification: "/review", updateExtractedFact: async () => {},
+    ProcessingStatusNote: ({ status }) => React.createElement("p", { "data-processing-note": status }, `Processing status: ${status}`),
     FileClock: icon, FileText: icon, FileCheck2: icon, RefreshCw: icon, Trash2: icon, fileKindLabel: () => "PDF",
   };
   const Library = new Function(...Object.keys(dependencies), `${libraryCode}; return DocumentLibrary;`)(...Object.values(dependencies));
@@ -158,4 +159,66 @@ test("sorting handles filenames naturally, optional periods last, types, process
   assert.match(html, /Reporting period not provided/);
   assert.match(html, /\u2014/);
   assert.match(html, /aria-haspopup="dialog"/);
+});
+
+test("job diagnostics render independently of review warnings and offer retry only for an expired lease", () => {
+  const diagnostic = {
+    jobId: "job-expired",
+    status: "processing",
+    errorCode: null,
+    errorMessage: null,
+    attemptCount: 2,
+    maxAttempts: 3,
+    retryPending: false,
+    leaseActive: false,
+    leaseExpired: true,
+    leaseUnknown: false,
+  };
+  const expired = {
+    ...documents[0],
+    id: "doc-expired",
+    processingStatus: "processing",
+    processingError: null,
+    jobDiagnostic: diagnostic,
+    jobDiagnosticReadFailed: false,
+  };
+  const expiredHtml = renderLibrary({ items: [expired] });
+  assert.match(expiredHtml, /Diagnostik job pemrosesan/);
+  assert.match(expiredHtml, /Ganti attempt kedaluwarsa/);
+  assert.match(expiredHtml, /aria-describedby="expired-lease-help-doc-expired"/);
+  assert.doesNotMatch(expiredHtml, /aria-label="Catatan peninjauan dokumen"/);
+
+  const activeHtml = renderLibrary({
+    items: [{
+      ...expired,
+      id: "doc-active",
+      jobDiagnostic: { ...diagnostic, jobId: "job-active", leaseActive: true, leaseExpired: false },
+    }],
+  });
+  assert.match(activeHtml, /Lease masih aktif/);
+  assert.doesNotMatch(activeHtml, /Ganti attempt kedaluwarsa/);
+
+  const failedActiveHtml = renderLibrary({
+    items: [{
+      ...expired,
+      id: "doc-failed-active",
+      processingStatus: "failed",
+      jobDiagnostic: { ...diagnostic, jobId: "job-failed-active", leaseActive: true, leaseExpired: false },
+    }],
+  });
+  assert.match(failedActiveHtml, /Lease masih aktif/);
+  assert.doesNotMatch(failedActiveHtml, /Ganti attempt kedaluwarsa|Ulangi pemrosesan dokumen/);
+
+  const unavailableHtml = renderLibrary({
+    items: [{
+      ...expired,
+      id: "doc-unavailable",
+      processingStatus: "queued",
+      jobDiagnostic: null,
+      jobDiagnosticReadFailed: true,
+    }],
+  });
+  assert.match(unavailableHtml, /Diagnostik job tidak dapat dimuat/);
+  assert.doesNotMatch(unavailableHtml, /Ganti attempt kedaluwarsa/);
+  assert.doesNotMatch(unavailableHtml, /aria-label="Catatan peninjauan dokumen"/);
 });

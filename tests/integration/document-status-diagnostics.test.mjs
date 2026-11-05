@@ -37,10 +37,43 @@ test("every processing state has a distinct label, cause, and action", () => {
   assert.match(status.processingCause("failed"), /tidak membuktikan penyebab historis/i);
 });
 
+test("queue and processing guidance uses diagnostic evidence without assuming recovery", () => {
+  const quota = {
+    status: "queued",
+    errorCode: "llm_provider_transient_failure",
+    errorMessage: "The configured AI provider returned HTTP 429.",
+    retryPending: true,
+    leaseActive: false,
+    leaseExpired: false,
+    leaseUnknown: false,
+  };
+  assert.match(status.processingAction("queued"), /worker memeriksa antrean/i);
+  assert.match(status.processingCause("queued", quota), /HTTP 429/);
+  assert.match(status.processingAction("queued", quota), /pulihkan kuota/i);
+  assert.match(status.processingAction("failed", quota), /jangan mulai ulang manual/i);
+  assert.match(status.processingAction("queued", { errorMessage: "HTTP 429" }), /backoff tidak dapat dipastikan/i);
+  const expired = {
+    status: "processing",
+    errorCode: null,
+    errorMessage: null,
+    retryPending: false,
+    leaseActive: false,
+    leaseExpired: true,
+    leaseUnknown: false,
+  };
+  assert.match(status.processingCause("processing", expired), /tidak memastikan pekerja telah berhenti/i);
+  assert.match(status.processingAction("processing", expired), /Ganti attempt kedaluwarsa/);
+  assert.match(status.processingAction("failed", expired), /Ganti attempt kedaluwarsa/);
+});
+
 test("completed never implies full assurance coverage; needs_review is not a failure", () => {
   assert.match(status.processingCause("completed"), /bukan dari status ini|coverage/);
   assert.match(status.processingStateDescriptions.needs_review, /bukan kegagalan/);
   assert.match(status.processingAction("needs_review"), /kesenjangan bukti/);
+});
+
+test("completed processing does not imply there were no warnings", () => {
+  assert.doesNotMatch(status.processingStateDescriptions.completed, /tanpa peringatan/i);
 });
 
 test("deferred quota groups describe checkpoint reuse, not evidence absence", () => {
@@ -81,6 +114,21 @@ test("job diagnostics classify lease activity, backoff, and attempts", () => {
   }, now);
   assert.equal(stale.leaseActive, false);
   assert.equal(stale.leaseExpired, true, "an expired lease marks recoverable work, not data loss");
+
+  const unknown = mapJobDiagnostic({
+    id: "job-1",
+    document_id: "doc-1",
+    status: "processing",
+    error_code: null,
+    error_message: null,
+    attempt_count: 2,
+    max_attempts: 3,
+    lease_expires_at: null,
+    available_at: null,
+    claimed_at: null,
+  }, now);
+  assert.equal(unknown.leaseExpired, false, "missing lease data is not proof of expiry");
+  assert.equal(unknown.leaseUnknown, true);
 
   const backoff = mapJobDiagnostic({
     id: "job-2",
@@ -157,7 +205,16 @@ test("a diagnostics read error degrades to no diagnostics instead of failing the
     },
   };
   const diagnostics = await fetchJobDiagnostics(supabase, "project-a", ["doc-1"]);
-  assert.deepEqual([...diagnostics.keys()], []);
+  assert.equal(diagnostics, null, "read failures stay distinguishable from a successful empty result");
+});
+
+test("a thrown diagnostics query is reported as unavailable", async () => {
+  const diagnostics = await fetchJobDiagnostics({
+    from() {
+      throw new Error("connection failed");
+    },
+  }, "project-a", ["doc-1"]);
+  assert.equal(diagnostics, null);
 });
 
 test("empty document lists skip the diagnostics query entirely", async () => {

@@ -28,7 +28,7 @@ export const processingStateDescriptions: Record<ProcessingState, string> = {
   processing: "Job tercatat sedang diproses; lihat diagnostik lease bila tersedia.",
   needs_review:
     "Pemrosesan selesai dengan temuan yang perlu keputusan peninjau; bukan kegagalan.",
-  completed: "Pemrosesan selesai tanpa peringatan pemrosesan.",
+  completed: "Pemrosesan selesai; peringatan sebelumnya dapat tetap tersimpan.",
   failed: "Pemrosesan berhenti sebelum selesai; hasil parsial tidak dianggap lengkap.",
   cancelled: "Attempt dihentikan karena digantikan percobaan lain.",
 };
@@ -48,26 +48,74 @@ export const processingStateCauses: Record<ProcessingState, string> = {
   cancelled: "Attempt digantikan oleh retry manual atau percobaan lebih baru.",
 };
 
+type ProcessingDiagnostic = {
+  status?: string;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  retryPending?: boolean;
+  leaseActive?: boolean;
+  leaseExpired?: boolean;
+  leaseUnknown?: boolean;
+};
+
 export const processingStateActions: Record<ProcessingState, string> = {
   uploaded: "Gunakan konfirmasi metadata untuk memproses otomatis, atau simpan sebagai referensi.",
   queued:
-    "Tunggu; retry otomatis berjalan dengan backoff bertingkat (15 detik hingga 5 menit) tanpa mengirim ulang kelompok yang sudah selesai.",
+    "Retry otomatis hanya dapat dijalankan bila worker memeriksa antrean; backoff menentukan kapan job siap. Jika antrean tidak bergerak, periksa ketersediaan worker. Untuk HTTP 429, pulihkan kuota dan tunggu backoff; jangan mulai ulang manual saat job masih queued.",
   processing:
-    "Tunggu; pekerja memperbarui lease secara berkala dan menghentikan diri bila kepemilikan hilang.",
+    "Tunggu dan periksa diagnostik lease; status processing saja tidak memastikan pekerja masih memegang lease.",
   needs_review:
     "Tinjau warning dan observasi tervalidasi; domain yang belum diproses tetap kesenjangan bukti.",
   completed:
     "Pemrosesan tuntas; status ini bukan jaminan coverage assurance penuh — periksa coverage per domain.",
   failed:
-    "Gunakan \"Ulangi pemrosesan dokumen\"; checkpoint kelompok yang valid dipakai ulang dan kelompok tertunda (mis. 429 kuota) dikirim ulang saja.",
+    "Periksa kode/error sebelum mengulangi. Jika tercatat HTTP 429, pulihkan kuota provider lebih dahulu; kelompok yang selesai, jika ada, dipakai ulang.",
   cancelled: "Pantau attempt pengganti; tidak ada tindakan tambahan.",
 };
 
-export function processingCause(status: string): string | null {
+export function processingCause(status: string, diagnostic?: ProcessingDiagnostic | null): string | null {
+  if (status === "failed" && diagnostic && (diagnostic.status === "processing" || diagnostic.status === "queued")) {
+    return processingCause(diagnostic.status, diagnostic);
+  }
+  if (status === "processing" && diagnostic?.status === "processing") {
+    if (diagnostic.leaseExpired) return "Lease job kedaluwarsa; status ini tidak memastikan pekerja telah berhenti.";
+    if (diagnostic.leaseActive) return "Diagnostik job menunjukkan lease aktif saat terakhir dibaca.";
+    if (diagnostic.leaseUnknown) return "Waktu kedaluwarsa lease tidak tersedia; kepemilikan proses tidak dapat dipastikan.";
+  }
+  if (status === "queued" && diagnostic?.errorCode === "llm_provider_transient_failure") {
+    return /http 429\b/i.test(diagnostic.errorMessage ?? "")
+      ? "Diagnostik mencatat HTTP 429 dari provider; job menunggu retry dan kuota perlu dipulihkan."
+      : "Job menunggu retry setelah kegagalan provider sementara.";
+  }
+  if (status === "failed" && /http 429\b/i.test(diagnostic?.errorMessage ?? "")) {
+    return "Pesan job mencatat HTTP 429 dari provider; ini bukan bukti bahwa evidence tidak ada.";
+  }
   return processingStateCauses[status as ProcessingState] ?? null;
 }
 
-export function processingAction(status: string): string | null {
+export function processingAction(status: string, diagnostic?: ProcessingDiagnostic | null): string | null {
+  if (status === "failed" && diagnostic && (diagnostic.status === "processing" || diagnostic.status === "queued")) {
+    return processingAction(diagnostic.status, diagnostic);
+  }
+  if (status === "queued" && /http 429\b/i.test(diagnostic?.errorMessage ?? "")) {
+    if (diagnostic?.retryPending === true) {
+      return "Jeda backoff setelah HTTP 429 masih berjalan. Pulihkan kuota provider, lalu tunggu worker tersedia; jangan mulai ulang manual selama status masih queued.";
+    }
+    if (diagnostic?.retryPending === false) {
+      return "HTTP 429 tercatat, tetapi jeda backoff tidak sedang aktif. Pulihkan kuota provider dan pastikan worker memeriksa antrean; jangan mulai ulang manual selama status masih queued.";
+    }
+    return "HTTP 429 tercatat, tetapi status backoff tidak dapat dipastikan. Pulihkan kuota provider dan pastikan worker memeriksa antrean; jangan mulai ulang manual selama status masih queued.";
+  }
+  if (status === "processing" && diagnostic?.status === "processing") {
+    if (diagnostic.leaseExpired) {
+      return "Pengelola proyek dapat memilih “Ganti attempt kedaluwarsa” untuk mengantrekan ulang; lease kedaluwarsa tidak memastikan worker telah berhenti.";
+    }
+    if (diagnostic.leaseActive) return "Lease aktif saat terakhir dibaca; tunggu dan jangan mulai ulang pemrosesan.";
+    if (diagnostic.leaseUnknown) return "Lease tidak dapat dipastikan; perbarui diagnostik sebelum memulai ulang pemrosesan.";
+  }
+  if (status === "failed" && /http 429\b/i.test(diagnostic?.errorMessage ?? "")) {
+    return "Pulihkan kuota provider sebelum memilih Ulangi pemrosesan; kelompok yang selesai, jika ada, dipakai ulang.";
+  }
   return processingStateActions[status as ProcessingState] ?? null;
 }
 

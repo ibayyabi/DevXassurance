@@ -719,7 +719,7 @@ function DocumentRow({
         </button>
       <dialog ref={panelRef} data-document-details id={`document-panel-${document.id}`} aria-labelledby={`document-title-${document.id}`} className="fixed inset-y-0 left-auto right-0 m-0 h-dvh max-h-none w-full max-w-2xl overflow-y-auto overscroll-contain border-l border-ui-border bg-surface p-0 text-ink shadow-xl backdrop:bg-ink/20">
         <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-ui-border bg-surface p-5">
-          <div className="min-w-0"><h3 id={`document-title-${document.id}`} className="text-base font-semibold text-ink [overflow-wrap:anywhere]">{document.fileName}</h3><div className="mt-2"><StatusBadge status={document.processingStatus} /></div><ProcessingStatusNote status={document.processingStatus} /></div>
+          <div className="min-w-0"><h3 id={`document-title-${document.id}`} className="text-base font-semibold text-ink [overflow-wrap:anywhere]">{document.fileName}</h3><div className="mt-2"><StatusBadge status={document.processingStatus} /></div><ProcessingStatusNote status={document.processingStatus} diagnostic={document.jobDiagnostic} processingError={document.processingError} /></div>
           <Button type="button" variant="outline" size="sm" className="shrink-0" aria-label="Tutup detail dokumen" onClick={() => panelRef.current?.close()}>Tutup</Button>
         </header>
         <div className="p-5 [overflow-wrap:anywhere]">
@@ -740,9 +740,41 @@ function DocumentRow({
             {gaps.length > 0 && <p>Kemungkinan ketidaksesuaian ringkasan/ekstraksi: {gaps.join(" dan ")} disebutkan tanpa baris terstruktur yang cocok. Verifikasi sumbernya.</p>}
             {document.processingStatus !== "failed" && (document.processingError || summary?.qualityWarning) && <p>Metadata dokumen atau pembacaannya perlu diperiksa.</p>}
             {(document.processingError || summary?.qualityWarning) && <details><summary className="cursor-pointer font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Baca detail pemrosesan</summary>{document.processingError && <p className="mt-2 whitespace-pre-wrap">{document.processingError}</p>}{summary?.qualityWarning && <p className="mt-2 whitespace-pre-wrap">Keterbatasan pembacaan: {summary.qualityWarning}</p>}</details>}
-            {document.jobDiagnostic && <JobDiagnosticDetails diagnostic={document.jobDiagnostic} />}
             {condensed.length < summaryText.trim().length && <button type="button" className="font-medium underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand" onClick={() => { if (fullSummaryRef.current) { fullSummaryRef.current.open = true; fullSummaryRef.current.querySelector("summary")?.focus(); fullSummaryRef.current.scrollIntoView({ block: "nearest" }); } }}>Tampilkan ringkasan lengkap</button>}
           </aside>}
+          {["queued", "processing", "failed"].includes(document.processingStatus) && (
+            <section aria-label="Diagnostik job pemrosesan" className="my-4 rounded-lg border border-ui-border bg-base p-3 text-sm">
+              {document.jobDiagnostic
+                ? <JobDiagnosticDetails diagnostic={document.jobDiagnostic} />
+                : <p role="note" className="text-ink-muted">
+                    {document.jobDiagnosticReadFailed
+                      ? "Diagnostik job tidak dapat dimuat; status lease dan backoff belum dapat dipastikan. Muat ulang halaman untuk mencoba lagi."
+                      : "Catatan job tidak tersedia; status lease dan backoff belum dapat dipastikan."}
+                  </p>}
+              {document.jobDiagnostic?.status === "processing" &&
+                document.jobDiagnostic.leaseExpired && (
+                  <div className="mt-3">
+                    <p id={`expired-lease-help-${document.id}`} className="text-ink-muted">
+                      Lease job telah kedaluwarsa. Ini tidak memastikan proses worker sudah berhenti; tindakan ini mengganti attempt lama dan mengantrekan proses baru.
+                    </p>
+                    <form action={retryDocumentProcessing} className="mt-2">
+                      <input type="hidden" name="projectId" value={projectId} />
+                      <input type="hidden" name="documentId" value={document.id} />
+                      <input type="hidden" name="expectedExpiredJobId" value={document.jobDiagnostic.jobId} />
+                      <Button
+                        type="submit"
+                        size="sm"
+                        variant="outline"
+                        aria-describedby={`expired-lease-help-${document.id}`}
+                      >
+                        <RefreshCw className="h-4 w-4" />
+                        Ganti attempt kedaluwarsa
+                      </Button>
+                    </form>
+                  </div>
+                )}
+            </section>
+          )}
           <FileFactReview facts={facts} onReview={onReview} onSource={onSource} busy={busy} />
           {reviewError && <p role="alert" className="mb-3 text-sm text-status-critical-text">{reviewError}</p>}
           <details className="mb-4 text-sm">
@@ -843,7 +875,9 @@ function DocumentRow({
         </div>
       )}
 
-      {document.processingStatus === "failed" && (
+      {document.processingStatus === "failed" &&
+        document.jobDiagnostic?.status !== "processing" &&
+        document.jobDiagnostic?.status !== "queued" && (
         <form action={retryDocumentProcessing} className="mt-3">
           <input type="hidden" name="projectId" value={projectId} />
           <input type="hidden" name="documentId" value={document.id} />
@@ -923,12 +957,16 @@ function JobDiagnosticDetails({
     ? `Percobaan ${diagnostic.attemptCount} dari ${diagnostic.maxAttempts}.`
     : `Percobaan ${diagnostic.attemptCount}.`;
   const leaseState = diagnostic.leaseActive
-    ? "Lease masih aktif."
+    ? "Lease masih aktif saat diagnostik dibaca; statusnya dapat berubah."
     : diagnostic.leaseExpired
-      ? "Lease kedaluwarsa; pemulihan otomatis akan menentukan ulang kepemilikan."
-      : null;
+      ? "Lease kedaluwarsa; ini tidak memastikan proses worker sudah berhenti."
+      : diagnostic.leaseUnknown
+        ? "Waktu kedaluwarsa lease tidak tersedia; status kepemilikan tidak dapat dipastikan."
+        : null;
   const backoff = diagnostic.retryPending
-    ? "Retry otomatis menunggu jeda backoff; kelompok yang sudah selesai tidak dikirim ulang."
+    ? /http 429\b/i.test(diagnostic.errorMessage ?? "")
+      ? "Retry kuota HTTP 429 menunggu backoff; pulihkan kuota dan pastikan worker tersedia. Kelompok yang selesai tidak dikirim ulang."
+      : "Retry menunggu jeda backoff dan hanya berjalan saat worker tersedia; kelompok yang selesai tidak dikirim ulang."
     : null;
   return (
     <details>

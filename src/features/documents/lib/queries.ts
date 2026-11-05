@@ -46,8 +46,10 @@ export type EvidenceDocument = {
   effectiveDocumentDate: string | null;
   effectiveReportingPeriod: string | null;
   effectiveWorkstream: string | null;
-  /** Latest parse job state for this document, read through RLS; null when unavailable. */
+  /** Latest parse job state for this document, read through RLS. */
   jobDiagnostic: JobDiagnostic | null;
+  /** True when the latest-job query failed; a missing row is a separate state. */
+  jobDiagnosticReadFailed: boolean;
   reviewDetails: DocumentReviewDetail[];
 };
 export type DocumentReviewDetail = {
@@ -250,7 +252,8 @@ export async function getDocumentIntelligence(projectId: string) {
     documents.map((document) => document.id),
   );
   for (const document of documents) {
-    document.jobDiagnostic = jobDiagnostics.get(document.id) ?? null;
+    document.jobDiagnostic = jobDiagnostics?.get(document.id) ?? null;
+    document.jobDiagnosticReadFailed = jobDiagnostics === null;
   }
   const documentsById = new Map(documents.map((document) => [document.id, document]));
   const facts = ((factsData ?? []) as unknown as FactRow[]).map((row) => {
@@ -324,6 +327,7 @@ function mapDocument(
     effectiveReportingPeriod: effective.reportingPeriod,
     effectiveWorkstream: effective.workstream,
     jobDiagnostic: null,
+    jobDiagnosticReadFailed: false,
     reviewDetails,
   };
 }
