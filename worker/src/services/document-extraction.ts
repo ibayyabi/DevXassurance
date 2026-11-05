@@ -1312,6 +1312,23 @@ function citedPercentCellForClaim(
   });
   return matches.length === 1 ? matches[0] : null;
 }
+
+function progressCellSourceLocation(
+  citation: SourceCitation | null,
+  cell: ParsedSourceCell,
+): ParsedSourceReference["sourceLocation"] {
+  const location = citation?.source_location;
+  return location?.kind === "xlsx"
+    ? {
+        ...location,
+        rowStart: cell.row,
+        rowEnd: cell.row,
+        cellRangeStart: cell.cell,
+        cellRangeEnd: cell.cell,
+      }
+    : location;
+}
+
 const NARRATIVE_PROGRESS_TERM_PATTERN =
   "(?:progress|progres|kemajuan|completion|complete|completed|actual|aktual|realisasi|penyelesaian|selesai|tercapai)";
 const NARRATIVE_QUALIFIER_PATTERN =
@@ -1532,6 +1549,15 @@ function sourceRagClaimFromCandidate(
     errors,
     fromCache,
   );
+  const excerpt = nullableBoundedString(
+    candidate.excerpt ?? null,
+    `${path}.source_rag_claim.excerpt`,
+    errors,
+    1200,
+  );
+  if (excerpt && citation && !citation.excerpt.includes(excerpt)) {
+    errors.push(`${path}.source_rag_claim.excerpt is not present in the cited source`);
+  }
   const rag = citedReference(group, citation);
   const value = citedReference(group, valueCitation);
   let supported = Boolean(label && citation && rag && value);
@@ -1579,8 +1605,8 @@ function sourceRagClaimFromCandidate(
     label: label!,
     evidence_chunk_index: citation!.evidence_chunk_index,
     excerpt: citation!.excerpt,
-    page_number: citation!.page_number,
-    section_label: citation!.section_label,
+    page_number: rag?.chunk.pageNumber ?? null,
+    section_label: rag?.chunk.sectionLabel ?? null,
     freshness,
     ...(citation!.source_location ? { source_location: citation!.source_location } : {}),
   };
@@ -1914,7 +1940,7 @@ Rules:
 - Choose the cost measure from what the source says: approved_baseline (an approved or controlled budget reference), actual_to_date (cost already incurred), committed (contractually committed or ordered cost), eac (an explicitly reported total forecast or estimate at completion). Never record an actual or committed value as eac, and never record a value whose meaning the source does not state. Return [] only after processing this complete group and finding no cost values.
 - assurance_observations collect every source-backed milestone date, explicitly reported progress value, and item-level risk snapshot in this group, whatever the artifact's primary type. Do not infer baseline/current role; reviewer selection assigns that role later. Keep source scope, period, raw wording, and exact excerpt. Return [] for each array only when this complete group contains no such observation.
 - Milestones: keep the source label and raw date text. Normalize date only when the source explicitly gives an ISO YYYY-MM-DD date; do not convert locale dates. Set scope_level to project, wbs, or unknown from the source; WBS requires its exact scope_label.
-- Progress: report one entry per stated percentage, preserving 0 and the stated project/WBS scope. raw_value must be exact source wording; percent is the same percentage-point value (0–100), never a fraction, sum, average, or forecast. Set measure_kind to planned only when the cited source itself labels the value as planned (for example a "Planned %" or "Rencana %" header), and to actual only when it labels it actual (for example "Actual %", "Realisasi %"); a generic progress header or a value whose kind the source does not state is unspecified — never infer the kind from the row's other columns, the document role, or the magnitude. Planned and actual percentages on the same source row are separate entries, each citing its own cell. For narrative sources, the percentage needs explicit progress/completion/actual wording in the same statement (for example, progress, completion, actual, realisasi, kemajuan); an unclear percentage or one belonging to a risk likelihood/rating is not progress. Omit non-numeric or unclear values; use unknown only when the scope is unclear.
+- Progress: report one entry per stated percentage, preserving 0 and the stated project/WBS scope. raw_value must be exact source wording; percent is the same percentage-point value (0–100), never a fraction, sum, average, or forecast. Set measure_kind to planned only when the cited source itself labels the value as planned (for example a "Planned %" or "Rencana %" header), and to actual only when it labels it actual (for example "Actual %", "Realisasi %"); a generic progress header or a value whose kind the source does not state is unspecified — never infer the kind from the row's other columns, the document role, or the magnitude. Planned and actual percentages on the same source row are separate observations. For XLSX, cite that row reference, including the same-row cut-off/period context; the worker resolves each exact value/header cell from parser metadata and retains its cell coordinate. Do not cite a value-only cell when that omits the same-row cut-off/period. For narrative sources, the percentage needs explicit progress/completion/actual wording in the same statement (for example, progress, completion, actual, realisasi, kemajuan); an unclear percentage or one belonging to a risk likelihood/rating is not progress. Omit non-numeric or unclear values; use unknown only when the scope is unclear.
 - Source-reported progress RAG is separate from any computed condition. Return source_rag_claim only when the source explicitly reports a literal progress RAG/status label; cite its exact cell on the same sheet row as the cited percentage, or the same narrative clause. Never infer RAG from the progress value or borrow it from another row, document, or computed rule.
 - Risk: report each item separately with its source risk ID, status, source rating label/value/scale, owner, mitigation, mitigation due date, WBS, and period when stated. raw_value and excerpt must be verbatim source text. A register statement may say no_open_high_or_critical only when it explicitly states that no open high or critical risks exist; otherwise use open_risk_reported only for an explicit open-risk statement.
 - Never derive risk counts, conditions, changes, or dates. Do not turn no extracted rows into a claim that no risks exist. Unsupported values are omitted; the application validates the raw value and computes comparisons.
@@ -3495,7 +3521,9 @@ function validateGroupExtraction(
       period_label: periodLabel!,
       as_of_date: asOfDate ?? null,
       evidence_chunk_index: citation!.evidence_chunk_index,
-      source_location: citation!.source_location,
+      source_location: citedPercentCell
+        ? progressCellSourceLocation(citation, citedPercentCell)
+        : citation!.source_location,
       excerpt: excerpt!,
     });
   });

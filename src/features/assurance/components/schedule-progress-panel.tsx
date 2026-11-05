@@ -5,6 +5,7 @@ import {
   removeMilestoneMapping,
 } from "@/features/assurance/actions/assurance-actions";
 import type { AssuranceEvidenceReference } from "@/features/assurance/lib/analysis";
+import type { MilestoneMapping } from "@/features/assurance/lib/schedule-comparison";
 import type { AssuranceReview } from "@/features/assurance/lib/queries";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";

@@ -8,11 +8,11 @@
 
 Baca [rencana](../plan.md). Aturan disepakati: RAG sumber disimpan sebagai klaim bersitasi, terpisah dari status hitungan. Hitung status hanya dengan aturan per proyek yang disetujui dan berversi; tanpa aturan yang berlaku, tetap tampilkan nilai dan status belum dinilai. Ambang fixture bukan default global. Kontrak saat ini tetap melarang rollup project dari WBS.
 
-- [x] W4/W5 SB01 menampilkan actual 12,50% → 20,40%, delta +7,90 poin persentase, dengan tanggal dan kutipan kedua sumber.
-- [x] Planned/actual dibandingkan hanya untuk scope, unit, dan periode yang terbukti sebanding; fraksi dinormalisasi hanya bila didukung sumber/format.
-- [x] Previous snapshot dibedakan dari baseline rencana yang disetujui; identik filename dengan isi berbeda tidak menimpa snapshot.
-- [x] Metadata bulan saja, unit ambigu, konflik, missing periode, dan bukti masa depan ditampilkan sebagai gap, bukan ditebak.
-- [x] Gunakan hanya aturan per proyek yang disetujui dan berversi; tanpa aturan, status hitungan belum dinilai. RAG sumber tetap dibedakan dan bersitasi.
+- [ ] W4/W5 SB01 menampilkan actual 12,50% → 20,40%, delta +7,90 poin persentase, dengan tanggal dan kutipan kedua sumber.
+- [ ] Planned/actual dibandingkan hanya untuk scope, unit, dan periode yang terbukti sebanding; fraksi dinormalisasi hanya bila didukung sumber/format.
+- [ ] Previous snapshot dibedakan dari baseline rencana yang disetujui; identik filename dengan isi berbeda tidak menimpa snapshot.
+- [ ] Metadata bulan saja, unit ambigu, konflik, missing periode, dan bukti masa depan ditampilkan sebagai gap, bukan ditebak.
+- [ ] Gunakan hanya aturan per proyek yang disetujui dan berversi; tanpa aturan, status hitungan belum dinilai. RAG sumber tetap dibedakan dan bersitasi.
 
 ## Comments
 

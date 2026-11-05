@@ -252,6 +252,7 @@ test("differing WBS labels stay separate until a mapping is accepted", () => {
     wbsMappings: [
       { id: "w", sourceLabel: "Alarm", canonicalLabel: "SB01", state: "accepted", proposedByModel: false, note: null, acceptedBy: "r", acceptedAt: "2026-10-01T00:00:00.000Z" },
     ],
+    cutoffDate: "2026-10-16",
   });
   assert.equal(mapped.length, 1);
   assert.ok(Math.abs(mapped[0].deltaPercentPoints - 7.9) < 1e-9);

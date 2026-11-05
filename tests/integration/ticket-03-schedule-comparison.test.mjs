@@ -269,8 +269,8 @@ test("a WBS progress value without a label is preserved but never compared", () 
     wbsMappings: [],
     cutoffDate: "2026-10-31",
   });
-  assert.equal(results.length, 1);
-  assert.equal(results[0].deltaPercentPoints, null);
+  assert.equal(results.length, 2, "unlabelled scopes cannot be merged");
+  assert.ok(results.every((result) => result.deltaPercentPoints === null));
 });
 
 

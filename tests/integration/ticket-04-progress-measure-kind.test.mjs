@@ -4,7 +4,7 @@
 // controlled response only cites what the parser-authenticated references
 // show, so this pins:
 //   * "Planned %" and "Actual %" cells on the same row are separate progress
-//     entries, each with its own cell citation and its own measure_kind;
+//     entries, each resolved to its exact value cell/header and measure_kind;
 //   * measure_kind comes from the cited header only — a wrong or unproven
 //     model claim is dropped, never stored;
 //   * a generic "Progress %" header stays unspecified, and month-only or
@@ -262,7 +262,7 @@ function plannedActualGroupResponse(prompt, capture) {
         period_label: rowFields.week,
         as_of_date: rowFields.cutOffDate,
         excerpt: rowSource.text,
-        source_id: actualCell.source_id,
+        source_id: rowSource.source_id,
         source_rag_claim: ragCell && ragLabel
           ? { label: ragLabel, source_id: ragCell.source_id, excerpt: ragCell.text }
           : null,
@@ -280,7 +280,7 @@ function plannedActualGroupResponse(prompt, capture) {
         period_label: rowFields.week,
         as_of_date: rowFields.cutOffDate,
         excerpt: rowSource.text,
-        source_id: plannedCell.source_id,
+        source_id: rowSource.source_id,
       });
     }
     if (capture.claimWrongKind) {
@@ -296,7 +296,7 @@ function plannedActualGroupResponse(prompt, capture) {
         period_label: rowFields.week,
         as_of_date: rowFields.cutOffDate,
         excerpt: rowSource.text,
-        source_id: actualCell.source_id,
+        source_id: rowSource.source_id,
       });
     }
     output.assurance_observations.progress = progress;
@@ -314,7 +314,7 @@ function plannedActualGroupResponse(prompt, capture) {
       period_label: "Oktober 2026",
       as_of_date: null,
       excerpt: rowSource.text,
-      source_id: actualCell.source_id,
+      source_id: rowSource.source_id,
     });
   }
   return output;
@@ -364,7 +364,7 @@ test("W4/W5 planned and actual cells extract as separate measure-kind entries", 
     assert.ok(planned, `${spec.session} keeps the planned entry`);
     assert.equal(actual.percent, spec.percent);
     assert.equal(planned.percent, spec.planned);
-    // Distinct cell citations per entry, each proving its own header.
+    // The row citation preserves period/date context; exact value coordinates differ.
     assert.match(actual.excerpt, /Actual %:/);
     assert.match(planned.excerpt, /Planned %:/);
     assert.equal(actual.as_of_date, spec.cutOff);

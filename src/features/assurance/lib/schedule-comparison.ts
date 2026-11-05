@@ -327,7 +327,10 @@ function addProgressCandidate(
   };
   if (observation.role === "current") {
     entry.currentCandidates.push(observation);
-  } else if (observation.asOfDate || observation.periodLabel) {
+  } else if (
+    observation.asOfDate ||
+    (observation.periodLabel && !/\bbaseline\b/iu.test(observation.periodLabel))
+  ) {
     entry.snapshots.push(observation);
   } else {
     entry.approvedBaselines.push(observation);
@@ -415,9 +418,10 @@ export function buildProgressComparison(input: {
 
       let prior: ProgressObservation | null = null;
       let priorConflict = false;
-      if (current?.asOfDate) {
+      const snapshotCutoff = current ? current.asOfDate : cutoffDate;
+      if (snapshotCutoff) {
         const earlier = entry.snapshots.filter(
-          (observation) => observation.asOfDate! < current.asOfDate!,
+          (observation) => observation.asOfDate && observation.asOfDate < snapshotCutoff,
         );
         const latestDate = earlier.reduce<string | null>(
           (latest, observation) => !latest || observation.asOfDate! > latest
@@ -441,7 +445,7 @@ export function buildProgressComparison(input: {
           .filter((observation) => !observation.asOfDate)
           .map((observation) => ({ reason: "snapshot_cutoff_unknown" as const, observation })));
         gaps.push(...entry.snapshots
-          .filter((observation) => observation.asOfDate! >= current.asOfDate!)
+          .filter((observation) => observation.asOfDate && observation.asOfDate >= snapshotCutoff)
           .map((observation) => ({ reason: "snapshot_not_earlier" as const, observation })));
       } else {
         gaps.push(...entry.snapshots.map((observation) => ({
