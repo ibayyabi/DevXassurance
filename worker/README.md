@@ -45,17 +45,27 @@ The same grouped extraction collects source-backed milestone, progress, and risk
 
 #### Risk snapshots across cut-offs
 
-The risk comparison treats the reviewer-selected prior register as a previous
-snapshot, not the approved project baseline. Items match only by exact risk ID
-or a reviewer-accepted identity mapping, and ratings compare only within the
-same scale or an accepted scale mapping. "New", "increased", and "decreased"
-are stated only when both registers state their cut-off (source date or period
-label) and the cut-offs are provably distinct; registers stating the same
-cut-off are the same snapshot and are never mixed into a before/after. A risk
-missing from the later register stays an explicit "not reported" gap — absence
-is never closure; only a status the source itself states as closed is treated
-as closed. Unprocessed coverage, missing observations, and unmapped differing
-IDs or scales remain gaps the panel shows, never silent zeros or green.
+For each analysis, the previous risk snapshot is fetched from the nearest
+strictly earlier completed review (`findings_ready`, `report_draft`, or
+`approved`) in the same project, using only that review's `current`-role
+documents. The approved project baseline is never a previous snapshot. Review
+cut-off selects the earlier review; it is not copied onto a risk observation.
+Observation, coverage, and reviewer decision rows must match each document's
+project, content hash, parser version, and contract version. Accepted and
+corrected decisions are applied with attribution; rejected and stale-version
+observations are excluded. Only project-scoped reviewer-accepted risk-ID and
+scale mappings are applied, and mapping/reference fingerprints are retained.
+
+Each risk row must state its own valid ISO source date for a temporal pair;
+week/month-only, missing, reversed, or conflicting cut-offs remain gaps. A
+group-level cut-off can support "new" only when every linked prior source has
+processed risk coverage, a risk observation, and the same valid ISO cut-off.
+Conflicting duplicate IDs are gaps, not first-row wins. "Increased" requires
+comparable ordered snapshots, same or reviewer-mapped scales, and source
+ratings; "closed" requires a comparable pair and source-stated closed status.
+Missing observations stay "not reported", never closed. W5 IDs/citations and
+W6/W7 comparisons are shown only when the extracted, versioned source supports
+them. No Risk composite is produced.
 
 Reviewers can accept, correct, or reject supported observations individually on the Assurance page, including before a document is linked to a review. Decisions retain the reviewer, reason, source version, and original observation; changed decisions invalidate dependent assessments. The observation-decision migration must be applied by the project owner before deployment.
 

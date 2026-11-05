@@ -111,6 +111,41 @@ type AssuranceAnalysisClaim = {
   attempt_id: string;
   sources: AssuranceSource[];
   observation_decisions?: ObservationDecision[];
+  reference_fingerprint?: string;
+  reference_versions?: Record<string, unknown>;
+};
+
+type PreviousRiskReview = {
+  id: string;
+  reporting_period: string;
+  cutoff_precision: "month" | "date";
+  status: string;
+};
+type PreviousRiskSelection = {
+  review: PreviousRiskReview | null;
+  sources: AssuranceSource[];
+  decisions: ObservationDecision[];
+  snapshots: RiskSnapshot[];
+  coverageComplete: boolean;
+  cutoffComplete: boolean;
+  gapReason: string | null;
+};
+type PreviousRiskDocument = {
+  id: string;
+  project_id: string;
+  title: string | null;
+  content_hash: string | null;
+  assurance_observation_parser_version: string | null;
+  assurance_observation_contract_version: string | null;
+  processing_status: string;
+};
+type VersionedRiskObservation = AssuranceObservationRow & {
+  project_id: string;
+  document_id: string;
+  source_content_hash: string;
+  parser_version: string;
+  contract_version: string;
+  observation_fingerprint: string;
 };
 
 
@@ -223,6 +258,10 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
     const decisions = (claim.observation_decisions ?? []) as ObservationDecision[];
     const coverage = summarizeObservationCoverage(sources);
     const reviewData = buildReviewExtraction(sources, decisions);
+    const previousRisk = await fetchPreviousRiskSnapshot(
+      supabase, projectId, reviewId, reportingPeriod,
+    );
+    const currentRiskCoverageComplete = coverage.byRole.current.risk.state === "processed";
     const currentCostObservations = mapSelectedCostObservations(sources, "current");
     const baselineCostObservations = mapSelectedCostObservations(sources, "baseline");
     const costDecisions = applyCostObservationDecisions(
@@ -235,7 +274,9 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
       supabase, projectId, reportingPeriod, costDecisions.baseline, costDecisions.current,
     );
     const schedule = await buildScheduleComparison(supabase, projectId, reviewData.extraction);
-    const risk = await buildRiskSnapshotComparison(supabase, projectId, reviewData.extraction);
+    const risk = await buildRiskSnapshotComparison(
+      supabase, projectId, reviewData.extraction, previousRisk, currentRiskCoverageComplete,
+    );
     reviewData.extraction.risk = buildRiskAssessment(
       reviewData.extraction, risk.comparison, reviewData.riskStatements,
       coverage.byRole, reportingPeriod,
@@ -270,7 +311,7 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
           comparison_engine: {
             budget: "pmo_cost_contract_v1",
             schedule: "pmo_schedule_observations_v1",
-            risk: "pmo_risk_observations_v1",
+            risk: "pmo_risk_observations_v2",
           },
           thresholds: {
             budget: "pmo_budget_variance_v1",
@@ -278,6 +319,31 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
             risk: "phase_3_usable_mvp_defaults",
           },
           budget_evidence_source: "versioned_cost_observations_and_accepted_baseline",
+          risk_comparison_provenance: {
+            contract: "pmo_risk_comparison_v2",
+            referenceFingerprint: claim.reference_fingerprint ?? null,
+            referenceVersions: claim.reference_versions ?? null,
+            previousReviewId: previousRisk.review?.id ?? null,
+            previousReportingPeriod: previousRisk.review
+              ? reportingPeriodEnd(
+                  previousRisk.review.reporting_period,
+                  previousRisk.review.cutoff_precision,
+                )
+              : null,
+            previousSourceVersions: previousRisk.sources.map((source) => ({
+              document_id: source.document_id,
+              role: "current",
+              ...source.source_version,
+            })),
+            previousSnapshotAvailable: previousRisk.snapshots.length > 0,
+            previousCoverageComplete: previousRisk.coverageComplete,
+            previousCutoffComplete: previousRisk.cutoffComplete,
+            previousDecisionSummary: summarizeObservationDecisions(
+              previousRisk.sources, previousRisk.decisions,
+            ),
+            currentCoverageComplete: currentRiskCoverageComplete,
+            previousGapReason: previousRisk.gapReason,
+          },
         },
         p_result_metadata: {
           wbs_budget_findings: wbs.findings,
@@ -1007,6 +1073,8 @@ async function buildRiskSnapshotComparison(
   supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
   projectId: string,
   extraction: ReviewExtraction,
+  previous: PreviousRiskSelection,
+  currentCoverageComplete: boolean,
 ) {
   const [identityResult, scaleResult] = await Promise.all([
     supabase
@@ -1025,16 +1093,251 @@ async function buildRiskSnapshotComparison(
 
   const identityMappings = ((identityResult.data ?? []) as RiskMappingRow[]).map(mapRiskMappingRow);
   const scaleMappings = ((scaleResult.data ?? []) as RiskMappingRow[]).map(mapRiskMappingRow);
-
+  const currentSnapshots = extraction.riskItems.currentSnapshots;
   const comparison = buildRiskComparison({
-    baselineSnapshots: extraction.riskItems.baselineSnapshots,
-    currentSnapshots: extraction.riskItems.currentSnapshots,
+    previousSnapshots: previous.snapshots,
+    currentSnapshots,
     identityMappings,
     scaleMappings,
+    previousCoverageComplete: previous.coverageComplete,
+    previousCutoffComplete: previous.cutoffComplete,
+    currentCoverageComplete,
   });
-  const sourceIds = riskSourceIds(extraction.riskItems);
-  const sourceScales = riskSourceScales(extraction.riskItems);
-  return { comparison, sourceIds, sourceScales };
+  const riskSnapshots = {
+    previousSnapshots: previous.snapshots,
+    currentSnapshots,
+  };
+  return {
+    comparison,
+    sourceIds: riskSourceIds(riskSnapshots),
+    sourceScales: riskSourceScales(riskSnapshots),
+  };
+}
+
+function validRiskCutoff(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+async function fetchPreviousRiskSnapshot(
+  supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
+  projectId: string,
+  currentReviewId: string,
+  currentCutoff: string,
+): Promise<PreviousRiskSelection> {
+  if (!validRiskCutoff(currentCutoff)) {
+    return {
+      review: null, sources: [], decisions: [], snapshots: [],
+      coverageComplete: false, cutoffComplete: false,
+      gapReason: "current_review_cutoff_not_provable",
+    };
+  }
+  const [reviewsResult, linksResult] = await Promise.all([
+    supabase
+      .from("assurance_reviews")
+      .select("id, reporting_period, cutoff_precision, status")
+      .eq("project_id", projectId),
+    supabase
+      .from("assurance_review_documents")
+      .select("review_id, document_id")
+      .eq("project_id", projectId)
+      .eq("evidence_role", "current"),
+  ]);
+  if (reviewsResult.error) throw new Error(reviewsResult.error.message);
+  if (linksResult.error) throw new Error(linksResult.error.message);
+
+  const reviews = (reviewsResult.data ?? []) as PreviousRiskReview[];
+  const currentRoleLinks = (linksResult.data ?? []) as { review_id: string; document_id: string }[];
+  const reviewsWithCurrentSources = new Set(currentRoleLinks.map((link) => link.review_id));
+  const candidates = reviews
+    .filter((review) => {
+      const cutoff = reportingPeriodEnd(review.reporting_period, review.cutoff_precision);
+      return review.id !== currentReviewId &&
+        ["findings_ready", "report_draft", "approved"].includes(review.status) &&
+        reviewsWithCurrentSources.has(review.id) &&
+        validRiskCutoff(cutoff) &&
+        cutoff < currentCutoff;
+    })
+    .sort((first, second) =>
+      reportingPeriodEnd(second.reporting_period, second.cutoff_precision)
+        .localeCompare(reportingPeriodEnd(first.reporting_period, first.cutoff_precision)),
+    );
+  if (!candidates.length) {
+    return {
+      review: null, sources: [], decisions: [], snapshots: [],
+      coverageComplete: false, cutoffComplete: false, gapReason: "no_prior_current_review",
+    };
+  }
+  const previousCutoff = reportingPeriodEnd(candidates[0].reporting_period, candidates[0].cutoff_precision);
+  const nearest = candidates.filter((review) =>
+    reportingPeriodEnd(review.reporting_period, review.cutoff_precision) === previousCutoff);
+  if (nearest.length !== 1) {
+    return {
+      review: null, sources: [], decisions: [], snapshots: [],
+      coverageComplete: false, cutoffComplete: false, gapReason: "ambiguous_prior_review_cutoff",
+    };
+  }
+
+  const review = nearest[0];
+  const documentIds = [...new Set(currentRoleLinks
+    .filter((link) => link.review_id === review.id)
+    .map((link) => link.document_id))];
+  if (!documentIds.length) {
+    return {
+      review, sources: [], decisions: [], snapshots: [],
+      coverageComplete: false, cutoffComplete: false,
+      gapReason: "prior_review_has_no_current_sources",
+    };
+  }
+
+  const { data: documentData, error: documentError } = await supabase
+    .from("documents")
+    .select(
+      "id, project_id, title, content_hash, assurance_observation_parser_version, assurance_observation_contract_version, processing_status",
+    )
+    .eq("project_id", projectId)
+    .in("id", documentIds);
+  if (documentError) throw new Error(documentError.message);
+  const documents = (documentData ?? []) as PreviousRiskDocument[];
+  const versionsAvailable = documents.length === documentIds.length && documents.every((document) =>
+    document.content_hash && document.assurance_observation_parser_version &&
+    document.assurance_observation_contract_version &&
+    ["completed", "needs_review"].includes(document.processing_status),
+  );
+  if (!versionsAvailable) {
+    return {
+      review, sources: [], decisions: [], snapshots: [],
+      coverageComplete: false, cutoffComplete: false,
+      gapReason: "prior_source_version_unavailable",
+    };
+  }
+
+  const [observationResult, coverageResult, decisionResult] = await Promise.all([
+    supabase
+      .from("assurance_observations")
+      .select(
+        "id, project_id, document_id, source_content_hash, parser_version, contract_version, observation_fingerprint, domain, observation_type, observation, evidence_chunk_index, excerpt, page_number, section_label, source_location",
+      )
+      .eq("project_id", projectId)
+      .in("document_id", documentIds)
+      .eq("domain", "risk"),
+    supabase
+      .from("assurance_observation_coverage")
+      .select("project_id, document_id, source_content_hash, parser_version, contract_version, domain, state, total_groups, processed_groups, reason")
+      .eq("project_id", projectId)
+      .in("document_id", documentIds)
+      .eq("domain", "risk"),
+    supabase
+      .from("assurance_observation_decisions")
+      .select(
+        "id, target_type, document_id, source_content_hash, parser_version, contract_version, observation_fingerprint, decision, corrected_observation, reason, decided_by, decided_at",
+      )
+      .eq("project_id", projectId)
+      .in("document_id", documentIds)
+      .eq("target_type", "assurance"),
+  ]);
+  if (observationResult.error) throw new Error(observationResult.error.message);
+  if (coverageResult.error) throw new Error(coverageResult.error.message);
+  if (decisionResult.error) throw new Error(decisionResult.error.message);
+
+  const observations = (observationResult.data ?? []) as VersionedRiskObservation[];
+  const coverageRows = (coverageResult.data ?? []) as (AssuranceCoverageRow & {
+    project_id: string;
+    document_id: string;
+    source_content_hash: string;
+    parser_version: string;
+    contract_version: string;
+  })[];
+  const decisionRows = (decisionResult.data ?? []) as (ObservationDecision & {
+    source_content_hash: string;
+    parser_version: string;
+    contract_version: string;
+    observation_fingerprint: string;
+  })[];
+  const sameVersion = (row: { source_content_hash: string; parser_version: string; contract_version: string }, document: PreviousRiskDocument) =>
+    row.source_content_hash === document.content_hash &&
+    row.parser_version === document.assurance_observation_parser_version &&
+    row.contract_version === document.assurance_observation_contract_version;
+  const versionedRowsByDocument = new Map(documents.map((document) => [document.id, [] as VersionedRiskObservation[]]));
+  const versionedCoverageByDocument = new Map(documents.map((document) => [document.id, [] as AssuranceCoverageRow[]]));
+  const documentsById = new Map(documents.map((document) => [document.id, document]));
+  for (const row of observations) {
+    const document = documentsById.get(row.document_id);
+    if (document && sameVersion(row, document)) {
+      versionedRowsByDocument.get(document.id)?.push(row);
+    }
+  }
+  for (const row of coverageRows) {
+    const document = documentsById.get(row.document_id);
+    if (document && sameVersion(row, document)) {
+      versionedCoverageByDocument.get(document.id)?.push(row);
+    }
+  }
+  const sources = documents.map((document): AssuranceSource => ({
+    document_id: document.id,
+    role: "current",
+    title: document.title,
+    source_version: {
+      content_hash: document.content_hash,
+      parser_version: document.assurance_observation_parser_version,
+      contract_version: document.assurance_observation_contract_version,
+    },
+    cost_observations: [],
+    assurance_observations: versionedRowsByDocument.get(document.id) ?? [],
+    assurance_observation_coverage: versionedCoverageByDocument.get(document.id) ?? [],
+  }));
+  const idsByFingerprint = new Map<string, string[]>();
+  for (const [documentId, rows] of versionedRowsByDocument) {
+    const document = documentsById.get(documentId)!;
+    for (const row of rows) {
+      const key = JSON.stringify([
+        documentId, document.content_hash, document.assurance_observation_parser_version,
+        document.assurance_observation_contract_version, row.observation_fingerprint,
+      ]);
+      idsByFingerprint.set(key, [...(idsByFingerprint.get(key) ?? []), row.id]);
+    }
+  }
+  const decisions = decisionRows.flatMap((decision): ObservationDecision[] => {
+    const key = JSON.stringify([
+      decision.document_id, decision.source_content_hash, decision.parser_version,
+      decision.contract_version, decision.observation_fingerprint,
+    ]);
+    const observationIds = idsByFingerprint.get(key);
+    return observationIds?.length
+      ? [{ ...decision, observation_ids: observationIds }]
+      : [];
+  });
+  const coverageComplete = sources.every((source) =>
+    source.assurance_observation_coverage.length > 0 &&
+    source.assurance_observation_coverage.every((row) => row.state === "processed"));
+  const snapshots = buildReviewExtraction(sources, decisions).extraction.riskItems.currentSnapshots;
+  const sourceDocumentsWithRisk = new Set(snapshots
+    .map((snapshot) => snapshot.sourceRef?.documentId)
+    .filter((documentId): documentId is string => Boolean(documentId)));
+  const statedCutoffs = snapshots.map((snapshot) =>
+    snapshot.asOfDate?.trim() || snapshot.periodLabel?.trim() || "");
+  const cutoffComplete = coverageComplete &&
+    sources.every((source) => sourceDocumentsWithRisk.has(source.document_id)) &&
+    snapshots.length > 0 &&
+    statedCutoffs.every(validRiskCutoff) &&
+    new Set(statedCutoffs).size === 1;
+  const gapReason = !coverageComplete
+    ? "prior_risk_coverage_incomplete"
+    : !snapshots.length
+      ? "prior_review_has_no_risk_snapshots"
+      : !cutoffComplete
+        ? "prior_risk_cutoff_not_provable"
+        : null;
+  return {
+    review,
+    sources,
+    decisions,
+    snapshots,
+    coverageComplete,
+    cutoffComplete,
+    gapReason,
+  };
 }
 
 function mapSelectedCostObservations(
@@ -1205,7 +1508,7 @@ function buildReviewExtraction(
       const correctedRatingValue = typeof corrected?.rating_value === "number"
         ? corrected.rating_value
         : null;
-      const accepted = decisions.some((item) =>
+      const accepted = decisions.find((item) =>
         item.decision === "accepted" && item.observation_ids.includes(row.id));
       return {
         sourceId: snapshotText(observation.risk_id),
@@ -1233,9 +1536,19 @@ function buildReviewExtraction(
               ratingLabel: correctedRatingLabel,
               ratingValue: correctedRatingValue,
               reason: correction.reason,
+              decidedBy: correction.decided_by,
+              decidedAt: correction.decided_at,
             }
           : accepted
-            ? { decision: "accepted" as const, status: null, ratingLabel: null, ratingValue: null, reason: null }
+            ? {
+                decision: "accepted" as const,
+                status: null,
+                ratingLabel: null,
+                ratingValue: null,
+                reason: accepted.reason,
+                decidedBy: accepted.decided_by,
+                decidedAt: accepted.decided_at,
+              }
             : null,
         sourceStatus: snapshotText(observation.status),
         sourceRatingLabel: snapshotText(observation.rating_label),

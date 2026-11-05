@@ -95,6 +95,8 @@ export type RiskSnapshot = {
     ratingLabel: string | null;
     ratingValue: number | null;
     reason: string | null;
+    decidedBy?: string;
+    decidedAt?: string;
   } | null;
   /** The extracted status/rating before a reviewer correction. */
   sourceStatus?: string | null;

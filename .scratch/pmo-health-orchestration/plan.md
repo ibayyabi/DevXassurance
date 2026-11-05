@@ -77,6 +77,13 @@ flowchart TD
 **Hasil:** risk per periode, previous snapshot terpisah dari baseline proyek, temuan new/closed/increased hanya bila pembanding comparable.
 **Penerimaan:** risk W5 Alarm 001/002 ditampilkan dengan sumber jika tersedia; kasus W6/W7 sesuai expected-results bila seluruh sumber dan identity tersedia; gap bila tidak ada sebelumnya, ID tidak cocok, skala berbeda tanpa mapping, atau dokumen belum diproses. Tidak ada inferred closed dari evidence yang hilang.
 
+**Ticket 05 → 06 status/provenance handoff (claimed; deterministic tests authored, not run):**
+- Read `risk_item_findings[]` with `previous`/`current` snapshots and `changeType`; citations carry document ID/title, content hash, excerpt, source location, cutoff, and reviewer decision/source values.
+- `risk_comparison_provenance` identifies contract `pmo_risk_comparison_v2`, mapping `referenceFingerprint`/versions, selected earlier review, source versions, decision summary, and coverage/cutoff completeness.
+- Previous evidence is the nearest earlier completed review's project-scoped `current` role, never the approved baseline; only version-matched observations and decisions participate.
+- Missing prior review, incomplete coverage, absent/ambiguous/conflicting cutoffs, or unknown identity/scale must remain visible gaps; no inferred closure or composite Risk score.
+- W5 Alarm IDs and W6 changes are shown only from validated cited source rows; do not claim W7 outcomes absent validated source evidence.
+
 ### 06 — Overview dan navigasi review — blocker: 04, 05
 
 **Owner:** satu agent frontend, integrator menetapkan read model bersama.

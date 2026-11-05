@@ -46,6 +46,7 @@ export function canonicalRiskScale(scaleLabel: string | null, mappings: readonly
 export function riskStatusIsOpen(status: string | null): boolean | null {
   if (!status) return null;
   const normalized = status.toLocaleLowerCase();
+  if (/\b(?:not|no longer|never)\s+(?:closed|resolved|mitigated)\b/iu.test(normalized)) return null;
   const closed = /\b(?:not|no longer|never)\s+open\b|\b(?:closed|resolved|mitigated|complete|completed|cancelled|inactive|ditutup|selesai|teratasi)\b/iu.test(normalized);
   const open = /\b(?:open|active|ongoing|unmitigated|terbuka|aktif|berjalan)\b/iu.test(normalized);
   return closed === open ? null : open;
@@ -81,7 +82,7 @@ export type RiskChangeType =
 export type RiskItemFinding = {
   changeType: RiskChangeType;
   canonicalId: string;
-  baseline: RiskSnapshot | null;
+  previous: RiskSnapshot | null;
   current: RiskSnapshot | null;
   ratingDelta: number | null;
   /** The cut-off each side states: its source date, else its period label. */
@@ -90,7 +91,7 @@ export type RiskItemFinding = {
 };
 
 export type UnidentifiedRisk = {
-  role: "baseline" | "current";
+  role: "previous" | "current";
   snapshot: RiskSnapshot;
 };
 
@@ -104,223 +105,221 @@ export type RiskComparison = {
 function groupById(
   snapshots: readonly RiskSnapshot[],
   mappings: readonly RiskMapping[],
-): Map<string, RiskSnapshot> {
-  const grouped = new Map<string, RiskSnapshot>();
+): Map<string, { snapshot: RiskSnapshot; conflicting: boolean; semanticKey: string }> {
+  const grouped = new Map<string, { snapshot: RiskSnapshot; conflicting: boolean; semanticKey: string }>();
   for (const snapshot of snapshots) {
     if (snapshot.sourceId === null) continue;
     const canonical = canonicalRiskId(snapshot.sourceId, mappings) as string;
-    // Keep the first stated occurrence for a canonical id.
-    if (!grouped.has(canonical)) grouped.set(canonical, snapshot);
+    const semanticKey = JSON.stringify([
+      snapshot.asOfDate?.trim() ?? null,
+      snapshot.periodLabel?.trim() ?? null,
+      snapshot.name,
+      snapshot.description,
+      snapshot.status,
+      snapshot.ratingLabel,
+      snapshot.ratingValue,
+      snapshot.scaleLabel,
+      snapshot.owner,
+      snapshot.mitigation,
+      snapshot.dueDate,
+      snapshot.wbs,
+      snapshot.sourceStatus,
+      snapshot.sourceRatingLabel,
+      snapshot.sourceRatingValue,
+      snapshot.reviewDecision ?? null,
+    ]);
+    const existing = grouped.get(canonical);
+    if (existing && existing.semanticKey !== semanticKey) existing.conflicting = true;
+    if (!existing) {
+      grouped.set(canonical, { snapshot, conflicting: false, semanticKey });
+    }
   }
   return grouped;
 }
 
-type GroupCutoff = { asOfDate: string | null; periodLabel: string | null };
-
 /**
- * The first cut-off facts stated anywhere in a role group. A register that
- * states its date on some items covers the items that omit it.
+ * A date and an explicitly date-shaped period label on the same row must agree;
+ * month-only labels remain insufficient for chronological ordering.
  */
-function groupCutoffInfo(snapshots: readonly RiskSnapshot[]): GroupCutoff {
-  const info: GroupCutoff = { asOfDate: null, periodLabel: null };
-  for (const snapshot of snapshots) {
-    if (info.asOfDate === null) info.asOfDate = snapshot.asOfDate?.trim() || null;
-    if (info.periodLabel === null) info.periodLabel = snapshot.periodLabel?.trim() || null;
-    if (info.asOfDate !== null && info.periodLabel !== null) break;
-  }
-  return info;
+function cutoffEvidenceConflicts(snapshot: RiskSnapshot): boolean {
+  const date = snapshot.asOfDate?.trim() ?? "";
+  const label = snapshot.periodLabel?.trim() ?? "";
+  if (!date || !label || !validIsoDate(date)) return false;
+  return validIsoDate(label)
+    ? date !== label
+    : /^\d{4}-(?:0[1-9]|1[0-2])$/u.test(label) && !date.startsWith(label);
 }
 
-function snapshotCutoff(snapshot: RiskSnapshot, group: GroupCutoff): string | null {
-  const ownDate = snapshot.asOfDate?.trim() || null;
-  if (ownDate) return ownDate;
-  if (group.asOfDate) return group.asOfDate;
-  return snapshot.periodLabel?.trim() || group.periodLabel || null;
+/**
+ * The cut-off THIS snapshot states for itself: its source date, else its period
+ * label. Never borrowed from another snapshot or document.
+ */
+function statedCutoff(snapshot: RiskSnapshot): string | null {
+  return snapshot.asOfDate?.trim() || snapshot.periodLabel?.trim() || null;
 }
 
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+function validIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
 
-/**
- * Whether two stated cut-offs can be compared across time: both must be stated,
- * distinct, and of the same kind — a date and a week label cannot be aligned
- * honestly. "same" marks identical stated cut-offs (duplicate evidence, never
- * mixed into a before/after); "unknown" marks missing or unalignable statements.
- */
+/** Only valid ISO dates with previous strictly earlier than current compare. */
 function cutoffRelation(
   previous: string | null,
   current: string | null,
-): "comparable" | "same" | "unknown" {
+): "comparable" | "same" | "unordered" | "unknown" {
   if (!previous || !current) return "unknown";
   if (previous === current) return "same";
-  return ISO_DATE.test(previous) === ISO_DATE.test(current) ? "comparable" : "unknown";
+  return validIsoDate(previous) && validIsoDate(current) && previous < current
+    ? "comparable"
+    : "unordered";
 }
+
 
 /**
  * Higher rating value = more severe. Two ratings are comparable only when both
  * scales resolve to the same canonical scale (identical, or via an accepted
- * scale mapping). With provably distinct stated cut-offs a numeric delta
- * becomes a directional claim (increased/decreased); without stated cut-offs
- * the difference stays a display-only change whose direction is not asserted —
- * a Medium/High label pair never proves a numeric ranking by itself.
+ * scale mapping). Called only for provably ordered snapshot pairs; the numeric
+ * delta is then a directional claim. A Medium/High label pair never proves a
+ * numeric ranking by itself.
  */
 function compareRatings(
-  baseline: RiskSnapshot,
+  previous: RiskSnapshot,
   current: RiskSnapshot,
   scaleMappings: readonly RiskMapping[],
-  relation: "comparable" | "unknown",
 ): { changeType: RiskChangeType; ratingDelta: number | null } {
-  const baselineScale = canonicalRiskScale(baseline.scaleLabel, scaleMappings);
+  const previousScale = canonicalRiskScale(previous.scaleLabel, scaleMappings);
   const currentScale = canonicalRiskScale(current.scaleLabel, scaleMappings);
-  const sameScale = baselineScale !== null && currentScale !== null && baselineScale === currentScale;
+  const sameScale = previousScale !== null && currentScale !== null && previousScale === currentScale;
+  if (!sameScale) return { changeType: "rating_not_comparable", ratingDelta: null };
 
-  if (!sameScale) {
-    // Scales differ and no accepted mapping aligns them: ratings are preserved
-    // but not compared.
-    return { changeType: "rating_not_comparable", ratingDelta: null };
-  }
-
-  if (baseline.ratingValue !== null && current.ratingValue !== null) {
-    const ratingDelta = current.ratingValue - baseline.ratingValue;
-    if (relation === "comparable") {
-      return {
-        changeType: ratingDelta > 0 ? "increased" : ratingDelta < 0 ? "decreased" : "unchanged",
-        ratingDelta,
-      };
-    }
-    return { changeType: ratingDelta === 0 ? "unchanged" : "rating_changed", ratingDelta: null };
-  }
-
-  // Same scale but no numeric value on one side: fall back to label comparison,
-  // which can show a change but never its direction.
-  if (baseline.ratingLabel !== null && current.ratingLabel !== null) {
+  if (previous.ratingValue !== null && current.ratingValue !== null) {
+    const ratingDelta = current.ratingValue - previous.ratingValue;
     return {
-      changeType: baseline.ratingLabel === current.ratingLabel ? "unchanged" : "rating_changed",
-      ratingDelta: null,
+      changeType: ratingDelta > 0 ? "increased" : ratingDelta < 0 ? "decreased" : "unchanged",
+      ratingDelta,
     };
   }
 
+  if (previous.ratingLabel !== null && current.ratingLabel !== null) {
+    return {
+      changeType: previous.ratingLabel === current.ratingLabel ? "unchanged" : "rating_changed",
+      ratingDelta: null,
+    };
+  }
   return { changeType: "present", ratingDelta: null };
 }
 
 /**
- * Item-level risk comparison between the previous snapshot the reviewer
- * selected and the current one. The previous snapshot is not the approved
- * project baseline — it is whatever prior register the reviewer selected, and
- * the UI must not call it an approved baseline.
+ * Item-level comparison of a selected earlier review's current-role snapshot
+ * against the current review's current-role snapshot. The approved project
+ * baseline is never a previous risk snapshot. Every group in a role must state
+ * one consistent cut-off; mixed or ambiguous cut-offs surface as gaps.
  *
- * Items are matched only by exact source ID or a reviewer-accepted identity
- * mapping — never by name. "new", "increased", and "decreased" are stated only
- * with a matched identity and two snapshots whose stated cut-offs (source date
- * or period label) are provably distinct; identical stated cut-offs are never
- * mixed into a before/after. A risk missing from the later snapshot is
- * "not_reported" — absence of an observation is never closure; only a
- * source-stated closed status is "closed". A differing ID on one side while the
- * other side also has unmatched IDs stays "identity_not_comparable" until the
- * reviewer maps the IDs. Source rating scales are preserved. No project Risk
- * score or composite is produced.
+ * IDs match exactly or by reviewer-accepted identity mapping. Directional
+ * changes require strictly ordered ISO dates. "New" additionally requires
+ * complete prior-source coverage and a complete, single-cutoff prior register
+ * so an absent ID has a supported comparison point. Missing later observations
+ * are never closure; "closed" requires a comparable pair and source-stated
+ * closed status. Conflicting same-ID rows surface as a gap. No composite Risk
+ * score is produced.
  */
 export function buildRiskComparison(input: {
-  baselineSnapshots: readonly RiskSnapshot[];
+  previousSnapshots: readonly RiskSnapshot[];
   currentSnapshots: readonly RiskSnapshot[];
   identityMappings: readonly RiskMapping[];
   scaleMappings: readonly RiskMapping[];
+  previousCoverageComplete: boolean;
+  previousCutoffComplete: boolean;
+  currentCoverageComplete: boolean;
 }): RiskComparison {
-  const { baselineSnapshots, currentSnapshots, identityMappings, scaleMappings } = input;
-  const baseline = groupById(baselineSnapshots, identityMappings);
+  const {
+    previousSnapshots, currentSnapshots, identityMappings, scaleMappings,
+    previousCoverageComplete, previousCutoffComplete, currentCoverageComplete,
+  } = input;
+  const previous = groupById(previousSnapshots, identityMappings);
   const current = groupById(currentSnapshots, identityMappings);
-  const hasPreviousSnapshot = baselineSnapshots.length > 0;
-  const baselineGroup = groupCutoffInfo(baselineSnapshots);
-  const currentGroup = groupCutoffInfo(currentSnapshots);
-
-  const canonicals = [...new Set([...baseline.keys(), ...current.keys()])]
+  const hasPreviousSnapshot = previousSnapshots.length > 0;
+  const groupCutoff = (snapshots: readonly RiskSnapshot[]): string | null | "conflict" => {
+    const cutoffs = snapshots.map(statedCutoff);
+    const dates = new Set(snapshots.map((snapshot) => snapshot.asOfDate?.trim()).filter(Boolean));
+    const labels = new Set(snapshots.map((snapshot) => snapshot.periodLabel?.trim()).filter(Boolean));
+    if (snapshots.some(cutoffEvidenceConflicts) || dates.size > 1 || labels.size > 1 ||
+      new Set(cutoffs.filter((cutoff): cutoff is string => cutoff !== null)).size > 1) {
+      return "conflict";
+    }
+    if (cutoffs.some((cutoff) => cutoff === null)) return null;
+    return cutoffs[0] ?? null;
+  };
+  const previousCutoffGroup = groupCutoff(previousSnapshots);
+  const currentCutoffGroup = groupCutoff(currentSnapshots);
+  const canonicals = [...new Set([...previous.keys(), ...current.keys()])]
     .sort((first, second) => first.localeCompare(second));
-  const priorOnlyCount = canonicals.filter(
-    (canonical) => baseline.has(canonical) && !current.has(canonical),
-  ).length;
-  const currentOnlyCount = canonicals.filter(
-    (canonical) => !baseline.has(canonical) && current.has(canonical),
-  ).length;
-
   const items: RiskItemFinding[] = [];
-  for (const canonical of canonicals) {
-    const baselineItem = baseline.get(canonical) ?? null;
-    const currentItem = current.get(canonical) ?? null;
-    const previousCutoff = baselineItem
-      ? snapshotCutoff(baselineItem, baselineGroup)
-      : baselineGroup.asOfDate ?? baselineGroup.periodLabel;
-    const currentCutoff = currentItem
-      ? snapshotCutoff(currentItem, currentGroup)
-      : currentGroup.asOfDate ?? currentGroup.periodLabel;
-    const relation = cutoffRelation(previousCutoff, currentCutoff);
-    const base = {
-      canonicalId: canonical,
-      baseline: baselineItem,
-      current: currentItem,
-      previousCutoff,
-      currentCutoff,
-    };
 
-    if (baselineItem && currentItem) {
-      // Two registers that state the same cut-off are the same snapshot; mixing
-      // them into a before/after would fabricate a change.
-      if (relation === "same") {
-        items.push({ ...base, changeType: "period_not_comparable", ratingDelta: null });
-        continue;
-      }
-      const ratings = compareRatings(baselineItem, currentItem, scaleMappings, relation);
-      const changeType: RiskChangeType =
-        riskStatusIsOpen(currentItem.status) === false ? "closed" : ratings.changeType;
-      items.push({ ...base, changeType, ratingDelta: ratings.ratingDelta });
+  const coverageIncomplete = hasPreviousSnapshot &&
+    (!previousCoverageComplete || !currentCoverageComplete);
+  for (const canonical of canonicals) {
+    const previousEntry = previous.get(canonical) ?? null;
+    const currentEntry = current.get(canonical) ?? null;
+    const previousItem = previousEntry && !previousEntry.conflicting ? previousEntry.snapshot : null;
+    const currentItem = currentEntry && !currentEntry.conflicting ? currentEntry.snapshot : null;
+    const previousItemCutoff = previousItem ? statedCutoff(previousItem) : null;
+    const currentCutoff = currentItem ? statedCutoff(currentItem) : null;
+    const relation = cutoffRelation(previousItemCutoff, currentCutoff);
+    const absentPreviousCutoff = previousCutoffGroup === "conflict" ? null : previousCutoffGroup;
+    const newRelation = cutoffRelation(absentPreviousCutoff, currentCutoff);
+    const previousCutoff = previousItem ? previousItemCutoff : currentItem ? absentPreviousCutoff : null;
+    const base = { canonicalId: canonical, previous: previousItem, current: currentItem, previousCutoff, currentCutoff };
+
+    if (previousEntry?.conflicting || currentEntry?.conflicting ||
+      previousCutoffGroup === "conflict" || currentCutoffGroup === "conflict" ||
+      coverageIncomplete) {
+      items.push({ ...base, changeType: "period_not_comparable", ratingDelta: null });
       continue;
     }
 
-    if (currentItem) {
-      // The current register itself states this risk closed, whatever the
-      // prior snapshot did — a source-stated fact, not an inference.
-      if (riskStatusIsOpen(currentItem.status) === false) {
-        items.push({ ...base, changeType: "closed", ratingDelta: null });
-        continue;
-      }
-      if (!hasPreviousSnapshot) {
-        // No prior register was selected: there is nothing to be new against.
-        items.push({ ...base, changeType: "present", ratingDelta: null });
-        continue;
-      }
-      if (priorOnlyCount > 0) {
-        // The prior register reports risks under IDs this register does not
-        // carry; without a mapping this item might be one of them renamed.
-        items.push({ ...base, changeType: "identity_not_comparable", ratingDelta: null });
-        continue;
-      }
+    if (previousItem && currentItem) {
       if (relation !== "comparable") {
         items.push({ ...base, changeType: "period_not_comparable", ratingDelta: null });
         continue;
       }
-      items.push({ ...base, changeType: "new", ratingDelta: null });
+      const ratings = compareRatings(previousItem, currentItem, scaleMappings);
+      items.push({
+        ...base,
+        changeType: riskStatusIsOpen(currentItem.status) === false ? "closed" : ratings.changeType,
+        ratingDelta: ratings.ratingDelta,
+      });
       continue;
     }
 
-    // Prior register only.
-    if (currentOnlyCount > 0) {
-      items.push({ ...base, changeType: "identity_not_comparable", ratingDelta: null });
+    if (currentItem) {
+      if (!hasPreviousSnapshot) {
+        items.push({ ...base, changeType: "present", ratingDelta: null });
+      } else if (previousHasUnidentified) {
+        items.push({ ...base, changeType: "identity_not_comparable", ratingDelta: null });
+      } else if (!previousCutoffComplete || newRelation !== "comparable") {
+        items.push({ ...base, changeType: "period_not_comparable", ratingDelta: null });
+      } else {
+        items.push({ ...base, changeType: "new", ratingDelta: null });
+      }
       continue;
     }
-    if (relation === "same") {
-      // Both registers state the same cut-off: contradictory same-moment
-      // evidence, not a temporal gap.
-      items.push({ ...base, changeType: "period_not_comparable", ratingDelta: null });
-      continue;
-    }
-    // Absence from the later register is not closure; it stays an explicit gap.
-    items.push({ ...base, changeType: "not_reported", ratingDelta: null });
+
+    // Missing later observations never prove closure; incomplete coverage also
+    // prevents even a "not reported" statement about this risk.
+    items.push({
+      ...base,
+      changeType: currentCoverageComplete ? "not_reported" : "period_not_comparable",
+      ratingDelta: null,
+    });
   }
 
-  // Items with no source ID have no established identity and are never compared;
-  // they are preserved for the reviewer to map or read.
   const unidentified: UnidentifiedRisk[] = [
-    ...baselineSnapshots
+    ...previousSnapshots
       .filter((snapshot) => snapshot.sourceId === null)
-      .map((snapshot) => ({ role: "baseline" as const, snapshot })),
+      .map((snapshot) => ({ role: "previous" as const, snapshot })),
     ...currentSnapshots
       .filter((snapshot) => snapshot.sourceId === null)
       .map((snapshot) => ({ role: "current" as const, snapshot })),
@@ -331,12 +330,12 @@ export function buildRiskComparison(input: {
 
 /** Distinct source risk IDs a reviewer can map, from both evidence groups. */
 export function riskSourceIds(input: {
-  baselineSnapshots: readonly RiskSnapshot[];
+  previousSnapshots: readonly RiskSnapshot[];
   currentSnapshots: readonly RiskSnapshot[];
 }): string[] {
   return [
     ...new Set(
-      [...input.baselineSnapshots, ...input.currentSnapshots]
+      [...input.previousSnapshots, ...input.currentSnapshots]
         .map((snapshot) => snapshot.sourceId)
         .filter((id): id is string => id !== null),
     ),
@@ -345,12 +344,12 @@ export function riskSourceIds(input: {
 
 /** Distinct source rating scales a reviewer can map, from both evidence groups. */
 export function riskSourceScales(input: {
-  baselineSnapshots: readonly RiskSnapshot[];
+  previousSnapshots: readonly RiskSnapshot[];
   currentSnapshots: readonly RiskSnapshot[];
 }): string[] {
   return [
     ...new Set(
-      [...input.baselineSnapshots, ...input.currentSnapshots]
+      [...input.previousSnapshots, ...input.currentSnapshots]
         .map((snapshot) => snapshot.scaleLabel)
         .filter((scale): scale is string => scale !== null),
     ),
