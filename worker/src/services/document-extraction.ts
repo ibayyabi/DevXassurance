@@ -1357,6 +1357,7 @@ function progressVarianceFormulaSupportsCell(
   const cited = citedReference(group, citation);
   const location = cited?.reference.sourceLocation;
   if (
+    !cited ||
     location?.kind !== "xlsx" ||
     location.sheetName !== citedCell.sheetName ||
     location.rowStart !== citedCell.row ||
