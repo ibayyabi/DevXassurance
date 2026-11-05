@@ -1,9 +1,24 @@
 -- Ticket 05: the prior-current risk review and its versioned evidence/decisions
 -- are captured by claim, fenced at finish, and invalidate completed analyses.
--- Run after migrations 202611050001, 202611050002, and 202611050003.
+-- Two-session check for the project -> review lock order with a committed
+-- isolated fixture containing two current reviews and project-manager access:
+-- Session A: BEGIN; set JWT claims; SELECT claim_assurance_analysis(project, A);
+-- leave its transaction open. Session B: BEGIN; set JWT claims; SELECT
+-- claim_assurance_analysis(project, B); it must wait before taking review B.
+-- COMMIT A, then B must return and COMMIT without deadlock. Reset the fixture
+-- and repeat with A/B reversed. This is a manual two-session check.
+-- pgTAP case runs after migrations 202611050001, 202611050002, and 202611050003.
 --   psql -v ON_ERROR_STOP=1 -f supabase/tests/risk_snapshot_atomicity.test.sql
 begin;
-select extensions.plan(17);
+select extensions.plan(18);
+select ok((
+  select lock_position > 0 and lock_position < review_position
+  from (
+    select position('from public.projects where id = p_project_id for update' in definition) as lock_position,
+      position('from public.assurance_reviews' in definition) as review_position
+    from (select pg_get_functiondef('public.lock_assurance_review(uuid,uuid)'::regprocedure) as definition) f
+  ) positions
+), 'review locks are acquired after the exclusive project lock');
 
 insert into auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, created_at, updated_at)
 values

@@ -275,10 +275,14 @@ begin
       and attempt->>'reference_fingerprint' is not distinct from refs->>'fingerprint' then
       continue;
     end if;
-    changed := success->>'id' is not null and
-      success->>'reference_fingerprint' is distinct from refs->>'fingerprint';
-    changed := changed or (r.status = 'analyzing' and attempt->>'outcome' = 'analyzing' and
-      attempt->>'reference_fingerprint' is distinct from refs->>'fingerprint');
+    -- Missing reference fingerprints cannot prove a reference changed; legacy
+    -- results remain non-current, and ticket 03 records decision-only invalidation.
+    changed := success->>'id' is not null
+      and success->>'reference_fingerprint' is not null
+      and success->>'reference_fingerprint' is distinct from refs->>'fingerprint';
+    changed := changed or (r.status = 'analyzing' and attempt->>'outcome' = 'analyzing'
+      and attempt->>'reference_fingerprint' is not null
+      and attempt->>'reference_fingerprint' is distinct from refs->>'fingerprint');
     if not changed then continue; end if;
     update public.assurance_reviews set status = 'evidence_ready', current_step = 'analysis',
       analysis_error = 'Approved comparison references changed. Run the analysis again.',
@@ -297,6 +301,28 @@ begin
 end;
 $$;
 revoke all on function public.invalidate_assurance_reference_results(uuid) from public, anon, authenticated;
+-- Claims serialize on the project before they lock a review. This preserves the
+-- reference-writer lock order and prevents two claims from locking each other's
+-- review rows through project-wide invalidation.
+create or replace function public.lock_assurance_review(p_project_id uuid, p_review_id uuid)
+returns public.assurance_reviews
+language plpgsql security definer set search_path = '' as $$
+declare r public.assurance_reviews;
+begin
+  if auth.uid() is null or not exists (
+    select 1 from public.project_members where project_id = p_project_id
+      and user_id = auth.uid() and role in ('admin', 'pmc_consultant', 'project_manager')
+  ) then raise exception 'Your project role cannot manage an assurance review.'; end if;
+  perform 1 from public.projects where id = p_project_id for update;
+  if not found then raise exception 'Project was not found.'; end if;
+  select * into r from public.assurance_reviews
+    where id = p_review_id and project_id = p_project_id for update;
+  if not found then raise exception 'Assurance review was not found in this project.'; end if;
+  return r;
+end;
+$$;
+revoke all on function public.lock_assurance_review(uuid, uuid) from public, anon, authenticated;
+
 
 -- Claim returns exactly the prior payload that its combined reference
 -- fingerprint captured. No client query can race selection against publication.
