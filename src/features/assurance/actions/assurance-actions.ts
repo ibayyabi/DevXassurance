@@ -62,6 +62,7 @@ type AssuranceCoverageRow = {
   total_groups: number;
   processed_groups: number;
   reason: string | null;
+  partial?: boolean;
 };
 type ObservationCoverageByRole = Record<
   "baseline" | "current",
@@ -953,13 +954,23 @@ function summarizeObservationCoverage(sources: AssuranceSource[]) {
       });
       const missingCoverage = rows.length !== roleSources.length;
       const states = rows.map(({ row }) => row.state);
-      const state: ObservationCoverageState = missingCoverage || states.includes("unprocessed")
-        ? "unprocessed"
-        : states.includes("ambiguous_conflicting")
-          ? "ambiguous_conflicting"
-          : states.includes("processed")
-            ? "processed"
+      // A conflicting source always wins: mixed/contradictory evidence for a
+      // domain is unsafe to use even if other sources are clean. Otherwise,
+      // at least one genuinely processed source is enough to let a
+      // comparison stand on that source's own evidence -- a sibling
+      // document that hasn't been processed yet (or has none at all) is a
+      // gap at *that document's* level, not grounds to blank out a
+      // comparison that other documents already support (see CONTEXT.md,
+      // "Comparison level": missing/incomparable evidence at one scope must
+      // not suppress a supported comparison elsewhere).
+      const state: ObservationCoverageState = states.includes("ambiguous_conflicting")
+        ? "ambiguous_conflicting"
+        : states.includes("processed")
+          ? "processed"
+          : missingCoverage || states.includes("unprocessed")
+            ? "unprocessed"
             : "absent";
+      const partial = state === "processed" && (missingCoverage || states.some((candidate) => candidate !== "processed"));
       const reasons = [...new Set([
         ...rows.flatMap(({ row, title }) => row.reason ? [`${title}: ${row.reason}`] : []),
         ...(missingCoverage ? ["A selected source has no coverage record for this domain."] : []),
@@ -970,6 +981,7 @@ function summarizeObservationCoverage(sources: AssuranceSource[]) {
         total_groups: rows.reduce((total, { row }) => total + row.total_groups, 0),
         processed_groups: rows.reduce((total, { row }) => total + row.processed_groups, 0),
         reason: reasons.length ? reasons.join(" ").slice(0, 1500) : null,
+        partial,
       };
     }
   }
@@ -1158,10 +1170,28 @@ function applyCoverageGaps(
   coverage: ObservationCoverageByRole,
 ) {
   return findings.map((finding) => {
-    const gaps = (["baseline", "current"] as const)
-      .map((role) => ({ role, ...coverage[role][finding.domain] }))
-      .filter((row) => row.state !== "processed");
-    if (!gaps.length) return finding;
+    const rows = (["baseline", "current"] as const)
+      .map((role) => ({ role, ...coverage[role][finding.domain] }));
+    // Hard gaps: this role has no usable evidence at all for the domain, so
+    // the finding cannot stand on its own and must fall back to
+    // more_evidence_required.
+    const gaps = rows.filter((row) => row.state !== "processed");
+    // Soft gaps: at least one source for this role was processed (the
+    // finding is still backed by real evidence), but a sibling source in
+    // the same role has incomplete coverage for the domain. That sibling's
+    // gap stays visible as a caveat without downgrading an otherwise
+    // supported comparison -- see the "Comparison level" note above.
+    const partialRows = rows.filter((row) => row.state === "processed" && row.partial);
+    if (!gaps.length) {
+      if (!partialRows.length) return finding;
+      const caveat = partialRows
+        .map((row) => row.reason ?? `${row.role} ${row.domain} coverage is incomplete for at least one source.`)
+        .join(" ");
+      return {
+        ...finding,
+        explanation: `${finding.explanation} Note: ${caveat}`,
+      };
+    }
     const explanation = gaps.map((row) => row.reason ??
       (row.state === "absent"
         ? `No ${row.domain} observations were found after processing all ${row.total_groups} ${row.role} group(s).`

@@ -1939,13 +1939,18 @@ function validateGroupExtraction(
     const periodLabel = nullableBoundedString(item.period_label ?? null, `${path}.period_label`, rowErrors, 200);
     const citation = requiredCitation(item, allowedSources, path, rowErrors, fromCache);
     const excerpt = excerptFor(item, citation, path, rowErrors);
-    const date = checkedDate(item.date ?? null, excerpt, `${path}.date`, rowErrors);
+    // `date` is never taken from the model: it is derived deterministically
+    // from `raw_date` below, once raw_date's own citation check (next line)
+    // has passed. Asking the model to also normalize the date independently
+    // made `date` practically unfillable (it had to appear verbatim as an
+    // ISO string inside a human-written excerpt, and be byte-identical to
+    // raw_date), even for cleanly formatted source dates.
     const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
     if (!["project", "wbs", "unknown"].includes(scopeLevel)) rowErrors.push(`${path}.scope_level is invalid`);
     if (scopeLevel === "wbs" && !scopeLabel) rowErrors.push(`${path}.scope_label is required for WBS scope`);
     if (scopeLevel !== "wbs" && scopeLabel) rowErrors.push(`${path}.scope_label is only valid for WBS scope`);
     if (rawDate && !excerpt?.includes(rawDate)) rowErrors.push(`${path}.raw_date is not present in the cited excerpt`);
-    if (date && rawDate !== date) rowErrors.push(`${path}.date can only normalize an exact ISO raw_date`);
+    const date = rawDate ? parseCitedRawDate(rawDate) : null;
     if (!textIsCited(label, excerpt)) rowErrors.push(`${path}.label is not present in the cited excerpt`);
     if (!textIsCited(scopeLabel, excerpt)) rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
     if (!textIsCited(periodLabel, excerpt)) rowErrors.push(`${path}.period_label is not present in the cited excerpt`);
@@ -3088,6 +3093,39 @@ function isIsoDate(value: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const date = new Date(`${value}T00:00:00.000Z`);
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+const MONTH_NAME_TO_NUMBER: Record<string, string> = {
+  januari: "01", january: "01", jan: "01",
+  februari: "02", february: "02", feb: "02",
+  maret: "03", march: "03", mar: "03",
+  april: "04", apr: "04",
+  mei: "05", may: "05",
+  juni: "06", june: "06", jun: "06",
+  juli: "07", july: "07", jul: "07",
+  agustus: "08", august: "08", aug: "08",
+  september: "09", sep: "09", sept: "09",
+  oktober: "10", october: "10", oct: "10",
+  november: "11", nov: "11",
+  desember: "12", december: "12", dec: "12",
+};
+
+// Deterministically normalizes an already-cited `raw_date` string into an
+// ISO date, without ever asking the model to invent or copy the ISO form
+// itself. Only unambiguous formats (ISO, or day + named month + year) are
+// recognized; anything else -- including purely numeric "DD/MM" vs "MM/DD"
+// dates, which this project's own anti-fabrication rules treat as
+// ambiguous -- is left as null (a gap, not a guess).
+function parseCitedRawDate(rawDate: string): string | null {
+  const trimmed = rawDate.trim();
+  if (isIsoDate(trimmed)) return trimmed;
+  const match = /^(\d{1,2})[\s-]([a-zA-Z]+)[\s.-]+(\d{4})\b/.exec(trimmed);
+  if (!match) return null;
+  const month = MONTH_NAME_TO_NUMBER[match[2].toLowerCase()];
+  if (!month) return null;
+  const day = match[1].padStart(2, "0");
+  const candidate = `${match[3]}-${month}-${day}`;
+  return isIsoDate(candidate) ? candidate : null;
 }
 
 function boundedString(value: unknown, path: string, errors: string[], maxLength: number) {

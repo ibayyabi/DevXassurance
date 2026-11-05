@@ -1307,6 +1307,96 @@ test("a cost value with no recognizable role wording nearby is still excluded af
   );
 });
 
+const milestoneSource =
+  "MASTER GANTT Kick-off: 18 September 2026. DM: 31-Oct-2026. " +
+  "Administrative closeout: 31 December 2026. Baseline disetujui: 18 September 2026 (kick-off). " +
+  "Catatan lokasi: kantor proyek berjarak 4.500 m2 dari pintu utama.";
+
+function milestoneModelOutput(prompt, milestones) {
+  const group = validModelOutput(prompt);
+  if (isExecutiveSummaryPrompt(prompt)) return group;
+  const sourceId = documentContextFromPrompt(prompt)[0].source_id;
+  return {
+    ...group,
+    assurance_observations: {
+      ...group.assurance_observations,
+      milestones: milestones.map((milestone) => ({
+        scope_level: "project",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        date: null,
+        source_id: sourceId,
+        ...milestone,
+      })),
+    },
+  };
+}
+
+async function extractMilestones(milestones) {
+  return await withLocalOllama(
+    async (_url, init) => {
+      const prompt = JSON.parse(init.body).messages[1].content;
+      return modelResponse(milestoneModelOutput(prompt, milestones));
+    },
+    async () =>
+      await extractDocumentGroups(
+        job(milestoneSource, { fileName: "gantt.txt", title: "Master Gantt" }),
+        [{ chunkIndex: 0, chunkText: milestoneSource, sectionLabel: "Master Gantt" }],
+        { parserVersion: "milestone-date-test-v1" },
+        memoryGroupStore(),
+      ),
+  );
+}
+
+test("milestone dates written as 'D Month YYYY' or 'D-Mon-YYYY' are normalized to ISO, not left null", async () => {
+  const outcome = await extractMilestones([
+    { label: "Kick-off", raw_date: "18 September 2026", excerpt: "Kick-off: 18 September 2026" },
+    { label: "DM", raw_date: "31-Oct-2026", excerpt: "DM: 31-Oct-2026" },
+    { label: "Administrative closeout", raw_date: "31 December 2026", excerpt: "Administrative closeout: 31 December 2026" },
+  ]);
+
+  assert.equal(outcome.ok, true, `${outcome.errorCode}: ${outcome.errorMessage}`);
+  const milestones = outcome.extraction.assurance_observations.milestones;
+  assert.deepEqual(
+    milestones.map((milestone) => milestone.date),
+    ["2026-09-18", "2026-10-31", "2026-12-31"],
+  );
+});
+
+test("a milestone raw_date with a trailing non-date remark still normalizes, ignoring the remark", async () => {
+  const outcome = await extractMilestones([
+    {
+      label: "Baseline disetujui",
+      raw_date: "18 September 2026 (kick-off)",
+      excerpt: "Baseline disetujui: 18 September 2026 (kick-off)",
+    },
+  ]);
+
+  assert.equal(outcome.ok, true, `${outcome.errorCode}: ${outcome.errorMessage}`);
+  const milestones = outcome.extraction.assurance_observations.milestones;
+  assert.equal(milestones.length, 1);
+  assert.equal(milestones[0].date, "2026-09-18");
+  assert.equal(milestones[0].raw_date, "18 September 2026 (kick-off)");
+});
+
+test("a milestone raw_date with no recognizable date wording stays a gap (date: null), not a guess", async () => {
+  const outcome = await extractMilestones([
+    // Not a date at all; must never be coerced into one.
+    {
+      label: "Catatan lokasi",
+      raw_date: "4.500 m2 dari pintu utama",
+      excerpt: "Catatan lokasi: kantor proyek berjarak 4.500 m2 dari pintu utama",
+    },
+  ]);
+
+  assert.equal(outcome.ok, true, `${outcome.errorCode}: ${outcome.errorMessage}`);
+  const milestones = outcome.extraction.assurance_observations.milestones;
+  assert.equal(milestones.length, 1);
+  assert.equal(milestones[0].date, null);
+  assert.equal(milestones[0].raw_date, "4.500 m2 dari pintu utama");
+});
+
 test("a cost value absent from its cited source is excluded, not accepted", async () => {
   const outcome = await extractCostObservations([
     { measure: "eac", source_value: "USD 9,999,999" },

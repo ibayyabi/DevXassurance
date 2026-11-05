@@ -165,6 +165,49 @@ test('analysis preserves unprocessed coverage in its atomic result',async()=>{
   assert.equal(publication?.input.p_metadata.observation_coverage.byRole.baseline.schedule.state,'unprocessed');
   assert.equal(publication?.input.p_findings.find(finding=>finding.domain==='schedule').condition,'more_evidence_required');
 });
+test('a sibling document with unprocessed schedule coverage does not blank out a comparison another current document already supports',async()=>{
+  const processedCoverage = ['budget','schedule','progress','risk'].map(domain=>({
+    domain,state:'processed',total_groups:1,processed_groups:1,reason:null,
+  }));
+  const unprocessedScheduleCoverage = ['budget','schedule','progress','risk'].map(domain=>({
+    domain,state:domain==='schedule'?'unprocessed':'processed',total_groups:1,
+    processed_groups:domain==='schedule'?0:1,
+    reason:domain==='schedule'?'W4 Alarm Kebencanaan schedule groups remain unprocessed.':null,
+  }));
+  const source=(document_id,role,title,hash,assurance_observations,coverage)=>({
+    document_id,role,title,
+    source_version:{content_hash:hash,parser_version:'parser/1',contract_version:'contract/1'},
+    cost_observations:[],assurance_observations,assurance_observation_coverage:coverage,
+  });
+  const observation=(id,domain,observation_type,value,page)=>({
+    id,domain,observation_type,observation:value,evidence_chunk_index:2,
+    excerpt:`Source excerpt ${id}`,page_number:page,section_label:'Evidence',
+    source_location:{sheet:'Schedule',row:page},
+  });
+  const sources=[
+    source('base','baseline','Approved baseline','a'.repeat(64),[
+      observation('milestone-base','schedule','milestone',{
+        label:'Go-live',date:'2026-03-01',scope_level:'project',scope_label:null,
+        period_label:'Baseline',as_of_date:'2025-12-31',
+      },4),
+    ],processedCoverage),
+    source('current-master-gantt','current','Master Gantt','b'.repeat(64),[
+      observation('milestone-current','schedule','milestone',{
+        label:'Go-live',date:'2026-03-16',scope_level:'project',scope_label:null,
+        period_label:'March 2026',as_of_date:'2026-03-31',
+      },8),
+    ],processedCoverage),
+    source('current-w4-alarm','current','W4 Alarm Kebencanaan',(`c`.repeat(64)),[],unprocessedScheduleCoverage),
+  ];
+  const f=fixture({claim:{attempt_id:'attempt-1',sources,progress_decisions:[]}});
+  await f.assurance.runAssuranceAnalysis(form());
+  const publication=f.calls.find(call=>call.name==='finish_assurance_analysis_with_results');
+  assert.equal(publication?.input.p_metadata.observation_coverage.byRole.current.schedule.state,'processed');
+  const schedule=publication?.input.p_findings.find(finding=>finding.domain==='schedule');
+  assert.equal(schedule.condition,'critical');
+  assert.ok(!schedule.headline.includes('coverage gap'),schedule.headline);
+  assert.match(schedule.explanation,/unprocessed/);
+});
 test('analysis errors finish only the owning attempt with a failure reason',async()=>{
   const f=fixture({queryError:{message:'Cost query failed'}});
   await assert.rejects(()=>f.assurance.runAssuranceAnalysis(form()),/Cost query failed/);
