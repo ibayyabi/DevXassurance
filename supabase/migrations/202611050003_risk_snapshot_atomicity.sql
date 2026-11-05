@@ -350,6 +350,11 @@ begin
       perform 1 from public.projects where id = project_id for update;
       if not found then continue; end if;
     end if;
+    if tg_table_name = 'assurance_observation_decisions' then
+      -- Keep ticket 03's specific decision reason before prior-risk reference
+      -- invalidation makes the same result inactive.
+      perform public.invalidate_assurance_observation_results(project_id);
+    end if;
     perform public.invalidate_assurance_reference_results(project_id);
   end loop;
   return null;
