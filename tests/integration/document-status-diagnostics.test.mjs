@@ -62,8 +62,9 @@ test("queue and processing guidance uses diagnostic evidence without assuming re
     leaseUnknown: false,
   };
   assert.match(status.processingCause("processing", expired), /tidak memastikan pekerja telah berhenti/i);
-  assert.match(status.processingAction("processing", expired), /Ganti attempt kedaluwarsa/);
-  assert.match(status.processingAction("failed", expired), /Ganti attempt kedaluwarsa/);
+  assert.match(status.processingAction("processing", expired), /Antrekan ulang attempt kedaluwarsa/);
+  assert.match(status.processingAction("processing", { ...expired, attemptCount: 3, maxAttempts: 3 }), /batas percobaan tercapai.*job gagal/i);
+  assert.match(status.processingAction("failed", expired), /status dokumen tidak cocok/);
 });
 
 test("completed never implies full assurance coverage; needs_review is not a failure", () => {
@@ -147,7 +148,7 @@ test("job diagnostics classify lease activity, backoff, and attempts", () => {
 });
 
 test("diagnostic reads stay project-scoped and never expose service-role access", async () => {
-  const seen = { eq: [], in: [], table: null, order: null };
+  const seen = { eq: [], in: [], table: null, order: [] };
   const supabase = {
     from(table) {
       seen.table = table;
@@ -163,13 +164,12 @@ test("diagnostic reads stay project-scoped and never expose service-role access"
           seen.in.push([column, values]);
           return this;
         },
-        order(_column, options) {
-          seen.order = options;
-          return {
-            range() {
-              return Promise.resolve({ data: [], error: null });
-            },
-          };
+        order(column, options) {
+          seen.order.push([column, options]);
+          return this;
+        },
+        range() {
+          return Promise.resolve({ data: [], error: null });
         },
       };
     },
@@ -178,7 +178,10 @@ test("diagnostic reads stay project-scoped and never expose service-role access"
   assert.equal(seen.table, "ai_jobs");
   assert.deepEqual(seen.eq, [["job_type", "parse_document"], ["project_id", "project-a"]]);
   assert.deepEqual(seen.in, [["document_id", ["doc-1", "doc-2"]]]);
-  assert.deepEqual(seen.order, { ascending: true }, "created_at order keeps the latest job per document");
+  assert.deepEqual(seen.order, [
+    ["created_at", { ascending: true }],
+    ["id", { ascending: true }],
+  ], "stable ordering keeps the latest job per document across pages");
 });
 
 test("a diagnostics read error degrades to no diagnostics instead of failing the page", async () => {
@@ -196,6 +199,7 @@ test("a diagnostics read error degrades to no diagnostics instead of failing the
         },
         order() {
           return {
+            order() { return this; },
             range() {
               return Promise.resolve({ data: null, error: { message: "permission denied" } });
             },
@@ -249,6 +253,7 @@ test("latest job per document wins when several parse jobs exist", async () => {
         },
         order() {
           return {
+            order() { return this; },
             range() {
               return Promise.resolve({ data: rows, error: null });
             },
@@ -295,6 +300,7 @@ test("more than one page of jobs keeps the latest job per document", async () =>
         },
         order() {
           return {
+            order() { return this; },
             range(from, to) {
               ranges.push([from, to]);
               return Promise.resolve({
@@ -350,6 +356,7 @@ test("an exactly-full last page requests one more range before stopping", async 
         },
         order() {
           return {
+            order() { return this; },
             range(from, to) {
               ranges.push([from, to]);
               return Promise.resolve({

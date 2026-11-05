@@ -87,9 +87,9 @@ export async function fetchJobDiagnostics(
   const byDocument = new Map<string, JobDiagnostic>();
   if (!documentIds.length) return byDocument;
   const now = new Date();
-  // Ascending created_at order plus overwrite-on-repeat keeps the latest job
-  // per document after full pagination. A page short of the full size ends the
-  // scan; a page exactly at the cap is followed by one more range request.
+  // Ascending created_at then ID order plus overwrite-on-repeat keeps the
+  // latest job per document deterministic across equal timestamps and pages.
+  // A short page ends the scan; a full page is followed by another request.
   try {
     for (let offset = 0; ; offset += JOB_DIAGNOSTICS_PAGE_SIZE) {
       const { data, error } = await jobDiagnosticsQuery(supabase)
@@ -97,6 +97,7 @@ export async function fetchJobDiagnostics(
         .eq("project_id", projectId)
         .in("document_id", documentIds)
         .order("created_at", { ascending: true })
+        .order("id", { ascending: true })
         .range(offset, offset + JOB_DIAGNOSTICS_PAGE_SIZE - 1);
       if (error) return null;
       const rows = data ?? [];

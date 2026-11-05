@@ -160,19 +160,27 @@ test("a manual retry requires the latest processing lease to be verifiably expir
     latestJob: {
       id: "job-1",
       status: "processing",
+      claim_token: "claim-1",
       lease_expires_at: "2000-01-01T00:00:00.000Z",
     },
   });
   await expired.action(retryForm("job-1"));
   assert.deepEqual(expired.rpcCalls, [{
-    name: "retry_document_job",
-    args: { retry_project_id: "project-1", retry_document_id: "document-1" },
+    name: "retry_expired_document_job",
+    args: {
+      retry_project_id: "project-1",
+      retry_document_id: "document-1",
+      expected_job_id: "job-1",
+      expected_claim_token: "claim-1",
+      expected_lease_expires_at: "2000-01-01T00:00:00.000Z",
+    },
   }]);
 
   for (const latestJob of [
-    { id: "job-1", status: "processing", lease_expires_at: "2999-01-01T00:00:00.000Z" },
-    { id: "job-1", status: "processing", lease_expires_at: null },
-    { id: "new-job", status: "processing", lease_expires_at: "2000-01-01T00:00:00.000Z" },
+    { id: "job-1", status: "processing", claim_token: "claim-1", lease_expires_at: "2999-01-01T00:00:00.000Z" },
+    { id: "job-1", status: "processing", claim_token: "claim-1", lease_expires_at: null },
+    { id: "job-1", status: "processing", claim_token: null, lease_expires_at: "2000-01-01T00:00:00.000Z" },
+    { id: "new-job", status: "processing", claim_token: "claim-2", lease_expires_at: "2000-01-01T00:00:00.000Z" },
   ]) {
     const candidate = retrySetup({ latestJob });
     await assert.rejects(candidate.action(retryForm("job-1")), /verifiably expired/);
@@ -180,12 +188,14 @@ test("a manual retry requires the latest processing lease to be verifiably expir
   }
 });
 
+
 test("expired-lease retries retain role authorization while failed retries remain available", async () => {
   const denied = retrySetup({
     role: "viewer",
     latestJob: {
       id: "job-1",
       status: "processing",
+      claim_token: "claim-1",
       lease_expires_at: "2000-01-01T00:00:00.000Z",
     },
   });
@@ -195,17 +205,33 @@ test("expired-lease retries retain role authorization while failed retries remai
 
   const failed = retrySetup({ documentStatus: "failed" });
   await failed.action(retryForm());
-  assert.equal(failed.rpcCalls.length, 1);
+  assert.deepEqual(failed.rpcCalls, [{
+    name: "retry_document_job",
+    args: { retry_project_id: "project-1", retry_document_id: "document-1" },
+  }]);
   assert.deepEqual(failed.reads, ["documents", "ai_jobs"]);
 });
 
 test("failed-document retry cannot cancel a live or still-queued latest job", async () => {
   for (const latestJob of [
-    { id: "job-active", status: "processing", lease_expires_at: "2999-01-01T00:00:00.000Z" },
-    { id: "job-queued", status: "queued", lease_expires_at: null },
+    { id: "job-active", status: "processing", claim_token: "claim-1", lease_expires_at: "2999-01-01T00:00:00.000Z" },
+    { id: "job-queued", status: "queued", claim_token: null, lease_expires_at: null },
   ]) {
     const candidate = retrySetup({ documentStatus: "failed", latestJob });
-    await assert.rejects(candidate.action(retryForm()), /processing job|Only failed documents/);
+    await assert.rejects(candidate.action(retryForm()), /processing job|Only failed documents|statuses differ/);
     assert.equal(candidate.rpcCalls.length, 0);
   }
+
+  const staleStatus = retrySetup({
+    documentStatus: "failed",
+    latestJob: {
+      id: "job-expired",
+      status: "processing",
+      claim_token: "claim-1",
+      lease_expires_at: "2000-01-01T00:00:00.000Z",
+    },
+  });
+  await assert.rejects(staleStatus.action(retryForm("job-expired")), /statuses differ/);
+  assert.equal(staleStatus.rpcCalls.length, 0);
 });
+

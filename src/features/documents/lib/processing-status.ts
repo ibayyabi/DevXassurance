@@ -56,6 +56,8 @@ type ProcessingDiagnostic = {
   leaseActive?: boolean;
   leaseExpired?: boolean;
   leaseUnknown?: boolean;
+  attemptCount?: number;
+  maxAttempts?: number | null;
 };
 
 export const processingStateActions: Record<ProcessingState, string> = {
@@ -94,6 +96,9 @@ export function processingCause(status: string, diagnostic?: ProcessingDiagnosti
 }
 
 export function processingAction(status: string, diagnostic?: ProcessingDiagnostic | null): string | null {
+  if (status === "failed" && diagnostic?.status === "processing" && diagnostic.leaseExpired) {
+    return "Job terbaru memiliki lease kedaluwarsa, tetapi status dokumen tidak cocok; muat ulang sebelum melakukan retry.";
+  }
   if (status === "failed" && diagnostic && (diagnostic.status === "processing" || diagnostic.status === "queued")) {
     return processingAction(diagnostic.status, diagnostic);
   }
@@ -108,7 +113,15 @@ export function processingAction(status: string, diagnostic?: ProcessingDiagnost
   }
   if (status === "processing" && diagnostic?.status === "processing") {
     if (diagnostic.leaseExpired) {
-      return "Pengelola proyek dapat memilih “Ganti attempt kedaluwarsa” untuk mengantrekan ulang; lease kedaluwarsa tidak memastikan worker telah berhenti.";
+      if (
+        diagnostic.maxAttempts !== null &&
+        diagnostic.maxAttempts !== undefined &&
+        diagnostic.attemptCount !== undefined &&
+        diagnostic.attemptCount >= diagnostic.maxAttempts
+      ) {
+        return "Batas percobaan tercapai; pengelola dapat menandai job gagal, lalu memilih retry gagal bila diperlukan.";
+      }
+      return "Pengelola proyek dapat memilih “Antrekan ulang attempt kedaluwarsa”; lease kedaluwarsa tidak memastikan worker telah berhenti.";
     }
     if (diagnostic.leaseActive) return "Lease aktif saat terakhir dibaca; tunggu dan jangan mulai ulang pemrosesan.";
     if (diagnostic.leaseUnknown) return "Lease tidak dapat dipastikan; perbarui diagnostik sebelum memulai ulang pemrosesan.";

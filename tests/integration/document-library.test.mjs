@@ -184,9 +184,19 @@ test("job diagnostics render independently of review warnings and offer retry on
   };
   const expiredHtml = renderLibrary({ items: [expired] });
   assert.match(expiredHtml, /Diagnostik job pemrosesan/);
-  assert.match(expiredHtml, /Ganti attempt kedaluwarsa/);
+  assert.match(expiredHtml, /Antrekan ulang attempt kedaluwarsa/);
   assert.match(expiredHtml, /aria-describedby="expired-lease-help-doc-expired"/);
   assert.doesNotMatch(expiredHtml, /aria-label="Catatan peninjauan dokumen"/);
+
+  const cappedHtml = renderLibrary({
+    items: [{
+      ...expired,
+      id: "doc-capped",
+      jobDiagnostic: { ...diagnostic, jobId: "job-capped", attemptCount: 3, maxAttempts: 3 },
+    }],
+  });
+  assert.match(cappedHtml, /Tandai job gagal/);
+  assert.match(cappedHtml, /hasil\/checkpoint yang sudah tersimpan dipertahankan/);
 
   const activeHtml = renderLibrary({
     items: [{
@@ -196,7 +206,7 @@ test("job diagnostics render independently of review warnings and offer retry on
     }],
   });
   assert.match(activeHtml, /Lease masih aktif/);
-  assert.doesNotMatch(activeHtml, /Ganti attempt kedaluwarsa/);
+  assert.doesNotMatch(activeHtml, /Antrekan ulang attempt kedaluwarsa/);
 
   const failedActiveHtml = renderLibrary({
     items: [{
@@ -207,7 +217,17 @@ test("job diagnostics render independently of review warnings and offer retry on
     }],
   });
   assert.match(failedActiveHtml, /Lease masih aktif/);
-  assert.doesNotMatch(failedActiveHtml, /Ganti attempt kedaluwarsa|Ulangi pemrosesan dokumen/);
+  assert.doesNotMatch(failedActiveHtml, /Antrekan ulang attempt kedaluwarsa|Ulangi pemrosesan dokumen/);
+
+  const failedExpiredHtml = renderLibrary({
+    items: [{
+      ...expired,
+      id: "doc-failed-expired",
+      processingStatus: "failed",
+      jobDiagnostic: diagnostic,
+    }],
+  });
+  assert.doesNotMatch(failedExpiredHtml, /Antrekan ulang attempt kedaluwarsa|Ulangi pemrosesan dokumen/);
 
   const unavailableHtml = renderLibrary({
     items: [{
@@ -219,6 +239,6 @@ test("job diagnostics render independently of review warnings and offer retry on
     }],
   });
   assert.match(unavailableHtml, /Diagnostik job tidak dapat dimuat/);
-  assert.doesNotMatch(unavailableHtml, /Ganti attempt kedaluwarsa/);
+  assert.doesNotMatch(unavailableHtml, /Antrekan ulang attempt kedaluwarsa/);
   assert.doesNotMatch(unavailableHtml, /aria-label="Catatan peninjauan dokumen"/);
 });

@@ -702,6 +702,11 @@ function DocumentRow({
   const flagged = facts.filter((fact) => fact.factType === "risk" || fact.factType === "issue");
   const missingCitations = facts.filter((fact) => !fact.evidenceLinks.length).length;
   const hasReviewNotice = flagged.length > 0 || missingCitations > 0 || gaps.length > 0 || document.processingStatus === "failed" || Boolean(document.processingError || summary?.qualityWarning);
+  const expiredLeaseAtLimit =
+    document.jobDiagnostic?.status === "processing" &&
+    document.jobDiagnostic.leaseExpired &&
+    document.jobDiagnostic.maxAttempts !== null &&
+    document.jobDiagnostic.attemptCount >= document.jobDiagnostic.maxAttempts;
   useEffect(() => {
     if (hidden && panelRef.current?.open) panelRef.current.close();
   }, [hidden]);
@@ -751,11 +756,14 @@ function DocumentRow({
                       ? "Diagnostik job tidak dapat dimuat; status lease dan backoff belum dapat dipastikan. Muat ulang halaman untuk mencoba lagi."
                       : "Catatan job tidak tersedia; status lease dan backoff belum dapat dipastikan."}
                   </p>}
-              {document.jobDiagnostic?.status === "processing" &&
+              {document.processingStatus === "processing" &&
+                document.jobDiagnostic?.status === "processing" &&
                 document.jobDiagnostic.leaseExpired && (
                   <div className="mt-3">
                     <p id={`expired-lease-help-${document.id}`} className="text-ink-muted">
-                      Lease job telah kedaluwarsa. Ini tidak memastikan proses worker sudah berhenti; tindakan ini mengganti attempt lama dan mengantrekan proses baru.
+                      {expiredLeaseAtLimit
+                        ? "Lease job telah kedaluwarsa dan batas percobaan tercapai. Tindakan ini menandai job gagal; hasil/checkpoint yang sudah tersimpan dipertahankan. Lease kedaluwarsa tidak memastikan proses worker sudah berhenti."
+                        : "Lease job telah kedaluwarsa. Ini tidak memastikan proses worker sudah berhenti; tindakan ini mengantrekan ulang job yang sama dan mempertahankan hasil/checkpoint yang sudah tersimpan."}
                     </p>
                     <form action={retryDocumentProcessing} className="mt-2">
                       <input type="hidden" name="projectId" value={projectId} />
@@ -768,7 +776,7 @@ function DocumentRow({
                         aria-describedby={`expired-lease-help-${document.id}`}
                       >
                         <RefreshCw className="h-4 w-4" />
-                        Ganti attempt kedaluwarsa
+                        {expiredLeaseAtLimit ? "Tandai job gagal" : "Antrekan ulang attempt kedaluwarsa"}
                       </Button>
                     </form>
                   </div>
