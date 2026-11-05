@@ -266,6 +266,7 @@ export function buildRiskComparison(input: {
 
   const coverageIncomplete = hasPreviousSnapshot &&
     (!previousCoverageComplete || !currentCoverageComplete);
+  const items: RiskItemFinding[] = [];
   for (const canonical of canonicals) {
     const previousEntry = previous.get(canonical) ?? null;
     const currentEntry = current.get(canonical) ?? null;

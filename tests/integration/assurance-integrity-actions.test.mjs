@@ -100,7 +100,7 @@ test('evidence action delegates no-op detection to the atomic RPC and propagates
 });
 test('analysis publishes deterministic findings from the claimed versioned sources atomically',async()=>{
   const f=fixture();await f.assurance.runAssuranceAnalysis(form());
-  const publication=f.calls.find(call=>call.name==='finish_assurance_analysis_with_results');
+  const publication=f.calls.find(call=>call.name==='finish_assurance_analysis_with_decision_fingerprint');
   assert.equal(publication?.input.p_attempt_id,'attempt-1');
   assert.deepEqual(publication?.input.p_findings.map(x=>x.domain).sort(),['budget','risk','schedule']);
   assert.equal(publication?.input.p_metadata.source_versions.length,2);
@@ -140,7 +140,7 @@ test('analysis findings retain source-version citations from validated observati
   ];
   const f=fixture({claim:{attempt_id:'attempt-1',sources}});
   await f.assurance.runAssuranceAnalysis(form());
-  const findings=f.calls.find(call=>call.name==='finish_assurance_analysis_with_results').input.p_findings;
+  const findings=f.calls.find(call=>call.name==='finish_assurance_analysis_with_decision_fingerprint').input.p_findings;
   const schedule=findings.find(finding=>finding.domain==='schedule');
   assert.equal(schedule.condition,'critical');
   assert.deepEqual(schedule.sourceExcerpts.map(source=>source.documentId),['base','current']);
@@ -164,7 +164,7 @@ test('analysis preserves unprocessed coverage in its atomic result',async()=>{
   }));
   const f=fixture({claim:{attempt_id:'attempt-1',sources,progress_decisions:[]}});
   await f.assurance.runAssuranceAnalysis(form());
-  const publication=f.calls.find(call=>call.name==='finish_assurance_analysis_with_results');
+  const publication=f.calls.find(call=>call.name==='finish_assurance_analysis_with_decision_fingerprint');
   assert.equal(publication?.input.p_metadata.observation_coverage.byRole.baseline.schedule.state,'unprocessed');
   assert.equal(publication?.input.p_findings.find(finding=>finding.domain==='schedule').condition,'more_evidence_required');
 });
@@ -181,7 +181,7 @@ test('overlap claim errors prevent publication and publication errors are not ig
   await assert.rejects(()=>f.assurance.runAssuranceAnalysis(form()),/Already running/);
   assert.equal(f.calls.length,1);
   const broken=fixture({rpc:(name,input)=>{
-    if(name==='finish_assurance_analysis_with_results')return {error:{message:'Publication rollback'}};
+    if(name==='finish_assurance_analysis_with_decision_fingerprint')return {error:{message:'Publication rollback'}};
     if(name==='finish_assurance_analysis'&&input.p_error)return {data:true};
     return null;
   }});

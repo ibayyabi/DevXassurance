@@ -242,6 +242,61 @@ begin
 end;
 $$;
 revoke all on function public.assurance_reference_snapshot(uuid, uuid) from public, anon, authenticated;
+-- A claim begun against the new reference fingerprint supersedes an older
+-- successful result. Do not let that stale success invalidate the fresh claim
+-- when the claim's row update invokes reference invalidation.
+create or replace function public.invalidate_assurance_reference_results(p_project_id uuid)
+returns void language plpgsql security definer set search_path = '' as $$
+declare
+  r record;
+  refs jsonb;
+  success jsonb;
+  attempt jsonb;
+  changed boolean;
+begin
+  for r in
+    select id, status, analysis_metadata from public.assurance_reviews
+    where project_id = p_project_id and status in ('analyzing', 'findings_ready', 'report_draft', 'approved')
+    order by id for update
+  loop
+    success := r.analysis_metadata->'last_success';
+    attempt := r.analysis_metadata->'latest_attempt';
+    if success->>'id' is null and not (
+      r.status = 'analyzing' and attempt->>'outcome' = 'analyzing'
+    ) then continue; end if;
+    begin
+      refs := public.assurance_reference_snapshot(p_project_id, r.id);
+    exception when others then
+      refs := null;
+    end;
+    if refs is not null and r.status = 'analyzing'
+      and attempt->>'outcome' = 'analyzing'
+      and coalesce((attempt->>'lease_until')::timestamptz, '-infinity') > clock_timestamp()
+      and attempt->>'reference_fingerprint' is not distinct from refs->>'fingerprint' then
+      continue;
+    end if;
+    changed := success->>'id' is not null and
+      success->>'reference_fingerprint' is distinct from refs->>'fingerprint';
+    changed := changed or (r.status = 'analyzing' and attempt->>'outcome' = 'analyzing' and
+      attempt->>'reference_fingerprint' is distinct from refs->>'fingerprint');
+    if not changed then continue; end if;
+    update public.assurance_reviews set status = 'evidence_ready', current_step = 'analysis',
+      analysis_error = 'Approved comparison references changed. Run the analysis again.',
+      approved_at = null, reviewed_by = null,
+      analysis_metadata = analysis_metadata || jsonb_build_object(
+        'reference_invalidation', jsonb_build_object(
+          'reason', 'Approved comparison references changed', 'at', clock_timestamp()
+        )
+      ) || case when attempt->>'outcome' = 'analyzing' then
+        jsonb_build_object('latest_attempt', attempt || jsonb_build_object(
+          'outcome', 'invalidated', 'finished_at', clock_timestamp()
+        )) else '{}'::jsonb end,
+      updated_at = clock_timestamp()
+    where id = r.id and project_id = p_project_id;
+  end loop;
+end;
+$$;
+revoke all on function public.invalidate_assurance_reference_results(uuid) from public, anon, authenticated;
 
 -- Claim returns exactly the prior payload that its combined reference
 -- fingerprint captured. No client query can race selection against publication.

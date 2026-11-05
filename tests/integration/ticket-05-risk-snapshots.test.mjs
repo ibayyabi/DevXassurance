@@ -569,7 +569,10 @@ test("analysis uses the prior review's current-role source, version, and reviewe
   assert.equal(alarm.current.reviewDecision.decidedBy, "reviewer-current");
 
   const alarm002 = metadata.risk_item_findings.find((item) => item.canonicalId === "R-SB01-002");
-  assert.equal(alarm002.changeType, "unchanged");
+  assert.equal(alarm002.changeType, "decreased");
+  assert.equal(alarm002.previous.ratingValue, 5);
+  assert.equal(alarm002.current.ratingValue, 2);
+  assert.equal(alarm002.ratingDelta, -3);
   assert.equal(alarm002.previous.sourceRef.documentId, "previous-doc");
   assert.equal(alarm002.previous.sourceRef.sourceContentHash, previousHash);
   assert.equal(alarm002.previous.asOfDate, "2026-10-16");
