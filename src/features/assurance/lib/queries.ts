@@ -216,6 +216,7 @@ export type ObservationReviewDocument = {
   role: "baseline" | "current" | "unlinked";
   processingStatus: string;
   processingError: string | null;
+  jobDiagnostic: JobDiagnostic | null;
   coverage: ObservationCoverageDisplayRow[];
 };
 
@@ -289,7 +290,7 @@ export async function getAssuranceObservationReview(
     return { documents: [], observations: [], costObservations: [], decisions: [] };
   }
 
-  const [observationsResult, costResult, coverageResult, decisionsResult] = await Promise.all([
+  const [observationsResult, costResult, coverageResult, decisionsResult, jobDiagnostics] = await Promise.all([
     supabase
       .from("assurance_observations")
       .select(
@@ -326,6 +327,7 @@ export async function getAssuranceObservationReview(
       .eq("project_id", projectId)
       .in("document_id", documentIds)
       .order("decided_at"),
+    fetchJobDiagnostics(supabase, projectId, documentIds),
   ]);
   if (observationsResult.error) throw new Error(observationsResult.error.message);
   if (costResult.error) throw new Error(costResult.error.message);
@@ -353,6 +355,7 @@ export async function getAssuranceObservationReview(
       role: roleByDocument.get(row.id) ?? "unlinked",
       processingStatus: row.processing_status,
       processingError: row.processing_error,
+      jobDiagnostic: jobDiagnostics?.get(row.id) ?? null,
       coverage: coverageDomains.map((domain) => {
         const stored = ((coverageResult.data ?? []) as {
           document_id: string;
