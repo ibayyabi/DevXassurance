@@ -1210,6 +1210,11 @@ function buildReviewExtraction(
     const observation = row.observation;
     const scopeLevel = observation.scope_level;
     if (scopeLevel !== "project" && scopeLevel !== "wbs" && scopeLevel !== "unknown") return [];
+    const rawValueLocation = observation.value_source_location;
+    const valueLocation = typeof rawValueLocation === "object" &&
+      rawValueLocation !== null && !Array.isArray(rawValueLocation)
+      ? rawValueLocation as Record<string, unknown>
+      : null;
     const correction = corrections.get(row.id);
     const correctedPercent = typeof correction?.corrected_observation?.percent === "number"
       ? correction.corrected_observation.percent
@@ -1229,7 +1234,10 @@ function buildReviewExtraction(
       periodLabel: snapshotText(observation.period_label),
       asOfDate: snapshotText(observation.as_of_date),
       excerpt: row.excerpt,
-      sourceRef: assuranceEvidenceReference(source, row),
+      sourceRef: {
+        ...assuranceEvidenceReference(source, row),
+        valueSourceLocation: sourceLocationRecord(valueLocation),
+      },
       reviewDecision: correction
         ? { decision: "corrected" as const, percent: correctedPercent, reason: correction.reason }
         : decisions.some((item) =>

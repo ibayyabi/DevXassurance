@@ -539,7 +539,7 @@ function ProgressObservationCitation({ observation }: { observation: ProgressObs
       title={source.documentTitle}
       documentId={source.documentId}
       sourceHash={source.sourceContentHash}
-      sourceLocation={source.sourceLocation}
+      sourceLocation={source.valueSourceLocation ?? source.sourceLocation}
     />
   );
 }

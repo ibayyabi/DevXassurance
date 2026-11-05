@@ -129,12 +129,17 @@ const form = (extra = {}) => {
   }
   return data;
 };
-const progressObservation = (id, percent, extra = {}) =>
-  observation(id, "progress", "progress", {
+const progressObservation = (id, percent, extra = {}) => {
+  const { source_row_location, ...observationExtra } = extra;
+  const row = observation(id, "progress", "progress", {
     raw_value: `${percent}%`, percent, scope_level: "project", scope_label: null,
     measure_kind: "actual",
-    period_label: null, as_of_date: id.includes("base") ? "2026-10-09" : "2026-10-16", ...extra,
+    period_label: null, as_of_date: id.includes("base") ? "2026-10-09" : "2026-10-16",
+    ...observationExtra,
   });
+  if (source_row_location) row.source_location = source_row_location;
+  return row;
+};
 
 test("rejected observations are excluded from analysis while accepted ones stay used", async () => {
   const progressComparisons = (f) => {
@@ -161,6 +166,14 @@ test("correction replaces the compared percent; the metadata keeps the original 
   const f = fixture({
     baselineObservations: [progressObservation("p-base", 12.5)],
     currentObservations: [progressObservation("p-cur", 20.4, {
+      source_row_location: {
+        kind: "xlsx", sheetName: "Weekly Report",
+        rowStart: 8, rowEnd: 8, cellRangeStart: "A8", cellRangeEnd: "H8",
+      },
+      value_source_location: {
+        kind: "xlsx", sheetName: "Weekly Report",
+        rowStart: 8, rowEnd: 8, cellRangeStart: "D8", cellRangeEnd: "D8",
+      },
       source_rag_claim: {
         label: "Green",
         evidence_chunk_index: 0,
@@ -189,6 +202,12 @@ test("correction replaces the compared percent; the metadata keeps the original 
   assert.equal(scopes[0].current.sourcePercent, 20.4);
   assert.equal(scopes[0].current.reviewDecision.decision, "corrected");
   assert.equal(scopes[0].current.sourceRef.sourceContentHash, "b".repeat(64));
+  assert.equal(scopes[0].current.sourceRef.sourceLocation.cellRangeStart, "A8");
+  assert.equal(
+    scopes[0].current.sourceRef.valueSourceLocation.cellRangeStart,
+    "D8",
+    "the compared exact cell is retained alongside the original row citation",
+  );
   const sourceRow = publication.input.p_result_metadata.progress_source_observations
     .find((row) => row.observation_id === "p-cur");
   assert.equal(sourceRow.percent, 20.4, "the published source row keeps the original extraction");

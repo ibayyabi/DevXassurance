@@ -174,6 +174,8 @@ export type ExtractedProgressObservation = {
   as_of_date: string | null;
   evidence_chunk_index: number;
   excerpt: string;
+  /** Exact percent cell resolved from the cited row, separate from that citation's raw location. */
+  value_source_location?: ParsedSourceReference["sourceLocation"];
   source_location?: ParsedSourceReference["sourceLocation"];
 };
 
@@ -1296,7 +1298,7 @@ function citedPercentCellForClaim(
     ? [cited.reference.cell]
     : cited.reference.rowCells ?? [];
   const percentHeader = /(?:%|\bpercent(?:age)?\b|\bpersen\b)/iu;
-  const progressHeader = /\b(?:actual|progress|complete|completed|completion|realisasi|kemajuan)\b/iu;
+  const progressHeader = /\b(?:planned|actual|progress|complete|completed|completion|rencana|realisasi|kemajuan)\b/iu;
   const nonProgressHeader = /\b(?:risk|likelihood|probability|rating|impact|severity)\b/iu;
   const matches = sourceCells.filter((cell) => {
     const explicitUnit = percentHeader.test(cell.label ?? "") ||
@@ -3521,9 +3523,10 @@ function validateGroupExtraction(
       period_label: periodLabel!,
       as_of_date: asOfDate ?? null,
       evidence_chunk_index: citation!.evidence_chunk_index,
-      source_location: citedPercentCell
-        ? progressCellSourceLocation(citation, citedPercentCell)
-        : citation!.source_location,
+      source_location: citation!.source_location,
+      ...(citedPercentCell
+        ? { value_source_location: progressCellSourceLocation(citation, citedPercentCell) }
+        : {}),
       excerpt: excerpt!,
     });
   });

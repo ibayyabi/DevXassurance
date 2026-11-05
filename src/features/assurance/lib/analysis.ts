@@ -17,6 +17,8 @@ export type AssuranceEvidenceReference = {
   evidenceChunkIndex: number;
   pageNumber: number | null;
   sectionLabel: string | null;
+  /** Exact progress value cell resolved from the cited row, when available. */
+  valueSourceLocation?: Record<string, string | number> | null;
   sourceLocation: Record<string, string | number> | null;
   excerpt: string;
 };

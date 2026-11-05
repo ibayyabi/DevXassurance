@@ -242,13 +242,10 @@ function plannedActualGroupResponse(prompt, capture) {
   const plannedCell = rowSource && references.find(
     (reference) => isExactCellInRow(reference) && /planned\s*%/i.test(reference.text),
   );
-  const ragCell = rowSource && references.find(
-    (reference) => isExactCellInRow(reference) && /\brag\b/iu.test(reference.text),
-  );
-  const ragLabel = ragCell?.cell?.rawValue?.trim() ??
-    ragCell?.cell?.value?.trim() ??
-    (ragCell && /\bRAG\s*:\s*([^|]+)/iu.exec(ragCell.text)?.[1]?.trim()) ??
-    null;
+  const ragCell = capture.ragSourceId
+    ? references.find((reference) => reference.source_id === capture.ragSourceId)
+    : null;
+  const ragLabel = capture.ragLabel ?? null;
 
   if (rowSource && rowFields && actualCell) {
     const progress = [
@@ -337,8 +334,23 @@ test("W4/W5 planned and actual cells extract as separate measure-kind entries", 
         reference.text.includes(`Actual %: ${spec.percent}%`),
     );
     assert.ok(rowSource, `${spec.session} contains the actual row`);
+    const ragSource = sourceReferences.find((reference) =>
+      reference.sourceLocation?.sheetName === WEEKLY &&
+      reference.sourceLocation.rowStart === rowSource.sourceLocation.rowStart &&
+      reference.sourceLocation.rowEnd === rowSource.sourceLocation.rowEnd &&
+      reference.sourceLocation.cellRangeStart === reference.sourceLocation.cellRangeEnd &&
+      /\brag\b/iu.test(reference.cell?.label ?? ""),
+    );
+    assert.ok(ragSource, `${spec.session} has a same-row RAG cell reference`);
+    const ragLabel = ragSource.cell?.rawValue?.trim() || ragSource.cell?.value?.trim();
+    assert.ok(ragLabel, `${spec.session} has a source value for the RAG cell`);
     const store = memoryGroupStore();
-    const capture = { targetPercent: spec.percent, targetWeek: spec.week };
+    const capture = {
+      targetPercent: spec.percent,
+      targetWeek: spec.week,
+      ragSourceId: ragSource.sourceId,
+      ragLabel,
+    };
     const jobResult = await withLocalOllama(async (_url, init) => {
       const prompt = JSON.parse(init.body).messages[1].content;
       if (isExecutiveSummaryPrompt(prompt)) {
@@ -351,11 +363,11 @@ test("W4/W5 planned and actual cells extract as separate measure-kind entries", 
     );
     assert.equal(jobResult.status, "completed", jobResult.processing_error);
     assert.equal(jobResult.parser_version, "document-parser/18");
-    outcomes.push({ spec, jobResult, parsed });
+    outcomes.push({ spec, jobResult, parsed, rowSource });
   }
 
   const [w4, w5] = outcomes;
-  for (const { spec, jobResult } of outcomes) {
+  for (const { spec, jobResult, rowSource } of outcomes) {
     const rows = jobResult.assurance_observations.progress;
     assert.equal(rows.length, 2, `${spec.session} extracts planned and actual separately`);
     const actual = rows.find((row) => row.measure_kind === "actual");
@@ -369,14 +381,16 @@ test("W4/W5 planned and actual cells extract as separate measure-kind entries", 
     assert.match(planned.excerpt, /Planned %:/);
     assert.equal(actual.as_of_date, spec.cutOff);
     const rowNumber = spec.week === "W4" ? 7 : 8;
-    assert.equal(actual.source_location?.sheetName, WEEKLY);
-    assert.equal(actual.source_location?.rowStart, rowNumber);
-    assert.equal(actual.source_location?.cellRangeStart, rowNumber === 7 ? "D7" : "D8");
-    assert.equal(actual.source_location?.cellRangeEnd, actual.source_location?.cellRangeStart);
-    assert.equal(planned.source_location?.sheetName, WEEKLY);
-    assert.equal(planned.source_location?.rowStart, rowNumber);
-    assert.equal(planned.source_location?.cellRangeStart, rowNumber === 7 ? "C7" : "C8");
-    assert.equal(planned.source_location?.cellRangeEnd, planned.source_location?.cellRangeStart);
+    assert.deepEqual(actual.source_location, rowSource.sourceLocation);
+    assert.deepEqual(planned.source_location, rowSource.sourceLocation);
+    assert.equal(actual.value_source_location?.sheetName, WEEKLY);
+    assert.equal(actual.value_source_location?.rowStart, rowNumber);
+    assert.equal(actual.value_source_location?.cellRangeStart, rowNumber === 7 ? "D7" : "D8");
+    assert.equal(actual.value_source_location?.cellRangeEnd, actual.value_source_location?.cellRangeStart);
+    assert.equal(planned.value_source_location?.sheetName, WEEKLY);
+    assert.equal(planned.value_source_location?.rowStart, rowNumber);
+    assert.equal(planned.value_source_location?.cellRangeStart, rowNumber === 7 ? "C7" : "C8");
+    assert.equal(planned.value_source_location?.cellRangeEnd, planned.value_source_location?.cellRangeStart);
     assert.equal(actual.source_rag_claim?.label, spec.rag);
     assert.equal(actual.source_rag_claim?.source_location?.sheetName, WEEKLY);
     assert.equal(actual.source_rag_claim?.source_location?.rowStart, rowNumber);
@@ -510,7 +524,7 @@ test("a generic progress header stays unspecified", async () => {
         period_label: null,
         as_of_date: "2026-10-16",
         excerpt: row.text,
-        source_id: cell.source_id,
+        source_id: row.source_id,
       }];
     }
     return modelResponse(output);
@@ -578,7 +592,7 @@ test("a numeric progress value without a source-backed percent unit is rejected"
         period_label: null,
         as_of_date: "2026-10-16",
         excerpt: row.text,
-        source_id: cell.source_id,
+        source_id: row.source_id,
       }];
     }
     return modelResponse(output);
