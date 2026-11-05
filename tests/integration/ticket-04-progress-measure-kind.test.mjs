@@ -374,6 +374,8 @@ test("W4/W5 planned and actual cells extract as separate measure-kind entries", 
     const planned = rows.find((row) => row.measure_kind === "planned");
     assert.ok(actual, `${spec.session} keeps the actual entry`);
     assert.ok(planned, `${spec.session} keeps the planned entry`);
+    assert.equal(actual.period_basis, "period_snapshot", "the exact weekly row proves a dated snapshot basis");
+    assert.equal(planned.period_basis, "period_snapshot", "planned shares the cited row period");
     assert.equal(actual.percent, spec.percent);
     assert.equal(planned.percent, spec.planned);
     // The row citation preserves period/date context; exact value coordinates differ.

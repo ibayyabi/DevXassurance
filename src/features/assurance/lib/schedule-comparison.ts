@@ -521,6 +521,10 @@ export type ProgressComputedStatus = {
     | "cutoff_mismatch"
     | "unproven_measure_kind"
     | "missing_planned_or_actual"
+    | "unproven_period"
+    | "period_mismatch"
+    | "unproven_measurement_basis"
+    | "measurement_basis_mismatch"
     | "conflicting_observations"
     | null;
 };
@@ -537,8 +541,8 @@ type ProgressStatusEntry = {
 
 /**
  * Computed progress RAG is an actual-minus-planned variance for one proven
- * scope and one exact current cut-off. Thresholds are explicitly supplied by
- * the project's approved rule; absent or malformed rules stay unassessed.
+ * scope, exact current cut-off, equal source period labels, and matching proven
+ * measurement bases. Thresholds come only from an approved project rule.
  */
 export function buildProgressComputedStatuses(input: {
   observations: readonly ProgressObservation[];
@@ -594,7 +598,16 @@ export function buildProgressComputedStatuses(input: {
     const actualConflict = entry.actual.length > 1;
     const planned = entry.planned.length === 1 ? entry.planned[0] : null;
     const actual = entry.actual.length === 1 ? entry.actual[0] : null;
+    const periodComparable = Boolean(
+      planned?.periodLabel &&
+      actual?.periodLabel &&
+      planned.periodLabel === actual.periodLabel &&
+      planned.periodBasis &&
+      actual.periodBasis &&
+      planned.periodBasis === actual.periodBasis,
+    );
     const variancePercentPoints =
+      periodComparable &&
       planned?.percent !== null && planned?.percent !== undefined &&
       actual?.percent !== null && actual?.percent !== undefined
         ? actual.percent - planned.percent
@@ -617,7 +630,15 @@ export function buildProgressComputedStatuses(input: {
                     ? entry.unspecified.length
                       ? "unproven_measure_kind"
                       : "missing_planned_or_actual"
-                    : null;
+                    : !planned.periodLabel || !actual.periodLabel
+                      ? "unproven_period"
+                      : planned.periodLabel !== actual.periodLabel
+                        ? "period_mismatch"
+                        : !planned.periodBasis || !actual.periodBasis
+                          ? "unproven_measurement_basis"
+                          : planned.periodBasis !== actual.periodBasis
+                            ? "measurement_basis_mismatch"
+                            : null;
     const condition = reason || variancePercentPoints === null
       ? "unassessed"
       : variancePercentPoints < (redBelow as number)
@@ -629,7 +650,9 @@ export function buildProgressComputedStatuses(input: {
       scopeLevel: entry.scopeLevel,
       scopeLabel: entry.scopeLabel,
       asOfDate: entry.asOfDate,
-      periodLabel: entry.periodLabel,
+      periodLabel: planned && actual && planned.periodLabel !== actual.periodLabel
+        ? null
+        : planned?.periodLabel ?? actual?.periodLabel ?? entry.periodLabel,
       planned,
       actual,
       variancePercentPoints,

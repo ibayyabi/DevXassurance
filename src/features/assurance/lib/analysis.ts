@@ -5,6 +5,13 @@ export type ReviewCondition =
   | "more_evidence_required";
 
 export type ReviewDomain = "budget" | "schedule" | "risk";
+export type ProgressPeriodBasis =
+  | "period_snapshot"
+  | "cumulative"
+  | "weekly"
+  | "monthly"
+  | "daily";
+
 
 /** Exact versioned evidence reference returned by the analysis claim. */
 export type AssuranceEvidenceReference = {
@@ -61,6 +68,8 @@ export type ProgressObservation = {
    */
   measureKind: "actual" | "planned" | "unspecified";
   periodLabel: string | null;
+  /** Source-proven time basis for this value; absent legacy claims stay unassessed. */
+  periodBasis: ProgressPeriodBasis | null;
   asOfDate: string | null;
   excerpt: string | null;
   sourceRef: AssuranceEvidenceReference | null;

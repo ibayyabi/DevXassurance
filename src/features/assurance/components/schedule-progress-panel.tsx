@@ -4,7 +4,10 @@ import {
   acceptMilestoneMapping,
   removeMilestoneMapping,
 } from "@/features/assurance/actions/assurance-actions";
-import type { AssuranceEvidenceReference } from "@/features/assurance/lib/analysis";
+import type {
+  AssuranceEvidenceReference,
+  ProgressPeriodBasis,
+} from "@/features/assurance/lib/analysis";
 import type { MilestoneMapping } from "@/features/assurance/lib/schedule-comparison";
 import type { AssuranceReview } from "@/features/assurance/lib/queries";
 import { Button } from "@/components/ui/button";
@@ -43,6 +46,7 @@ type ProgressObservation = {
   percent: number | null;
   measureKind: "actual" | "planned" | "unspecified";
   periodLabel: string | null;
+  periodBasis: ProgressPeriodBasis | null;
   asOfDate: string | null;
   excerpt: string | null;
   sourceRef?: AssuranceEvidenceReference | null;
@@ -102,6 +106,10 @@ type ProgressComputedStatus = {
     | "cutoff_mismatch"
     | "unproven_measure_kind"
     | "missing_planned_or_actual"
+    | "unproven_period"
+    | "period_mismatch"
+    | "unproven_measurement_basis"
+    | "measurement_basis_mismatch"
     | "conflicting_observations"
     | null;
 };
@@ -533,6 +541,8 @@ function ProgressStatusSources({
       {lines.map((line) => (
         <li key={line.label}>
           <span className="font-medium text-ink">{line.label} {formatPercent(line.observation.percent)}:</span>
+          {line.observation.periodLabel ? ` · ${line.observation.periodLabel}` : ""}
+          {line.observation.asOfDate ? ` · ${line.observation.asOfDate}` : ""}
           {line.observation.excerpt ? ` “${line.observation.excerpt}”` : ""}
           <ProgressObservationCitation observation={line.observation} />
         </li>
@@ -659,6 +669,10 @@ function progressStatusReason(reason: NonNullable<ProgressComputedStatus["reason
     cutoff_mismatch: "Nilai tidak cocok dengan cut-off berjalan.",
     unproven_measure_kind: "Planned/actual tidak terbukti dari sumber.",
     missing_planned_or_actual: "Pasangan planned dan actual belum lengkap.",
+    unproven_period: "Periode sumber tidak terbukti.",
+    period_mismatch: "Planned/actual berasal dari periode berbeda.",
+    unproven_measurement_basis: "Basis pengukuran sumber tidak terbukti.",
+    measurement_basis_mismatch: "Basis pengukuran planned/actual berbeda.",
     conflicting_observations: "Sumber bertentangan; status tidak dipilih.",
   };
   return labels[reason];

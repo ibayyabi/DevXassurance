@@ -71,7 +71,8 @@ function progress(overrides = {}) {
     scopeLabel: null,
     percent: null,
     measureKind: "unspecified",
-    periodLabel: null,
+    periodLabel: "W5",
+    periodBasis: "period_snapshot",
     asOfDate: null,
     excerpt: null,
     sourceRef: null,
@@ -401,6 +402,82 @@ test("only an approved versioned rule assesses a source-backed same-scope pair",
     })[0].condition;
   assert.equal(conditionForActual(16), "needs_attention");
   assert.equal(conditionForActual(12), "critical");
+});
+
+test("same-cutoff planned and actual values from different periods stay unassessed with both citations", () => {
+  const statuses = buildProgressComputedStatuses({
+    observations: [
+      progress({
+        measureKind: "planned",
+        percent: 18.13,
+        periodLabel: "W4",
+        periodBasis: "cumulative",
+        asOfDate: "2026-10-16",
+        sourceRef: { observationId: "planned-w4" },
+      }),
+      progress({
+        measureKind: "actual",
+        percent: 20.4,
+        periodLabel: "W5",
+        periodBasis: "weekly",
+        asOfDate: "2026-10-16",
+        sourceRef: { observationId: "actual-w5" },
+      }),
+    ],
+    wbsMappings: [],
+    cutoffDate: "2026-10-16",
+    rule: approvedRule,
+  });
+  assert.equal(statuses.length, 1);
+  assert.equal(statuses[0].condition, "unassessed");
+  assert.equal(statuses[0].reason, "period_mismatch");
+  assert.equal(
+    statuses[0].periodLabel,
+    null,
+    "a mismatched period is not summarized as either source's period",
+  );
+  assert.equal(statuses[0].variancePercentPoints, null);
+  assert.equal(statuses[0].planned.sourceRef.observationId, "planned-w4");
+  assert.equal(statuses[0].actual.sourceRef.observationId, "actual-w5");
+});
+
+test("same-period cumulative plan and weekly actual are not comparable", () => {
+  const status = buildProgressComputedStatuses({
+    observations: [
+      progress({ measureKind: "planned", percent: 18.13, periodBasis: "cumulative", asOfDate: "2026-10-16" }),
+      progress({ measureKind: "actual", percent: 20.4, periodBasis: "weekly", asOfDate: "2026-10-16" }),
+    ],
+    wbsMappings: [],
+    cutoffDate: "2026-10-16",
+    rule: approvedRule,
+  })[0];
+  assert.equal(status.reason, "measurement_basis_mismatch");
+  assert.equal(status.variancePercentPoints, null);
+  assert.equal(status.condition, "unassessed");
+});
+
+test("missing period or measurement basis stays unassessed", () => {
+  const base = [
+    progress({ measureKind: "planned", percent: 18.13, asOfDate: "2026-10-16" }),
+    progress({ measureKind: "actual", percent: 20.4, asOfDate: "2026-10-16" }),
+  ];
+  const periodUnknown = buildProgressComputedStatuses({
+    observations: base.map((row) => ({ ...row, periodLabel: null })),
+    wbsMappings: [],
+    cutoffDate: "2026-10-16",
+    rule: approvedRule,
+  })[0];
+  assert.equal(periodUnknown.reason, "unproven_period");
+  assert.equal(periodUnknown.variancePercentPoints, null);
+
+  const basisUnknown = buildProgressComputedStatuses({
+    observations: base.map((row) => ({ ...row, periodBasis: null })),
+    wbsMappings: [],
+    cutoffDate: "2026-10-16",
+    rule: approvedRule,
+  })[0];
+  assert.equal(basisUnknown.reason, "unproven_measurement_basis");
+  assert.equal(basisUnknown.variancePercentPoints, null);
 });
 
 test("computed status is unassessed for missing approval, ambiguous scope, cutoff, or conflicting values", () => {

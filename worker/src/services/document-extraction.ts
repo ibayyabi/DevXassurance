@@ -8,6 +8,8 @@ import { documentTypes } from "../../../src/features/documents/lib/constants";
 import type { ParsedChunk, ParsedSourceCell, ParsedSourceReference } from "./document-parser";
 import { isRecord } from "../types/guards";
 import { citedTextSupportsNumericValue, containsNumericValue } from "../../../src/features/documents/lib/source-value-validation";
+import type { ProgressPeriodBasis } from "../../../src/features/assurance/lib/analysis";
+
 
 export type DocumentExtractionContext = {
   projectId: string;
@@ -171,6 +173,7 @@ export type ExtractedProgressObservation = {
     source_location?: ParsedSourceReference["sourceLocation"];
   } | null;
   period_label: string | null;
+  period_basis: ProgressPeriodBasis | null;
   as_of_date: string | null;
   evidence_chunk_index: number;
   excerpt: string;
@@ -411,7 +414,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/35";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/36";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -1314,6 +1317,27 @@ function citedPercentCellForClaim(
   });
   return matches.length === 1 ? matches[0] : null;
 }
+
+function progressPeriodBasisForCell(
+  cell: ParsedSourceCell | null,
+  citation: SourceCitation | null | undefined,
+  periodLabel: string | null,
+  asOfDate: string | null,
+): ProgressPeriodBasis | null {
+  if (!cell) return null;
+  const label = cell.label ?? "";
+  if (/\b(?:cumulative|to[\s-]?date|overall|kumulatif)\b/iu.test(label)) {
+    return "cumulative";
+  }
+  if (/\b(?:weekly|week|mingguan|minggu)\b/iu.test(label)) return "weekly";
+  if (/\b(?:monthly|month|bulanan|bulan)\b/iu.test(label)) return "monthly";
+  if (/\b(?:daily|day|harian|hari)\b/iu.test(label)) return "daily";
+  const location = citation?.source_location;
+  return location?.kind === "xlsx" && periodLabel && asOfDate
+    ? "period_snapshot"
+    : null;
+}
+
 
 function progressCellSourceLocation(
   citation: SourceCitation | null,
@@ -3521,6 +3545,7 @@ function validateGroupExtraction(
       ...(scopeEvidence ? { scope_provenance: scopeEvidence } : {}),
       ...(scopeEvidence && scopeSourceId ? { scope_source_id: scopeSourceId } : {}),
       period_label: periodLabel!,
+      period_basis: progressPeriodBasisForCell(citedPercentCell, citation, periodLabel, asOfDate),
       as_of_date: asOfDate ?? null,
       evidence_chunk_index: citation!.evidence_chunk_index,
       source_location: citation!.source_location,

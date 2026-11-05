@@ -1219,6 +1219,13 @@ function buildReviewExtraction(
         ? observation.measure_kind
         : "unspecified",
       periodLabel: snapshotText(observation.period_label),
+      periodBasis: observation.period_basis === "period_snapshot" ||
+          observation.period_basis === "cumulative" ||
+          observation.period_basis === "weekly" ||
+          observation.period_basis === "monthly" ||
+          observation.period_basis === "daily"
+        ? observation.period_basis
+        : null,
       asOfDate: snapshotText(observation.as_of_date),
       excerpt: row.excerpt,
       sourceRef: {
