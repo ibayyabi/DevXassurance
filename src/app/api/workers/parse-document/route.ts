@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { createLeaseHeartbeat } from "@/features/documents/lib/lease-heartbeat";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
@@ -94,9 +95,18 @@ export async function POST(request: NextRequest) {
     p_minutes: 15,
   });
   if (initialLeaseError) return notOwnedResponse();
+  // The 15-minute lease outlives each claim, but lengthy checkpoint-free
+  // phases (parse/OCR, final summary, persist chain) can exceed it. A periodic
+  // renewal keeps the lease alive; a rejection means a newer attempt owns the
+  // job and this attempt stops before wasting provider quota. Every durable
+  // write remains fenced by the database regardless of the heartbeat.
+  const heartbeat = createLeaseHeartbeat(supabase, jobId, claimToken);
   const workerStarted = performance.now();
   let workerOutcome = "failed";
   try {
+    // Stop early when a renewal already revealed lost ownership (the timer
+    // may have fired while the earlier stages ran).
+    if (heartbeat.lost()) return notOwnedResponse();
     const { data, error } = await supabase
       .from("documents")
       .select(
@@ -337,6 +347,7 @@ export async function POST(request: NextRequest) {
       : terminalFailureResponse(supabase, failure, 500);
   }
   finally {
+    heartbeat.stop();
     console.info("Document worker stage completed", {
       stage: "worker_total",
       jobId,
@@ -579,7 +590,8 @@ function isOwnershipRejection(error: unknown) {
       typeof error === "object" &&
       "message" in error &&
       typeof error.message === "string" &&
-      error.message.includes("Ownership rejected"),
+      (error.message.includes("Ownership rejected") ||
+        error.message.includes("Lease extension rejected")),
   );
 }
 

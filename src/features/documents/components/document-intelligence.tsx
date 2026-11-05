@@ -45,6 +45,7 @@ import { formatArchiveMemberState, uploadBatchState } from "@/features/documents
 import { groupUploadBatches } from "@/features/documents/lib/upload-batch";
 import { requestJson } from "@/features/documents/lib/request-json";
 import { ExtractedFacts, FileFactReview, documentFacts, extractedCounts, extractionPointer, shortSummary, statedTotal, summaryGaps, type ReviewFacts } from "@/features/documents/components/fact-review";
+import { ProcessingStatusNote } from "@/features/documents/components/processing-status-note";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SectionCard } from "@/components/ui/section-card";
@@ -718,7 +719,7 @@ function DocumentRow({
         </button>
       <dialog ref={panelRef} data-document-details id={`document-panel-${document.id}`} aria-labelledby={`document-title-${document.id}`} className="fixed inset-y-0 left-auto right-0 m-0 h-dvh max-h-none w-full max-w-2xl overflow-y-auto overscroll-contain border-l border-ui-border bg-surface p-0 text-ink shadow-xl backdrop:bg-ink/20">
         <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-ui-border bg-surface p-5">
-          <div className="min-w-0"><h3 id={`document-title-${document.id}`} className="text-base font-semibold text-ink [overflow-wrap:anywhere]">{document.fileName}</h3><div className="mt-2"><StatusBadge status={document.processingStatus} /></div></div>
+          <div className="min-w-0"><h3 id={`document-title-${document.id}`} className="text-base font-semibold text-ink [overflow-wrap:anywhere]">{document.fileName}</h3><div className="mt-2"><StatusBadge status={document.processingStatus} /></div><ProcessingStatusNote status={document.processingStatus} /></div>
           <Button type="button" variant="outline" size="sm" className="shrink-0" aria-label="Tutup detail dokumen" onClick={() => panelRef.current?.close()}>Tutup</Button>
         </header>
         <div className="p-5 [overflow-wrap:anywhere]">
@@ -739,6 +740,7 @@ function DocumentRow({
             {gaps.length > 0 && <p>Kemungkinan ketidaksesuaian ringkasan/ekstraksi: {gaps.join(" dan ")} disebutkan tanpa baris terstruktur yang cocok. Verifikasi sumbernya.</p>}
             {document.processingStatus !== "failed" && (document.processingError || summary?.qualityWarning) && <p>Metadata dokumen atau pembacaannya perlu diperiksa.</p>}
             {(document.processingError || summary?.qualityWarning) && <details><summary className="cursor-pointer font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Baca detail pemrosesan</summary>{document.processingError && <p className="mt-2 whitespace-pre-wrap">{document.processingError}</p>}{summary?.qualityWarning && <p className="mt-2 whitespace-pre-wrap">Keterbatasan pembacaan: {summary.qualityWarning}</p>}</details>}
+            {document.jobDiagnostic && <JobDiagnosticDetails diagnostic={document.jobDiagnostic} />}
             {condensed.length < summaryText.trim().length && <button type="button" className="font-medium underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand" onClick={() => { if (fullSummaryRef.current) { fullSummaryRef.current.open = true; fullSummaryRef.current.querySelector("summary")?.focus(); fullSummaryRef.current.scrollIntoView({ block: "nearest" }); } }}>Tampilkan ringkasan lengkap</button>}
           </aside>}
           <FileFactReview facts={facts} onReview={onReview} onSource={onSource} busy={busy} />
@@ -909,6 +911,34 @@ function DocumentRow({
         </div>
       </dialog>
     </article>
+  );
+}
+
+function JobDiagnosticDetails({
+  diagnostic,
+}: {
+  diagnostic: NonNullable<EvidenceDocument["jobDiagnostic"]>;
+}) {
+  const attempts = diagnostic.maxAttempts
+    ? `Percobaan ${diagnostic.attemptCount} dari ${diagnostic.maxAttempts}.`
+    : `Percobaan ${diagnostic.attemptCount}.`;
+  const leaseState = diagnostic.leaseActive
+    ? "Lease masih aktif."
+    : diagnostic.leaseExpired
+      ? "Lease kedaluwarsa; pemulihan otomatis akan menentukan ulang kepemilikan."
+      : null;
+  const backoff = diagnostic.retryPending
+    ? "Retry otomatis menunggu jeda backoff; kelompok yang sudah selesai tidak dikirim ulang."
+    : null;
+  return (
+    <details>
+      <summary className="cursor-pointer font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">Diagnostik job pemrosesan</summary>
+      <p className="mt-2">Status job: {diagnostic.status}. {attempts}</p>
+      {diagnostic.errorCode && <p className="mt-1 font-mono text-xs">Kode: {diagnostic.errorCode}</p>}
+      {diagnostic.errorMessage && <p className="mt-1 whitespace-pre-wrap">{diagnostic.errorMessage}</p>}
+      {leaseState && <p className="mt-1">{leaseState}</p>}
+      {backoff && <p className="mt-1">{backoff}</p>}
+    </details>
   );
 }
 

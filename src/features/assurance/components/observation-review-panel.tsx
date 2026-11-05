@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SectionCard } from "@/components/ui/section-card";
 import { StatusPill, type StatusTone } from "@/components/ui/status-pill";
+import { ProcessingStatusNote } from "@/features/documents/components/processing-status-note";
 
 const domainLabels: Record<string, string> = {
   budget: "Anggaran",
@@ -136,6 +137,7 @@ export function ObservationReviewPanel({
                 <p className="mt-2 whitespace-pre-wrap">{document.processingError}</p>
               </details>
             )}
+            <ProcessingStatusNote status={document.processingStatus} />
             {summary && (
               <CoverageSummary summary={summary} />
             )}

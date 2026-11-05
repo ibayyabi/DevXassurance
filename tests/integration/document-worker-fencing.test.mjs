@@ -43,6 +43,9 @@ test("worker rejects a superseded claim before starting document processing", as
       },
     },
     "@/lib/supabase/service-role": { createServiceRoleClient: () => supabase },
+    "@/features/documents/lib/lease-heartbeat": {
+      createLeaseHeartbeat: () => ({ lost: () => false, stop: () => {} }),
+    },
     "@/features/documents/lib/document-write-retry": {
       isTransientDocumentWriteFailure: () => false,
       retryDocumentWrite: async (write) => write(),

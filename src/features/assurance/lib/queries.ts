@@ -28,6 +28,7 @@ import type {
   ProcessingStatus,
 } from "@/features/documents/lib/constants";
 import { requireProjectMembership } from "@/features/projects/lib/queries";
+import { fetchJobDiagnostics, type JobDiagnostic } from "@/features/documents/lib/job-diagnostics";
 
 export type AssuranceDocument = {
   id: string;
@@ -53,6 +54,8 @@ export type AssuranceDocument = {
   suggestedWorkstream: string | null;
   workstream: string | null;
   confirmedWorkstream: string | null;
+  /** Latest parse job state for this document, read through RLS; null when unavailable. */
+  jobDiagnostic: JobDiagnostic | null;
 };
 
 export type AssuranceReview = {
@@ -644,6 +647,11 @@ export async function getAssuranceWorkspace(projectId: string) {
     ));
   }
 
+  const jobDiagnostics = await fetchJobDiagnostics(
+    supabase,
+    projectId,
+    (documentsResult.data ?? []).map((row) => row.id),
+  );
   const documents: AssuranceDocument[] = (documentsResult.data ?? []).map(
     (row) => {
       const effective = resolveDocumentMetadata(row);
@@ -671,6 +679,7 @@ export async function getAssuranceWorkspace(projectId: string) {
         suggestedWorkstream: row.suggested_workstream,
         workstream: effective.workstream,
         confirmedWorkstream: row.confirmed_workstream,
+        jobDiagnostic: jobDiagnostics.get(row.id) ?? null,
       };
     },
   );
