@@ -105,10 +105,19 @@ type AssuranceSource = {
   assurance_observations: AssuranceObservationRow[];
   assurance_observation_coverage: AssuranceCoverageRow[];
 };
+type ProgressRagRuleSnapshot = {
+  id: string;
+  rule_version: string;
+  thresholds: Record<string, unknown>;
+  note: string | null;
+  approved_by: string;
+  approved_at: string;
+} | null;
 type AssuranceAnalysisClaim = {
   attempt_id: string;
   sources: AssuranceSource[];
   observation_decisions?: ObservationDecision[];
+  progress_rag_rule: ProgressRagRuleSnapshot;
 };
 
 
@@ -233,7 +242,7 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
       supabase, projectId, reportingPeriod, costDecisions.baseline, costDecisions.current,
     );
     const schedule = await buildScheduleComparison(
-      supabase, projectId, reportingPeriod, reviewData.extraction,
+      supabase, projectId, reportingPeriod, reviewData.extraction, claim.progress_rag_rule ?? null,
     );
     const risk = await buildRiskSnapshotComparison(supabase, projectId, reviewData.extraction);
     reviewData.extraction.risk = buildRiskAssessment(
@@ -966,8 +975,9 @@ async function buildScheduleComparison(
   projectId: string,
   cutoffDate: string,
   extraction: ReviewExtraction,
+  ragRule: ProgressRagRuleSnapshot,
 ) {
-  const [milestoneMappingResult, wbsMappingResult, ragRulesResult] = await Promise.all([
+  const [milestoneMappingResult, wbsMappingResult] = await Promise.all([
     supabase
       .from("milestone_mappings")
       .select(milestoneMappingColumns)
@@ -978,24 +988,9 @@ async function buildScheduleComparison(
       .select(wbsMappingColumns)
       .eq("project_id", projectId)
       .eq("state", "accepted"),
-    supabase
-      .from("progress_rag_rules")
-      .select("rule_version, thresholds, note, approved_by, approved_at")
-      .eq("project_id", projectId)
-      .eq("state", "active")
-      .limit(1)
-      .maybeSingle(),
   ]);
   if (milestoneMappingResult.error) throw new Error(milestoneMappingResult.error.message);
   if (wbsMappingResult.error) throw new Error(wbsMappingResult.error.message);
-  if (ragRulesResult.error) throw new Error(ragRulesResult.error.message);
-  const ragRule = ((ragRulesResult.data ?? null) as {
-    rule_version: string;
-    thresholds: Record<string, unknown>;
-    note: string | null;
-    approved_by: string | null;
-    approved_at: string | null;
-  } | null);
 
   const milestoneMappings = ((milestoneMappingResult.data ?? []) as MilestoneMappingRow[]).map(
     mapMilestoneMappingRow,
@@ -1030,15 +1025,7 @@ async function buildScheduleComparison(
     progress,
     progressComputedStatuses,
     milestoneLabels,
-    progressRagRule: ragRule
-      ? {
-          rule_version: ragRule.rule_version,
-          thresholds: ragRule.thresholds,
-          note: ragRule.note,
-          approved_by: ragRule.approved_by,
-          approved_at: ragRule.approved_at,
-        }
-      : null,
+    progressRagRule: ragRule,
   };
 }
 

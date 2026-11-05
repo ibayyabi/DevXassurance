@@ -47,6 +47,8 @@ comment on table public.progress_rag_rules is
 
 alter table public.progress_rag_rules enable row level security;
 
+-- Authenticated members can read rules; privileged service-role provisioning
+-- is required to create or supersede them.
 revoke all on table public.progress_rag_rules from anon, authenticated;
 grant select on table public.progress_rag_rules to authenticated;
 grant select, insert, update, delete on table public.progress_rag_rules to service_role;
@@ -55,27 +57,22 @@ create policy "progress_rag_rules_read_by_project_members"
   on public.progress_rag_rules for select to authenticated
   using (public.is_project_member(project_id));
 
-create policy "progress_rag_rules_insert_by_authorized_reviewers"
-  on public.progress_rag_rules for insert to authenticated
-  with check (
-    public.can_upload_project_evidence(project_id)
-    and approved_by = auth.uid()
-    and state = 'active'
-  );
-
-create policy "progress_rag_rules_update_by_authorized_reviewers"
-  on public.progress_rag_rules for update to authenticated
-  using (public.can_upload_project_evidence(project_id) and state = 'active')
-  with check (public.can_upload_project_evidence(project_id) and state = 'superseded');
-create function public.guard_progress_rag_rule_version()
+create or replace function public.guard_progress_rag_rule_version()
 returns trigger
 language plpgsql
 set search_path = ''
 as $$
 begin
   if tg_op = 'DELETE' then
+    -- Direct deletion would erase an approved version; a nested FK cascade
+    -- from deleting its owning project is the sole exception.
+    if pg_trigger_depth() > 1 then
+      return old;
+    end if;
     raise exception 'Approved progress RAG rule versions cannot be deleted.';
   end if;
+  perform 1 from public.projects where id = old.project_id for update;
+  if not found then raise exception 'Project was not found.'; end if;
   if old.state <> 'active'
     or new.state <> 'superseded'
     or new.superseded_at is null
@@ -151,3 +148,110 @@ revoke all on function public.finish_assurance_analysis_with_results(uuid, uuid,
   from public, anon;
 grant execute on function public.finish_assurance_analysis_with_results(uuid, uuid, uuid, jsonb, jsonb, jsonb, jsonb)
   to authenticated;
+-- The active rule is an analysis reference, not a later UI lookup. Reference
+-- snapshots carry its full approved identity so claim, finish, currentness,
+-- and existing mapping invalidation all fence the same thresholds.
+alter function public.assurance_reference_snapshot(uuid, uuid)
+  rename to assurance_reference_snapshot_without_progress_rag_rule;
+revoke all on function public.assurance_reference_snapshot_without_progress_rag_rule(uuid, uuid)
+  from public, anon, authenticated;
+
+create function public.assurance_reference_snapshot(p_project_id uuid, p_review_id uuid)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare
+  refs jsonb;
+  rule jsonb;
+  reference_values jsonb;
+  reference_versions jsonb;
+begin
+  refs := public.assurance_reference_snapshot_without_progress_rag_rule(p_project_id, p_review_id);
+  select jsonb_build_object(
+    'id', r.id,
+    'rule_version', r.rule_version,
+    'thresholds', r.thresholds,
+    'note', r.note,
+    'approved_by', r.approved_by,
+    'approved_at', r.approved_at
+  )
+  into rule
+  from public.progress_rag_rules r
+  where r.project_id = p_project_id and r.state = 'active';
+
+  reference_values := coalesce(refs->'references', '{}'::jsonb) ||
+    jsonb_build_object('progress_rag_rule', rule);
+  reference_versions := coalesce(refs->'versions', '{}'::jsonb) ||
+    jsonb_build_object(
+      'progress_rag_rule_id', rule->'id',
+      'progress_rag_rule_version', rule->'rule_version'
+    );
+  return refs || jsonb_build_object(
+    'fingerprint', encode(sha256(convert_to(jsonb_build_array(
+      refs->>'fingerprint', rule
+    )::text, 'UTF8')), 'hex'),
+    'versions', reference_versions,
+    'references', reference_values,
+    'progress_rag_rule', rule
+  );
+end;
+$$;
+revoke all on function public.assurance_reference_snapshot(uuid, uuid) from public, anon, authenticated;
+
+-- Rule writes acquire the same project lock as claim/finish before they can
+-- invalidate references. Snapshots do not row-lock rules, avoiding a project /
+-- rule-row lock cycle while making either claim or rule change win atomically.
+create function public.lock_progress_rag_rule_project()
+returns trigger language plpgsql security definer set search_path = '' as $$
+begin
+  perform 1 from public.projects where id = new.project_id for update;
+  if not found then raise exception 'Project was not found.'; end if;
+  return new;
+end;
+$$;
+revoke all on function public.lock_progress_rag_rule_project() from public, anon, authenticated;
+grant execute on function public.lock_progress_rag_rule_project() to service_role;
+create trigger progress_rag_rules_lock_project_before_insert
+  before insert on public.progress_rag_rules
+  for each row execute function public.lock_progress_rag_rule_project();
+
+create function public.invalidate_progress_rag_rule_results()
+returns trigger language plpgsql security definer set search_path = '' as $$
+begin
+  perform public.invalidate_assurance_reference_results(new.project_id);
+  return new;
+end;
+$$;
+revoke all on function public.invalidate_progress_rag_rule_results() from public, anon, authenticated;
+grant execute on function public.invalidate_progress_rag_rule_results() to service_role;
+create trigger progress_rag_rules_invalidate_results
+  after insert or update on public.progress_rag_rules
+  for each row execute function public.invalidate_progress_rag_rule_results();
+
+-- Return the exact rule snapshot used by the reference fingerprint so the
+-- analysis consumer never performs an independent post-claim rule lookup.
+create or replace function public.claim_assurance_analysis(p_project_id uuid, p_review_id uuid)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare r public.assurance_reviews; s jsonb; refs jsonb; attempt jsonb;
+begin
+  r := public.lock_assurance_review(p_project_id, p_review_id);
+  if r.analysis_metadata->'latest_attempt'->>'outcome' = 'analyzing'
+    and coalesce((r.analysis_metadata->'latest_attempt'->>'lease_until')::timestamptz, 'infinity') > clock_timestamp()
+    then raise exception 'Analysis is already running for this review.'; end if;
+  s := public.assurance_source_snapshot(p_project_id, p_review_id);
+  refs := public.assurance_reference_snapshot(p_project_id, p_review_id);
+  attempt := jsonb_build_object('id', gen_random_uuid(), 'outcome', 'analyzing',
+    'started_at', clock_timestamp(), 'lease_until', clock_timestamp() + interval '15 minutes',
+    'fingerprint', s->>'fingerprint', 'reference_fingerprint', refs->>'fingerprint',
+    'reference_versions', refs->'versions');
+  update public.assurance_reviews set status = 'analyzing', current_step = 'analysis', analysis_error = null,
+    analysis_metadata = analysis_metadata || jsonb_build_object('latest_attempt', attempt,
+      'selection_fingerprint', s->>'fingerprint',
+      'selection_reference_fingerprint', refs->>'fingerprint',
+      'selection_reference_versions', refs->'versions'), updated_at = clock_timestamp()
+    where id = p_review_id and project_id = p_project_id;
+  return s || jsonb_build_object('attempt_id', attempt->>'id',
+    'reference_fingerprint', refs->>'fingerprint', 'reference_versions', refs->'versions',
+    'progress_rag_rule', refs->'progress_rag_rule');
+end;
+$$;
+revoke all on function public.claim_assurance_analysis(uuid, uuid) from public, anon;
+grant execute on function public.claim_assurance_analysis(uuid, uuid) to authenticated;

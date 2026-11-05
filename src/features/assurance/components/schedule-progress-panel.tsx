@@ -141,14 +141,19 @@ export function ScheduleProgressPanel({
   canApprove: boolean;
 }) {
   const metadata = review?.analysisMetadata ?? {};
+  const analysisHasCurrentResults = review !== null &&
+    ["findings_ready", "report_draft", "approved"].includes(review.status);
   const comparisons =
     (metadata.schedule_milestone_comparisons as MilestoneComparison[] | undefined) ?? [];
   const progress = (metadata.progress_observations as ProgressScopeResult[] | undefined) ?? [];
-  const progressComputedStatuses =
-    (metadata.progress_computed_statuses as ProgressComputedStatus[] | undefined) ?? [];
+  const progressComputedStatuses = analysisHasCurrentResults
+    ? (metadata.progress_computed_statuses as ProgressComputedStatus[] | undefined) ?? []
+    : [];
   const progressRagClaims =
     (metadata.progress_source_rag_claims as ProgressRagClaim[] | undefined) ?? [];
-  const progressRagRule = (metadata.progress_rag_rule as ProgressRagRule) ?? null;
+  const progressRagRule = analysisHasCurrentResults
+    ? (metadata.progress_rag_rule as ProgressRagRule) ?? null
+    : null;
   const milestoneLabels = (metadata.schedule_milestone_labels as string[] | undefined) ?? [];
   const acceptedMappings = milestoneMappings.filter((mapping) => mapping.state === "accepted");
 
@@ -311,7 +316,12 @@ export function ScheduleProgressPanel({
       )}
       <div className="mt-4">
         <h3 className="text-sm font-semibold text-ink">Status hitungan progres</h3>
-        {progressRagRule ? (
+        {!analysisHasCurrentResults ? (
+          <p className="mt-1 rounded-md bg-plan-track px-2 py-1 text-xs text-ink-muted">
+            Status hitungan progres belum mutakhir. Jalankan analisis kembali untuk menilai progres
+            dengan bukti dan aturan terbaru.
+          </p>
+        ) : progressRagRule ? (
           <p className="mt-1 text-xs leading-5 text-ink-muted">
             Aturan disetujui v{progressRagRule.rule_version}
             {progressRagRule.approved_at ? ` (disetujui ${progressRagRule.approved_at.slice(0, 10)})` : ""}.
@@ -324,7 +334,7 @@ export function ScheduleProgressPanel({
             belum dinilai. Nilai yang dilaporkan dan klaim RAG sumber tetap terlihat di atas.
           </p>
         )}
-        {progressComputedStatuses.length === 0 ? (
+        {!analysisHasCurrentResults ? null : progressComputedStatuses.length === 0 ? (
           <p className="mt-2 text-xs text-ink-muted">
             Belum ada pasangan progres planned/actual pada cut-off berjalan untuk dinilai.
           </p>
