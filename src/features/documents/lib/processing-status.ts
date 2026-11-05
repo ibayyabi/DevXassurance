@@ -24,8 +24,8 @@ export const processingStateLabels: Record<ProcessingState, string> = {
 
 export const processingStateDescriptions: Record<ProcessingState, string> = {
   uploaded: "File tersimpan; analisis otomatis belum dimulai.",
-  queued: "Menunggu pekerja analisis tersedia.",
-  processing: "Sedang dianalisis oleh pekerja dokumen.",
+  queued: "Job menunggu kapasitas pekerja atau jeda retry (backoff).",
+  processing: "Job tercatat sedang diproses; lihat diagnostik lease bila tersedia.",
   needs_review:
     "Pemrosesan selesai dengan temuan yang perlu keputusan peninjau; bukan kegagalan.",
   completed: "Pemrosesan selesai tanpa peringatan pemrosesan.",
@@ -34,17 +34,17 @@ export const processingStateDescriptions: Record<ProcessingState, string> = {
 };
 
 export const processingStateCauses: Record<ProcessingState, string> = {
-  uploaded: "Analisis otomatis belum diantrekan untuk format ini.",
+  uploaded: "Status dokumen masih uploaded; status ini tidak menetapkan alasan job belum dimulai.",
   queued:
-    "Antrean menunggu kapasitas pekerja atau jeda retry (backoff) berjalan; tidak ada data yang hilang.",
+    "Job menunggu kapasitas pekerja atau jeda retry (backoff); status antrean bukan bukti kehilangan evidence.",
   processing:
-    "Attempt masih memegang lease; tahap panjang (parser/OCR) tidak memperbarui lease per menit.",
+    "Status processing tidak memastikan lease masih aktif; diagnostik job menunjukkan lease aktif atau kedaluwarsa bila tersedia.",
   needs_review:
     "Classifier, formula tidak terjawab, interpretasi sheet, atau warning validasi menandai dokumen ini.",
   completed:
     "Pemrosesan tuntas; nilai dan status assurance tetap dihitung dari observasi tervalidasi, bukan dari status ini.",
   failed:
-    "Attempt berhenti: kegagalan perangkat/provider, lease kedaluwarsa (stale_claim_token saat recovery), atau batas retry tercapai.",
+    "Pemrosesan berhenti sebelum selesai; status ini sendiri tidak membuktikan penyebab historis, jadi lihat kode/error job bila tersedia.",
   cancelled: "Attempt digantikan oleh retry manual atau percobaan lebih baru.",
 };
 

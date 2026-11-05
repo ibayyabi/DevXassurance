@@ -11,15 +11,12 @@ export type LeaseRenewResult = {
 };
 
 export type LeaseHeartbeat = {
-  /** True once the database rejected a renewal because this attempt no longer owns the job. */
+  /** True once a renewal was rejected because this attempt no longer owns the job. */
   lost(): boolean;
-  /**
-   * Ownership guard for the extraction layer: false once renewal was rejected
-   * OR the lease is assumed expired (repeated transient renewal failures with
-   * no successful renewal since the last known expiry), so a stale attempt
-   * cannot run provider requests indefinitely on a dead lease.
-   */
+  /** False after a rejected renewal or the last known lease expiry. */
   owns(): boolean;
+  /** Aborted at ownership loss/known expiry so an in-flight provider fetch can stop. */
+  ownershipSignal: AbortSignal;
   stop(): void;
 };
 
@@ -39,6 +36,13 @@ type AwaitableRenewResult = {
     onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
   ) => PromiseLike<TResult1 | TResult2>;
 };
+type LeaseHeartbeatOptions = {
+  intervalMs?: number;
+  /** Monotonic instant immediately before the RPC that granted the current lease. */
+  initialLeaseStartedAt?: number;
+  now?: () => number;
+  schedule?: (callback: () => void | Promise<void>, ms: number) => () => void;
+};
 
 export function ownershipRejected(error: unknown) {
   return Boolean(
@@ -52,51 +56,74 @@ export function ownershipRejected(error: unknown) {
 }
 
 export const LEASE_HEARTBEAT_INTERVAL_MS = 5 * 60_000;
+const LEASE_DURATION_MS = 15 * 60_000;
+const LEASE_DURATION_MINUTES = 15;
+
 
 export function createLeaseHeartbeat(
   renewer: LeaseRenewer,
   jobId: string,
   claimToken: string,
-  intervalMs: number = LEASE_HEARTBEAT_INTERVAL_MS,
-  schedule: (
-    callback: () => void | Promise<void>,
-    ms: number,
-  ) => () => void = (callback, ms) => {
-    const timer = setInterval(() => void callback(), ms);
-    timer.unref?.();
-    return () => clearInterval(timer);
-  },
+  options: LeaseHeartbeatOptions = {},
 ): LeaseHeartbeat {
+  const now = options.now ?? (() => performance.now());
+  const intervalMs = options.intervalMs ?? LEASE_HEARTBEAT_INTERVAL_MS;
+  const initialLeaseStartedAt = options.initialLeaseStartedAt ?? now();
+  const controller = new AbortController();
   let rejected = false;
-  // A successful renewal means the lease is live for at least the claim
-  // interval; transient failures consume that headroom without extending it.
-  // Once more consecutive failures than the lease allows have passed, the
-  // attempt must assume the lease expired and stop new provider work — the
-  // database still fences every durable write either way.
-  let consecutiveTransientFailures = 0;
-  const maxToleratedFailures = Math.max(1, Math.floor(15 * 60_000 / intervalMs) - 1);
+  let revoked = false;
+  let leaseExpiresAt = initialLeaseStartedAt + LEASE_DURATION_MS;
+  let lastSuccessfulRenewalStartedAt = Number.NEGATIVE_INFINITY;
+  const revoke = () => {
+    revoked = true;
+    controller.abort();
+  };
+  const owns = () => {
+    if (!revoked && now() >= leaseExpiresAt) revoke();
+    return !revoked;
+  };
   const renew = async () => {
+    if (!owns()) return;
+    const startedAt = now();
     try {
       const { error } = await renewer.rpc("extend_document_job_lease", {
         p_job_id: jobId,
         p_claim_token: claimToken,
-        p_minutes: 15,
+        p_minutes: LEASE_DURATION_MINUTES,
       });
-      if (error && ownershipRejected(error)) {
-        rejected = true;
+      if (error) {
+        if (ownershipRejected(error)) {
+          rejected = true;
+          revoke();
+        }
         return;
       }
-      consecutiveTransientFailures = 0;
+      if (revoked || startedAt >= leaseExpiresAt) {
+        revoke();
+        return;
+      }
+      if (startedAt >= lastSuccessfulRenewalStartedAt) {
+        lastSuccessfulRenewalStartedAt = startedAt;
+        leaseExpiresAt = startedAt + LEASE_DURATION_MS;
+      }
+      owns();
     } catch (error) {
-      if (ownershipRejected(error)) rejected = true;
-      else consecutiveTransientFailures += 1;
+      if (ownershipRejected(error)) {
+        rejected = true;
+        revoke();
+      }
     }
   };
+  const schedule = options.schedule ?? ((callback, ms) => {
+    const timer = setInterval(() => void callback(), ms);
+    timer.unref?.();
+    return () => clearInterval(timer);
+  });
   const cancel = schedule(renew, intervalMs);
   return {
     lost: () => rejected,
-    owns: () =>
-      !rejected && consecutiveTransientFailures <= maxToleratedFailures,
+    owns,
+    ownershipSignal: controller.signal,
     stop: cancel,
   };
 }

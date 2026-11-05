@@ -1371,6 +1371,7 @@ test("a provider quota defers the remaining groups for retry instead of reportin
     assert.equal(deferredRow.result, null);
     assert.ok(deferredRow.attemptCount >= 1);
     assert.match(deferredRow.lastError, /HTTP 429/);
+    assert.equal(groupCalls.filter((chunkIndex) => chunkIndex === 2).length, 1, "a 429 is deferred instead of retried immediately");
 
     // The retry resumes only the deferred group; completed work is not re-sent.
     quotaExhausted = false;

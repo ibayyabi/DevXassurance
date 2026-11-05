@@ -1,6 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createLeaseHeartbeat } from "@/features/documents/lib/lease-heartbeat";
-import { setProviderOwnershipGuard } from "../../../../../worker/src/services/document-extraction";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
@@ -90,25 +89,24 @@ export async function POST(request: NextRequest) {
   if (claimedJob.project_id !== projectId || claimedJob.document_id !== documentId) {
     return notOwnedResponse("document_project_mismatch");
   }
+  const initialLeaseStartedAt = performance.now();
   const { error: initialLeaseError } = await supabase.rpc("extend_document_job_lease", {
     p_job_id: jobId,
     p_claim_token: claimToken,
     p_minutes: 15,
   });
   if (initialLeaseError) return notOwnedResponse();
-  // The 15-minute lease outlives each claim, but lengthy checkpoint-free
-  // phases (parse/OCR, final summary, persist chain) can exceed it. A periodic
-  // renewal keeps the lease alive; a rejection means a newer attempt owns the
-  // job and this attempt stops before wasting provider quota. Every durable
-  // write remains fenced by the database regardless of the heartbeat.
-  const heartbeat = createLeaseHeartbeat(supabase, jobId, claimToken);
-  setProviderOwnershipGuard(() => heartbeat.owns());
+  // Each worker invocation gets its own ownership check and abort signal.
+  // Database fencing remains authoritative for every durable write.
+  const heartbeat = createLeaseHeartbeat(supabase, jobId, claimToken, {
+    initialLeaseStartedAt,
+  });
   const workerStarted = performance.now();
   let workerOutcome = "failed";
   try {
-    // Stop early when a renewal already revealed lost ownership (the timer
-    // may have fired while the earlier stages ran).
-    if (heartbeat.lost()) return notOwnedResponse();
+    // Compare monotonic elapsed time to the last known lease deadline; timers
+    // can be delayed beyond that deadline.
+    if (!heartbeat.owns()) return notOwnedResponse();
     const { data, error } = await supabase
       .from("documents")
       .select(
@@ -117,6 +115,7 @@ export async function POST(request: NextRequest) {
       .eq("id", documentId)
       .eq("project_id", projectId)
       .maybeSingle();
+    if (!heartbeat.owns()) return notOwnedResponse();
 
     if (error) {
       return retryableResponse(supabase, {
@@ -145,6 +144,7 @@ export async function POST(request: NextRequest) {
     const { data: file, error: storageError } = await supabase.storage
       .from(document.storage_bucket)
       .download(document.storage_path);
+    if (!heartbeat.owns()) return notOwnedResponse();
     console.info("Document worker stage completed", {
       stage: "download",
       jobId,
@@ -168,6 +168,8 @@ export async function POST(request: NextRequest) {
         : terminalFailureResponse(supabase, failure, 502);
     }
 
+    const fileBuffer = await file.arrayBuffer();
+    if (!heartbeat.owns()) return notOwnedResponse();
     const processingStarted = performance.now();
     const result = await processDocumentJob(
       {
@@ -180,10 +182,13 @@ export async function POST(request: NextRequest) {
         documentDateHint: document.document_date_hint,
         reportingPeriodHint: document.reporting_period_hint,
         workstreamHint: document.workstream_hint,
-        fileBuffer: await file.arrayBuffer(),
+        fileBuffer,
+        ownsJob: () => heartbeat.owns(),
+        ownershipSignal: heartbeat.ownershipSignal,
       },
       createExtractionGroupStore(supabase, jobId, claimToken),
     );
+    if (!heartbeat.owns()) return notOwnedResponse();
     console.info("Document worker stage completed", {
       stage: "processing",
       jobId,
@@ -335,7 +340,7 @@ export async function POST(request: NextRequest) {
       parser_metadata: result.parserMetadata,
     });
   } catch (error) {
-    if (isOwnershipRejection(error)) return notOwnedResponse();
+    if (!heartbeat.owns() || isOwnershipRejection(error)) return notOwnedResponse();
     const transient = isTransientDocumentWriteFailure(error);
     const failure = {
       jobId,
@@ -353,7 +358,6 @@ export async function POST(request: NextRequest) {
   }
   finally {
     heartbeat.stop();
-    setProviderOwnershipGuard(null);
     console.info("Document worker stage completed", {
       stage: "worker_total",
       jobId,

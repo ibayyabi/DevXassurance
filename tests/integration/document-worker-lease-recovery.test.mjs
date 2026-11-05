@@ -56,7 +56,6 @@ function workerDependencies(overrides = {}) {
     },
     "../../../../../worker/src/services/document-extraction": {
       documentSuggestionUpdateFields: (value) => value,
-      setProviderOwnershipGuard: () => {},
     },
   };
 }
@@ -220,15 +219,21 @@ test("a 429 provider response defers work without reporting evidence absent and 
       },
     },
   };
+  let workerContext;
   const route = load(routePath, workerDependencies({
     supabase,
-    processDocumentJob: async () => ({
-      status: "failed",
-      errorCode: "llm_provider_transient_failure",
-      errorMessage: "Source chunks 0-2: The configured AI provider returned HTTP 429.",
-      chunks: [],
-      cost_observations: [],
-    }),
+    processDocumentJob: async (job) => {
+      workerContext = job;
+      assert.equal(typeof job.ownsJob, "function");
+      assert.ok(job.ownershipSignal instanceof AbortSignal);
+      return {
+        status: "failed",
+        errorCode: "llm_provider_transient_failure",
+        errorMessage: "Source chunks 0-2: The configured AI provider returned HTTP 429.",
+        chunks: [],
+        cost_observations: [],
+      };
+    },
   }));
 
   const response = await postRoute(route, {
@@ -239,6 +244,8 @@ test("a 429 provider response defers work without reporting evidence absent and 
   });
 
   assert.equal(response.status, 503);
+  assert.equal(workerContext.ownsJob(), true, "the route passes this attempt's guard to the worker");
+  assert.equal(workerContext.ownershipSignal.aborted, false);
   const body = await response.json();
   assert.equal(body.status, "retrying");
   assert.equal(body.errorCode, "llm_provider_transient_failure");
@@ -256,151 +263,271 @@ test("a 429 provider response defers work without reporting evidence absent and 
   );
 });
 
-test("heartbeat renews the lease and flags lost ownership on rejection", async () => {
-  const heartbeatModule = await import(
-    `data:text/javascript;base64,${Buffer.from(ts.transpileModule(
-      readFileSync(path.join(repoRoot, "src/features/documents/lib/lease-heartbeat.ts"), "utf8"),
-      { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } },
-    ).outputText).toString("base64")}`
-  );
-  const renewals = [];
+test("heartbeat uses monotonic lease expiry when renewal timers are delayed", async () => {
+  const heartbeatModule = loadHeartbeatModule();
+  let now = 0;
   let fireTick = () => {};
+  let renewals = 0;
   let cancelled = false;
   const heartbeat = heartbeatModule.createLeaseHeartbeat(
     {
-      async rpc(name, args) {
-        renewals.push({ name, args });
-        return renewals.length === 1
-          ? { error: null }
-          : { error: { message: "Lease extension rejected: this attempt does not own the job or its lease expired." } };
+      async rpc() {
+        renewals += 1;
+        throw new Error("temporary network failure");
       },
     },
     "job-a",
     "token-a",
-    15 * 60_000,
-    (callback) => {
-      fireTick = callback;
-      return () => {
-        cancelled = true;
-      };
+    {
+      intervalMs: 5 * 60_000,
+      initialLeaseStartedAt: 0,
+      now: () => now,
+      schedule(callback) {
+        fireTick = callback;
+        return () => {
+          cancelled = true;
+        };
+      },
     },
   );
 
-  assert.equal(heartbeat.lost(), false);
-  assert.equal(heartbeat.owns(), true);
+  now = 5 * 60_000;
   await fireTick();
-  assert.equal(heartbeat.lost(), false, "a successful renewal keeps ownership");
-  assert.equal(heartbeat.owns(), true);
+  assert.equal(renewals, 1);
+  assert.equal(heartbeat.owns(), true, "a transient error does not end a still-live lease");
+  assert.equal(heartbeat.ownershipSignal.aborted, false);
+
+  // The next timer callback has not run; elapsed monotonic time still revokes
+  // ownership exactly at the last known lease expiry.
+  now = 15 * 60_000;
+  assert.equal(heartbeat.owns(), false);
+  assert.equal(heartbeat.lost(), false, "assumed expiry is distinct from a rejected renewal");
+  assert.equal(heartbeat.ownershipSignal.aborted, true);
   await fireTick();
-  assert.equal(heartbeat.lost(), true, "a rejected renewal marks ownership lost");
-  assert.equal(heartbeat.owns(), false, "a rejected renewal revokes the ownership guard");
+  assert.equal(renewals, 1, "an expired lease must not trigger another renewal request");
   heartbeat.stop();
   assert.equal(cancelled, true);
-
-  // Transient renewal failures keep ownership only within the lease headroom;
-  // past it the attempt must assume the lease expired and stop new work.
-  const transientHeartbeat = heartbeatModule.createLeaseHeartbeat(
-    {
-      async rpc() {
-        transientCalls += 1;
-        throw new Error("fetch failed");
-      },
-    },
-    "job-a",
-    "token-a",
-    15 * 60_000,
-    (callback) => {
-      fireTick = callback;
-      return () => {};
-    },
-  );
-  await fireTick();
-  assert.equal(transientHeartbeat.lost(), false);
-  assert.equal(transientHeartbeat.owns(), true, "one transient failure stays inside the lease headroom");
-  await fireTick();
-  assert.equal(transientHeartbeat.owns(), false, "a second failure past the headroom assumes lease expiry");
-  assert.equal(transientHeartbeat.lost(), false, "assumed expiry is not a database rejection");
-  transientHeartbeat.stop();
-
-  // A short interval allows several tolerated failures before the deadline.
-  const tunedHeartbeat = heartbeatModule.createLeaseHeartbeat(
-    {
-      async rpc() {
-        throw new Error("fetch failed");
-      },
-    },
-    "job-a",
-    "token-a",
-    5 * 60_000,
-    (callback) => {
-      fireTick = callback;
-      return () => {};
-    },
-  );
-  await fireTick();
-  await fireTick();
-  assert.equal(tunedHeartbeat.owns(), true, "two transient failures still fit the 15-minute lease");
-  await fireTick();
-  assert.equal(tunedHeartbeat.owns(), false, "the third failure exhausts the lease headroom");
-  tunedHeartbeat.stop();
 });
 
-test("ownership lost mid-run stops remaining provider groups without durable writes", async (t) => {
+test("a rejected renewal aborts only its own provider signal", async () => {
+  const heartbeatModule = loadHeartbeatModule();
+  let now = 0;
+  let fireTick = () => {};
+  let renewals = 0;
+  const heartbeat = heartbeatModule.createLeaseHeartbeat(
+    {
+      async rpc() {
+        renewals += 1;
+        return renewals === 1
+          ? { error: null }
+          : { error: { message: "Lease extension rejected: a newer attempt owns this job." } };
+      },
+    },
+    "job-a",
+    "token-a",
+    {
+      intervalMs: 5 * 60_000,
+      initialLeaseStartedAt: 0,
+      now: () => now,
+      schedule(callback) {
+        fireTick = callback;
+        return () => {};
+      },
+    },
+  );
+
+  now = 5 * 60_000;
+  await fireTick();
+  assert.equal(heartbeat.owns(), true, "a successful renewal moves this attempt's known deadline");
+  now = 10 * 60_000;
+  await fireTick();
+  assert.equal(heartbeat.lost(), true);
+  assert.equal(heartbeat.owns(), false);
+  assert.equal(heartbeat.ownershipSignal.aborted, true);
+  heartbeat.stop();
+});
+
+test("concurrent extraction attempts keep ownership isolated and abort only the stale request", async (t) => {
   const { loadWorkerModules } = await import("./helpers/worker-modules.mjs");
-  const { extraction } = await loadWorkerModules();
-  const { setProviderOwnershipGuard, extractDocumentGroups } = extraction;
-
-  // Simulate the route's guard wiring; ownership flips between group requests.
-  let owned = true;
-  setProviderOwnershipGuard(() => owned);
-  t.after(() => setProviderOwnershipGuard(null));
-
-  const providerCalls = [];
+  const { extractDocumentGroups } = await loadWorkerModules();
+  const { createLeaseHeartbeat } = loadHeartbeatModule();
+  const keys = ["XASS_LLM_PROVIDER", "OLLAMA_BASE_URL", "OLLAMA_MODEL"];
+  const previousEnvironment = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   const savedFetch = globalThis.fetch;
   process.env.XASS_LLM_PROVIDER = "ollama";
   process.env.OLLAMA_BASE_URL = "http://ollama.test";
   process.env.OLLAMA_MODEL = "test-model";
-  globalThis.fetch = async (_url, init) => {
-    const prompt = JSON.parse(init.body).messages[1].content;
-    providerCalls.push(prompt.slice(0, 40));
-    // The first group request succeeds; ownership is lost before the next.
-    if (!prompt.startsWith("Classify the entire document")) owned = false;
-    return new Response(JSON.stringify({
-      message: { content: JSON.stringify({}) },
-    }), { status: 200, headers: { "Content-Type": "application/json" } });
-  };
-  t.after(() => {
-    globalThis.fetch = savedFetch;
-    for (const key of ["XASS_LLM_PROVIDER", "OLLAMA_BASE_URL", "OLLAMA_MODEL"]) delete process.env[key];
-  });
 
-  const chunks = Array.from({ length: 6 }, (_, index) => ({
-    chunkIndex: index,
-    chunkText: `Group source block ${index} with progress 10%.`,
-    page_number: null,
-    section_label: null,
-    parserMetadata: { parserVersion: "test/ownership/1" },
-  }));
-  const outcome = await extractDocumentGroups(
-    { projectId: "project-a", documentId: "document-a", fileName: "ownership.txt", fileBuffer: new ArrayBuffer(8) },
-    chunks,
-    { parserVersion: "test/ownership/1" },
+  let fireAttemptARenewal = () => {};
+  const attemptA = createLeaseHeartbeat(
     {
-      async loadGroups() {
-        return [];
+      async rpc() {
+        return { error: { message: "Lease extension rejected: a newer attempt owns this job." } };
       },
-      async saveGroup() {
-        throw new Error("a stale attempt must not checkpoint after ownership loss");
+    },
+    "job-a",
+    "token-a",
+    {
+      initialLeaseStartedAt: 0,
+      now: () => 0,
+      schedule(callback) {
+        fireAttemptARenewal = callback;
+        return () => {};
       },
     },
   );
+  const attemptB = createLeaseHeartbeat(
+    { async rpc() { return { error: null }; } },
+    "job-b",
+    "token-b",
+    { initialLeaseStartedAt: 0, now: () => 0, schedule: () => () => {} },
+  );
+  t.after(() => {
+    globalThis.fetch = savedFetch;
+    for (const key of keys) {
+      if (previousEnvironment[key] === undefined) delete process.env[key];
+      else process.env[key] = previousEnvironment[key];
+    }
+    attemptA.stop();
+    attemptB.stop();
+  });
 
+  let releaseAttemptBClassification;
+  const attemptBClassificationGate = new Promise((resolve) => {
+    releaseAttemptBClassification = resolve;
+  });
+  let markAttemptBClassificationStarted;
+  const attemptBClassificationStarted = new Promise((resolve) => {
+    markAttemptBClassificationStarted = resolve;
+  });
+  let markAttemptAGroupStarted;
+  const attemptAGroupStarted = new Promise((resolve) => {
+    markAttemptAGroupStarted = resolve;
+  });
+  let attemptARequestAborted = false;
+  const groupCalls = [];
+  const classification = { document_suggestions: {}, quality_warning: null };
+  const response = (content) => new Response(JSON.stringify({
+    message: { content: JSON.stringify(content) },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  globalThis.fetch = async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (prompt.startsWith("Classify the entire document")) {
+      if (prompt.includes("attempt-b.txt")) {
+        markAttemptBClassificationStarted();
+        await attemptBClassificationGate;
+      }
+      return response(classification);
+    }
+
+    const attempt = prompt.includes("attempt-a.txt") ? "A" : "B";
+    groupCalls.push(attempt);
+    if (attempt === "A") {
+      markAttemptAGroupStarted();
+      return new Promise((_resolve, reject) => {
+        const abort = () => {
+          attemptARequestAborted = true;
+          reject(new DOMException("ownership lost", "AbortError"));
+        };
+        if (init.signal.aborted) abort();
+        else init.signal.addEventListener("abort", abort, { once: true });
+      });
+    }
+    return response({});
+  };
+
+  const chunks = (label) => [{
+    chunkIndex: 0,
+    chunkText: `${label} source block with progress 10%.`,
+    page_number: null,
+    section_label: null,
+    parserMetadata: { parserVersion: "test/ownership/1" },
+  }];
+  const store = (label, rows) => ({
+    async loadGroups() { return []; },
+    async saveGroup(row) {
+      if (label === "A") throw new Error("a stale attempt must not checkpoint");
+      rows.push(row);
+    },
+  });
+  const runAttempt = (label, heartbeat) => extractDocumentGroups(
+    {
+      projectId: `project-${label}`,
+      documentId: `document-${label}`,
+      fileName: `attempt-${label.toLowerCase()}.txt`,
+      fileBuffer: new ArrayBuffer(8),
+      ownsJob: () => heartbeat.owns(),
+      ownershipSignal: heartbeat.ownershipSignal,
+    },
+    chunks(label),
+    { parserVersion: "test/ownership/1" },
+    store(label, label === "B" ? savedAttemptBGroups : []),
+  );
+  const savedAttemptBGroups = [];
+  const outcomeA = runAttempt("A", attemptA);
+  await attemptAGroupStarted;
+  const outcomeB = runAttempt("B", attemptB);
+  await attemptBClassificationStarted;
+
+  await fireAttemptARenewal();
+  assert.equal(attemptA.ownershipSignal.aborted, true);
+  assert.equal(attemptARequestAborted, true, "ownership loss aborts A's in-flight fetch");
+  releaseAttemptBClassification();
+  const [resultA, resultB] = await Promise.all([outcomeA, outcomeB]);
+
+  assert.equal(resultA.ok, false);
+  assert.equal(resultA.errorCode, "llm_provider_ownership_lost");
+  assert.equal(resultB.ok, false);
+  assert.equal(resultB.errorCode, "llm_group_extraction_failed");
+  assert.deepEqual(groupCalls, ["A", "B", "B"], "B can request after A loses ownership");
+  assert.equal(attemptB.ownershipSignal.aborted, false, "A cannot cancel B's provider request");
+  assert.equal(attemptB.owns(), true);
+  assert.deepEqual(savedAttemptBGroups.map((row) => row.status), ["failed"]);
+});
+
+test("ownership loss at the final request gate prevents a provider fetch", async (t) => {
+  const { loadWorkerModules } = await import("./helpers/worker-modules.mjs");
+  const { extractDocumentGroups } = await loadWorkerModules();
+  const keys = ["XASS_LLM_PROVIDER", "OLLAMA_BASE_URL", "OLLAMA_MODEL"];
+  const previousEnvironment = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const savedFetch = globalThis.fetch;
+  process.env.XASS_LLM_PROVIDER = "ollama";
+  process.env.OLLAMA_BASE_URL = "http://ollama.test";
+  process.env.OLLAMA_MODEL = "test-model";
+  let fetchCalls = 0;
+  let ownershipChecks = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return new Response("{}");
+  };
+  t.after(() => {
+    globalThis.fetch = savedFetch;
+    for (const key of keys) {
+      if (previousEnvironment[key] === undefined) delete process.env[key];
+      else process.env[key] = previousEnvironment[key];
+    }
+  });
+
+  const outcome = await extractDocumentGroups(
+    {
+      projectId: "project-expired",
+      documentId: "document-expired",
+      fileName: "expired.txt",
+      fileBuffer: new ArrayBuffer(8),
+      ownsJob: () => ++ownershipChecks < 4,
+    },
+    [{
+      chunkIndex: 0,
+      chunkText: "Source block with progress 10%.",
+      page_number: null,
+      section_label: null,
+      parserMetadata: { parserVersion: "test/ownership/1" },
+    }],
+    { parserVersion: "test/ownership/1" },
+    { async loadGroups() { return []; }, async saveGroup() {} },
+  );
+
+  assert.equal(fetchCalls, 0, "ownership is checked again after prompt construction and before fetch");
   assert.equal(outcome.ok, false);
   assert.equal(outcome.errorCode, "llm_provider_ownership_lost");
-  const groupCalls = providerCalls.filter((call) => !call.startsWith("Classify the entire document"));
-  assert.ok(groupCalls.length >= 1, "the first group request ran before ownership was lost");
-  assert.ok(
-    groupCalls.length < 6,
-    `remaining groups must not be requested after ownership loss (got ${groupCalls.length})`,
-  );
 });

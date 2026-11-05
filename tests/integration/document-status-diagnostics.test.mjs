@@ -33,6 +33,8 @@ test("every processing state has a distinct label, cause, and action", () => {
   // The five ticket statuses never collapse into one another.
   const five = ["queued", "processing", "failed", "needs_review", "completed"].map(status.processingLabel);
   assert.equal(new Set(five).size, 5);
+  assert.match(status.processingCause("processing"), /tidak memastikan lease masih aktif/i);
+  assert.match(status.processingCause("failed"), /tidak membuktikan penyebab historis/i);
 });
 
 test("completed never implies full assurance coverage; needs_review is not a failure", () => {

@@ -18,6 +18,19 @@ export type DocumentExtractionContext = {
   documentDateHint?: string | null;
   reportingPeriodHint?: string | null;
   workstreamHint?: string | null;
+  /**
+   * Per-attempt ownership guard, consulted before every provider request
+   * (classification, group extraction and its correction retries, executive
+   * summary). The document worker passes its own lease check so a stale
+   * attempt stops before spending provider quota. Strictly per invocation:
+   * concurrent jobs never observe each other's ownership.
+   */
+  ownsJob?: () => boolean;
+  /**
+   * Optional abort signal fired when ownership is lost; in-flight provider
+   * requests are cancelled instead of running to their timeout.
+   */
+  ownershipSignal?: AbortSignal;
 };
 
 export type DocumentExtractionGroupCacheRow = {
@@ -390,6 +403,7 @@ type GroupAttemptResult = {
 };
 type GroupAttemptError = Error & { attempts: number; errorCode: string };
 class TransientProviderError extends Error {}
+class ProviderDeferredError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
@@ -459,20 +473,40 @@ let activeProviderRequests = 0;
 const providerRequestWaiters: Array<() => void> = [];
 
 /**
- * Optional check consulted before every provider request (classification,
- * group extraction, executive summary). The document worker injects a lease
- * guard that returns false once the job's ownership was lost, so a stale
- * attempt stops before spending provider quota. Ownership itself stays fenced
- * in the database; this guard only decides whether to start new work.
+ * True when new provider work must not start for this attempt: the job's own
+ * ownership guard (checked before every request and correction retry) says the
+ * lease was lost. Per-invocation by design — concurrent jobs each carry their
+ * own guard, and finishing one job can never clear another's.
  */
-let ownershipGuard: (() => boolean) | null = null;
-
-export function setProviderOwnershipGuard(guard: (() => boolean) | null) {
-  ownershipGuard = guard;
+function providerRequestBlocked(job: Pick<DocumentExtractionContext, "ownsJob" | "ownershipSignal">) {
+  return job.ownershipSignal?.aborted === true ||
+    (job.ownsJob !== undefined && !job.ownsJob());
 }
 
-function providerRequestBlocked() {
-  return ownershipGuard !== null && !ownershipGuard();
+function providerOwnershipError(attempts = 0): GroupAttemptError {
+  return Object.assign(
+    new Error("The processing attempt lost ownership of the job before the provider request."),
+    { attempts, errorCode: "llm_provider_ownership_lost" },
+  );
+}
+
+async function requestProviderModel(
+  job: Pick<DocumentExtractionContext, "ownsJob" | "ownershipSignal">,
+  provider: ModelProvider,
+  prompt: string,
+  canStartRequest?: () => boolean,
+) {
+  const ensureRequestAllowed = () => {
+    if (providerRequestBlocked(job)) throw providerOwnershipError();
+    if (canStartRequest && !canStartRequest()) {
+      throw new ProviderDeferredError("Provider work was deferred after an earlier transient failure.");
+    }
+  };
+  ensureRequestAllowed();
+  return withProviderConcurrencySlot(() => {
+    ensureRequestAllowed();
+    return requestModel(provider, prompt, job.ownershipSignal, ensureRequestAllowed);
+  });
 }
 
 const FACT_TYPES = ["risk", "issue", "milestone", "decision", "owner_action"] as const;
@@ -570,7 +604,15 @@ export async function extractDocumentGroups(
       error instanceof Error ? error.message : "The configured AI provider is unavailable.",
     );
   }
-  const documentClassification = await classifyDocument(job, chunks, parserMetadata, provider);
+  let documentClassification: DocumentClassificationResult;
+  try {
+    documentClassification = await classifyDocument(job, chunks, parserMetadata, provider);
+  } catch (error) {
+    return failure(
+      error instanceof TransientProviderError ? "llm_provider_transient_failure" : "llm_group_extraction_failed",
+      error instanceof Error ? error.message : "Document classification could not be completed.",
+    );
+  }
   let cachedRows: DocumentExtractionGroupCacheRow[];
   try {
     cachedRows = await store.loadGroups(
@@ -621,26 +663,42 @@ export async function extractDocumentGroups(
 
   const groupFailures: Array<{ code: string; message: string }> = [];
   let cursor = 0;
+  let deferRemainingGroups = false;
   await Promise.all(
     Array.from({ length: Math.min(MAX_CONCURRENT_PROVIDER_REQUESTS, groupsToProcess.length) }, async () => {
-      while (cursor < groupsToProcess.length) {
+      while (cursor < groupsToProcess.length && !deferRemainingGroups) {
         const work = groupsToProcess[cursor++];
         const previous = cacheByKey.get(work.group.groupKey);
         const priorAttempts = previous?.attemptCount ?? 0;
         let extraction: GroupAttemptResult;
         try {
-          extraction = await extractGroupWithCorrection(job, work.group, provider);
+          extraction = await extractGroupWithCorrection(
+            job,
+            work.group,
+            provider,
+            () => !deferRemainingGroups,
+          );
         } catch (error) {
           const attemptError = error as GroupAttemptError;
           // Ownership was lost mid-run: do not checkpoint a "failed" group over
           // a newer attempt's state and do not process further groups; the
           // route's not_owned response ends this attempt without durable writes.
-          if (attemptError.errorCode === "llm_provider_ownership_lost") {
+          if (attemptError.errorCode === "llm_provider_ownership_lost" || providerRequestBlocked(job)) {
             groupFailures.push({
               code: "llm_provider_ownership_lost",
               message: `Source chunks ${work.group.chunkStartIndex}-${work.group.chunkEndIndex}: skipped because the attempt lost ownership of the job.`,
             });
             break;
+          }
+          if (attemptError.errorCode === "llm_provider_transient_failure") {
+            deferRemainingGroups = true;
+          }
+          if (attemptError.errorCode === "llm_provider_transient_failure" && attemptError.attempts === 0) {
+            groupFailures.push({
+              code: "llm_provider_transient_failure",
+              message: `Source chunks ${work.group.chunkStartIndex}-${work.group.chunkEndIndex}: deferred without a provider request after another group was rate-limited.`,
+            });
+            continue;
           }
           const errorMessage = safeGroupError(attemptError);
           try {
@@ -700,12 +758,12 @@ export async function extractDocumentGroups(
     const errorCode = codes.has("llm_provider_ownership_lost")
       ? "llm_provider_ownership_lost"
       : codes.has("extraction_group_checkpoint_rejected")
-      ? "extraction_group_checkpoint_rejected"
-      : codes.has("extraction_group_checkpoint_failed")
-      ? "extraction_group_checkpoint_failed"
-      : codes.has("llm_group_extraction_failed")
-        ? "llm_group_extraction_failed"
-        : "llm_provider_transient_failure";
+        ? "extraction_group_checkpoint_rejected"
+        : codes.has("extraction_group_checkpoint_failed")
+          ? "extraction_group_checkpoint_failed"
+          : codes.has("llm_provider_transient_failure")
+            ? "llm_provider_transient_failure"
+            : "llm_group_extraction_failed";
     const examples = groupFailures.slice(0, 5).map((item) => item.message);
     const omitted = groupFailures.length - examples.length;
     return failure(
@@ -725,7 +783,15 @@ export async function extractDocumentGroups(
   const providers = [...new Set(completed.map((group) => group.provider))];
   const models = [...new Set(completed.map((group) => group.model))];
   const aggregation = aggregateGroups(completed, groups, providers, models, documentClassification, contentHash, parserVersion);
-  const summary = await synthesizeExecutiveSummary(job, completed, aggregation.quality_warnings, chunks, provider);
+  let summary: ExecutiveSummarySynthesis;
+  try {
+    summary = await synthesizeExecutiveSummary(job, completed, aggregation.quality_warnings, chunks, provider);
+  } catch (error) {
+    return failure(
+      "llm_provider_transient_failure",
+      error instanceof Error ? error.message : "The executive summary provider request failed.",
+    );
+  }
   return {
     ok: true,
     extraction: {
@@ -1023,22 +1089,21 @@ async function extractGroupWithCorrection(
   job: DocumentExtractionContext & { jobId?: string },
   group: ChunkGroup,
   provider: ModelProvider,
+  canStartRequest?: () => boolean,
 ): Promise<GroupAttemptResult> {
   let corrections: string[] = [];
   let lastError = "The provider did not return a valid extraction.";
   let errorCode = "llm_group_extraction_failed";
 
   for (let attempt = 1; attempt <= MAX_GROUP_ATTEMPTS; attempt += 1) {
-    if (providerRequestBlocked()) {
-      const error = new Error(lastError) as GroupAttemptError;
-      error.attempts = attempt - 1;
-      error.errorCode = "llm_provider_ownership_lost";
-      throw error;
-    }
+    if (providerRequestBlocked(job)) throw providerOwnershipError(attempt - 1);
     const attemptStarted = performance.now();
     try {
-      const raw = await withProviderConcurrencySlot(() =>
-        requestModel(provider, buildExtractionPrompt(job, group, corrections)),
+      const raw = await requestProviderModel(
+        job,
+        provider,
+        buildExtractionPrompt(job, group, corrections),
+        canStartRequest,
       );
       console.info("Document extraction attempt completed", {
         stage: "group",
@@ -1087,10 +1152,23 @@ async function extractGroupWithCorrection(
         attempt,
         durationMs: Math.round(performance.now() - attemptStarted),
         success: false,
-        errorCode: error instanceof TransientProviderError
+        errorCode: error instanceof TransientProviderError || error instanceof ProviderDeferredError
           ? "llm_provider_transient_failure"
           : "llm_group_extraction_failed",
       });
+      if (error instanceof ProviderDeferredError) {
+        const deferredError = error as GroupAttemptError;
+        deferredError.attempts = attempt - 1;
+        deferredError.errorCode = "llm_provider_transient_failure";
+        throw deferredError;
+      }
+      if (providerRequestBlocked(job)) throw providerOwnershipError(attempt - 1);
+      if (error instanceof TransientProviderError) {
+        const transientError = error as GroupAttemptError;
+        transientError.attempts = attempt;
+        transientError.errorCode = "llm_provider_transient_failure";
+        throw transientError;
+      }
       lastError = error instanceof Error
         ? error.message
         : "The configured AI provider request failed.";
@@ -1687,7 +1765,7 @@ async function classifyDocument(
   let lastErrors = ["The provider did not return a valid document classification."];
 
   for (let attempt = 1; attempt <= MAX_GROUP_ATTEMPTS; attempt += 1) {
-    if (providerRequestBlocked()) {
+    if (providerRequestBlocked(job)) {
       return {
         suggestion: emptySuggestion,
         qualityWarnings: [
@@ -1697,11 +1775,10 @@ async function classifyDocument(
     }
     const attemptStarted = performance.now();
     try {
-      const raw = await withProviderConcurrencySlot(() =>
-        requestModel(
-          provider,
-          buildDocumentClassificationPrompt(job, parserMetadata, references, corrections),
-        ),
+      const raw = await requestProviderModel(
+        job,
+        provider,
+        buildDocumentClassificationPrompt(job, parserMetadata, references, corrections),
       );
       console.info("Document extraction attempt completed", {
         stage: "classify",
@@ -1755,6 +1832,15 @@ async function classifyDocument(
         durationMs: Math.round(performance.now() - attemptStarted),
         success: false,
       });
+      if (providerRequestBlocked(job)) {
+        return {
+          suggestion: emptySuggestion,
+          qualityWarnings: [
+            "Document-level artifact classification was skipped because the attempt lost ownership of the job.",
+          ],
+        };
+      }
+      if (error instanceof TransientProviderError) throw error;
       return {
         suggestion: emptySuggestion,
         qualityWarnings: [
@@ -1920,7 +2006,12 @@ function configuredModelProvider(): ModelProvider {
   throw new Error("XASS_LLM_PROVIDER must be ollama, ollama_cloud, openai-compatible, gemini, or groq.");
 }
 
-async function requestModel(provider: ModelProvider, prompt: string) {
+async function requestModel(
+  provider: ModelProvider,
+  prompt: string,
+  ownershipSignal?: AbortSignal,
+  beforeFetch?: () => void,
+) {
   const system = "You are X-Assurance, an evidence-grounded project assurance analyst. Return only the requested JSON object.";
   const messages = [
     { role: "system", content: system },
@@ -1948,11 +2039,14 @@ async function requestModel(provider: ModelProvider, prompt: string) {
           options: { temperature: 0 },
         };
 
+  beforeFetch?.();
   let response: Response;
   try {
     response = await fetch(provider.url, {
       method: "POST",
-      signal: AbortSignal.timeout(llmTimeoutMs()),
+      signal: ownershipSignal
+        ? AbortSignal.any([AbortSignal.timeout(llmTimeoutMs()), ownershipSignal])
+        : AbortSignal.timeout(llmTimeoutMs()),
       headers: provider.headers,
       body: JSON.stringify(body),
     });
@@ -4227,17 +4321,19 @@ function validateExecutiveSummary(
   };
 }
 
+type ExecutiveSummarySynthesis = {
+  summary: DocumentExtraction["summary"];
+  sources: DocumentExtraction["summary_sources"];
+  warning: string | null;
+};
+
 async function synthesizeExecutiveSummary(
   job: DocumentExtractionContext & { jobId?: string },
   groups: Array<{ value: GroupExtraction; provider: string; model: string }>,
   qualityWarnings: string[],
   chunks: ParsedChunk[],
   provider: ModelProvider,
-): Promise<{
-  summary: DocumentExtraction["summary"];
-  sources: DocumentExtraction["summary_sources"];
-  warning: string | null;
-}> {
+): Promise<ExecutiveSummarySynthesis> {
   const groupSummaryWarnings = groups
     .map((group) => group.value.summary.quality_warning)
     .filter((warning): warning is string => Boolean(warning));
@@ -4252,11 +4348,13 @@ async function synthesizeExecutiveSummary(
   let lastError = "The provider did not return a valid prioritized summary.";
 
   for (let attempt = 1; attempt <= MAX_GROUP_ATTEMPTS; attempt += 1) {
-    if (providerRequestBlocked()) break;
+    if (providerRequestBlocked(job)) break;
     const attemptStarted = performance.now();
     try {
-      const raw = await withProviderConcurrencySlot(() =>
-        requestModel(provider, buildExecutiveSummaryPrompt(groups, sources, qualityNotes, correction)),
+      const raw = await requestProviderModel(
+        job,
+        provider,
+        buildExecutiveSummaryPrompt(groups, sources, qualityNotes, correction),
       );
       const parsed = parseModelObject(raw);
       if (!parsed) {
@@ -4294,6 +4392,8 @@ async function synthesizeExecutiveSummary(
         }
       }
     } catch (error) {
+      if (providerRequestBlocked(job)) break;
+      if (error instanceof TransientProviderError) throw error;
       lastError = error instanceof Error ? error.message : "The configured AI provider request failed.";
       correction = [lastError];
     }
@@ -4308,7 +4408,7 @@ async function synthesizeExecutiveSummary(
     });
   }
 
-  const warning = ownershipGuard !== null && !ownershipGuard()
+  const warning = providerRequestBlocked(job)
     ? "The processing attempt lost ownership of the job; the prioritized summary was not requested."
     : "The prioritized whole-document summary could not be validated; review the extracted evidence.";
   return {
