@@ -488,6 +488,7 @@ begin
     where id = r.id and project_id = p_project_id;
   end loop;
 end;
+$$;
 revoke all on function public.invalidate_assurance_reference_results(uuid, boolean)
   from public, anon, authenticated;
 create or replace function public.invalidate_assurance_reference_results(p_project_id uuid)
