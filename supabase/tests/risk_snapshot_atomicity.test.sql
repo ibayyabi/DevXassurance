@@ -1,16 +1,17 @@
--- Ticket 05: the prior-current risk review and its versioned evidence/decisions
--- are captured by claim, fenced at finish, and invalidate completed analyses.
--- Two-session check for the project -> review lock order with a committed
--- isolated fixture containing two current reviews and project-manager access:
--- Session A: BEGIN; set JWT claims; SELECT claim_assurance_analysis(project, A);
--- leave its transaction open. Session B: BEGIN; set JWT claims; SELECT
--- claim_assurance_analysis(project, B); it must wait before taking review B.
--- COMMIT A, then B must return and COMMIT without deadlock. Reset the fixture
--- and repeat with A/B reversed. This is a manual two-session check.
--- pgTAP case runs after migrations 202611050001, 202611050002, and 202611050003.
+-- Ticket 05: prior-current evidence is captured by claim, fenced at finish,
+-- and invalidates completed analyses.
+-- Two-session claim check (same project, two distinct findings_ready reviews):
+-- A: BEGIN; set JWT claims; SELECT claim_assurance_analysis(project, A).
+-- B: BEGIN; set JWT claims; SELECT claim_assurance_analysis(project, B);
+-- B waits before taking review B. COMMIT A, then B returns and commits.
+-- Repeat reversed. Source-write check: A claims and keeps its transaction
+-- open; B updates selected prior assurance_observations and waits in its
+-- after-trigger for the project lock. A finishes against its captured source
+-- and commits; B must then commit and invalidate currentness. No deadlock.
+-- pgTAP runs after migrations 202611050001, 202611050002, and 202611050003.
 --   psql -v ON_ERROR_STOP=1 -f supabase/tests/risk_snapshot_atomicity.test.sql
 begin;
-select extensions.plan(18);
+select extensions.plan(23);
 select ok((
   select lock_position > 0 and lock_position < review_position
   from (
@@ -19,6 +20,35 @@ select ok((
     from (select pg_get_functiondef('public.lock_assurance_review(uuid,uuid)'::regprocedure) as definition) f
   ) positions
 ), 'review locks are acquired after the exclusive project lock');
+select is((
+  select count(*) from pg_policies
+  where schemaname = 'public' and tablename = 'assurance_reviews'
+    and cmd in ('UPDATE', 'ALL') and roles && array['authenticated'::name, 'public'::name]
+), 0::bigint, 'direct review updates are unavailable outside project-first RPCs');
+select ok((
+  select position('for update' in lower(definition)) = 0
+    and position('for share' in lower(definition)) = 0
+  from (select pg_get_functiondef(
+    'public.assurance_source_snapshot_without_observation_decisions(uuid,uuid)'::regprocedure
+  ) as definition) f
+), 'source snapshot does not wait on rows mutated before after-trigger project locks');
+select ok((
+  select position('from public.projects where id = job.project_id for update' in lower(definition))
+    > position('where id = owner_job_id for update' in lower(definition))
+  from (select pg_get_functiondef('public.assert_document_job_owner(uuid,uuid)'::regprocedure) as definition) f
+), 'worker source writes acquire the project lock before reference rows');
+select ok((
+  select position('from public.projects where id = p_project_id for update' in lower(definition))
+    < position('public.save_assurance_observation_decision_without_project_lock(' in lower(definition))
+  from (select pg_get_functiondef(
+    'public.save_assurance_observation_decision(uuid,text,uuid,text,text,text,jsonb)'::regprocedure
+  ) as definition) f
+), 'decision writes acquire the project lock before reading and locking evidence');
+select ok(exists (
+  select 1 from pg_trigger
+  where tgrelid = 'public.document_chunks'::regclass
+    and tgname = 'document_chunks_prior_risk_reference_change' and not tgisinternal
+), 'chunk changes invalidate dependent source fingerprints');
 
 insert into auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, created_at, updated_at)
 values

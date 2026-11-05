@@ -6,6 +6,175 @@ alter function public.assurance_reference_snapshot(uuid, uuid)
   rename to assurance_reference_snapshot_without_prior_risk_snapshot;
 revoke all on function public.assurance_reference_snapshot_without_prior_risk_snapshot(uuid, uuid)
   from public, anon, authenticated;
+-- The claim holds the project lock before reading its review. Keep this source
+-- snapshot MVCC-only: after-write invalidators acquire that same project lock,
+-- so waiting on their already-mutated source rows here would deadlock.
+create or replace function public.assurance_source_snapshot_without_observation_decisions(p_project_id uuid, p_review_id uuid)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare sources jsonb; baseline uuid[]; current_ids uuid[];
+begin
+  if exists (
+    select 1 from public.assurance_review_documents l
+    left join public.documents d on d.id = l.document_id and d.project_id = p_project_id
+    where l.review_id = p_review_id and (l.project_id <> p_project_id or d.id is null
+      or d.processing_status not in ('completed', 'needs_review'))
+  ) then raise exception 'Selected evidence is unavailable or not fully processed.'; end if;
+
+  select array_agg(document_id order by document_id) filter (where evidence_role = 'baseline'),
+    array_agg(document_id order by document_id) filter (where evidence_role = 'current')
+    into baseline, current_ids from public.assurance_review_documents
+    where review_id = p_review_id and project_id = p_project_id;
+  if coalesce(cardinality(baseline), 0) = 0 or coalesce(cardinality(current_ids), 0) = 0
+    then raise exception 'Select processed baseline and current evidence first.'; end if;
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'document_id', d.id, 'role', l.evidence_role, 'processing_status', d.processing_status,
+    'title', d.title, 'file_name', d.file_name,
+    'source_version', jsonb_build_object(
+      'content_hash', d.content_hash,
+      'parser_version', d.assurance_observation_parser_version,
+      'contract_version', d.assurance_observation_contract_version
+    ),
+    'source', jsonb_build_object(
+      'file_size', d.file_size, 'mime_type', d.mime_type,
+      'storage_bucket', d.storage_bucket, 'storage_path', d.storage_path,
+      'document_type', d.document_type, 'document_date', d.document_date,
+      'confirmed_document_type', d.confirmed_document_type,
+      'confirmed_document_date', d.confirmed_document_date,
+      'confirmed_evidence_role', d.confirmed_evidence_role,
+      'confirmed_reporting_period', d.confirmed_reporting_period,
+      'confirmed_workstream', d.confirmed_workstream
+    ),
+    'storage_object', (select to_jsonb(o) - array['last_accessed_at', 'owner', 'owner_id']
+      from storage.objects o where o.bucket_id = d.storage_bucket and o.name = d.storage_path),
+    'chunks_fingerprint', encode(sha256(convert_to(coalesce((
+      select jsonb_agg(to_jsonb(c) - 'created_at' order by c.chunk_index, c.id)
+      from public.document_chunks c where c.document_id = d.id and c.project_id = p_project_id
+    ), '[]'::jsonb)::text, 'UTF8')), 'hex'),
+    'cost_observations', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'id', o.id, 'project_id', o.project_id, 'document_id', o.document_id,
+        'measure', o.measure, 'source_value', o.source_value,
+        'normalized_amount', o.normalized_amount, 'currency', o.currency,
+        'scope_level', o.scope_level, 'scope_label', o.scope_label,
+        'wbs_code', o.wbs_code, 'wbs_parent_code', o.wbs_parent_code,
+        'wbs_name', o.wbs_name, 'scope_description', o.scope_description,
+        'period_label', o.period_label, 'as_of_date', o.as_of_date,
+        'status_label', o.status_label, 'evidence_chunk_index', o.evidence_chunk_index,
+        'excerpt', o.excerpt, 'page_number', o.page_number, 'section_label', o.section_label,
+        'source_location', o.source_location, 'evidence_role', l.evidence_role
+      ) order by o.measure, o.scope_label nulls first, o.evidence_chunk_index, o.id)
+      from public.cost_observations o
+      where o.project_id = p_project_id and o.document_id = d.id
+        and o.source_content_hash = d.content_hash
+        and o.parser_version = d.assurance_observation_parser_version
+        and o.contract_version = d.assurance_observation_contract_version
+    ), '[]'::jsonb),
+    'assurance_observations', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'id', o.id, 'domain', o.domain, 'observation_type', o.observation_type,
+        'observation', o.observation, 'evidence_chunk_index', o.evidence_chunk_index,
+        'excerpt', o.excerpt, 'page_number', o.page_number,
+        'section_label', o.section_label, 'source_location', o.source_location
+      ) order by o.domain, o.observation_type, o.evidence_chunk_index, o.id)
+      from public.assurance_observations o
+      where o.project_id = p_project_id and o.document_id = d.id
+        and o.source_content_hash = d.content_hash
+        and o.parser_version = d.assurance_observation_parser_version
+        and o.contract_version = d.assurance_observation_contract_version
+    ), '[]'::jsonb),
+    'assurance_observation_coverage', (
+      select jsonb_agg(jsonb_build_object(
+        'domain', domains.domain,
+        'state', coalesce(c.state, 'unprocessed'),
+        'total_groups', coalesce(c.total_groups, 0),
+        'processed_groups', coalesce(c.processed_groups, 0),
+        'reason', coalesce(c.reason, 'No validated observation coverage exists for this source version; re-run extraction.')
+      ) order by domains.domain)
+      from unnest(array['budget', 'schedule', 'progress', 'risk']::text[]) domains(domain)
+      left join public.assurance_observation_coverage c
+        on c.project_id = p_project_id and c.document_id = d.id
+        and c.source_content_hash = d.content_hash
+        and c.parser_version = d.assurance_observation_parser_version
+        and c.contract_version = d.assurance_observation_contract_version
+        and c.domain = domains.domain
+    )
+  ) order by d.id), '[]'::jsonb) into sources
+  from public.assurance_review_documents l
+  join public.documents d on d.id = l.document_id and d.project_id = p_project_id
+  where l.review_id = p_review_id and l.project_id = p_project_id;
+
+  if jsonb_array_length(sources) <> cardinality(baseline || current_ids) or exists (
+    select 1 from jsonb_array_elements(sources) x
+    where x->>'processing_status' not in ('completed', 'needs_review')
+      or x->'storage_object' = 'null'::jsonb
+  ) then raise exception 'Selected evidence changed while reading its source.'; end if;
+
+  return jsonb_build_object(
+    'fingerprint', encode(sha256(convert_to(sources::text, 'UTF8')), 'hex'),
+    'baseline_ids', to_jsonb(baseline), 'current_ids', to_jsonb(current_ids),
+    'sources', sources
+  );
+end;
+$$;
+revoke all on function public.assurance_source_snapshot_without_observation_decisions(uuid, uuid)
+  from public, anon, authenticated;
+
+-- Durable worker writes also take the project lock before touching source rows
+-- included in the locked reference snapshot (notably cost observations).
+create or replace function public.assert_document_job_owner(owner_job_id uuid, owner_claim_token uuid)
+returns void language plpgsql security definer set search_path = public as $$
+declare job public.ai_jobs%rowtype;
+begin
+  if owner_claim_token is null then
+    raise exception 'Ownership rejected: a claim token is required for every durable write.';
+  end if;
+  select * into job from public.ai_jobs where id = owner_job_id for update;
+  if not found then raise exception 'Ownership rejected: document job was not found.'; end if;
+  if job.claim_token is null or job.claim_token <> owner_claim_token then
+    raise exception 'Ownership rejected: this attempt lost ownership of the job (stale claim token).';
+  end if;
+  if job.status <> 'processing' then
+    raise exception 'Ownership rejected: job is %, not processing.', job.status;
+  end if;
+  if job.lease_expires_at is null or job.lease_expires_at < now() then
+    raise exception 'Ownership rejected: the attempt lease has expired; ownership was revoked.';
+  end if;
+  perform 1 from public.projects where id = job.project_id for update;
+  if not found then raise exception 'Ownership rejected: project was not found.'; end if;
+end;
+$$;
+revoke all on function public.assert_document_job_owner(uuid, uuid) from public, anon, authenticated;
+grant execute on function public.assert_document_job_owner(uuid, uuid) to service_role;
+
+-- Observation decisions invalidate every analysis in the project. Acquire the
+-- project lock before the original RPC reads/locks an observation or review.
+alter function public.save_assurance_observation_decision(uuid, text, uuid, text, text, text, jsonb)
+  rename to save_assurance_observation_decision_without_project_lock;
+revoke all on function public.save_assurance_observation_decision_without_project_lock(uuid, text, uuid, text, text, text, jsonb)
+  from public, anon, authenticated;
+create function public.save_assurance_observation_decision(
+  p_project_id uuid, p_target_type text, p_observation_id uuid,
+  p_observation_fingerprint text, p_decision text, p_reason text, p_corrected jsonb default null
+)
+returns uuid language plpgsql security definer set search_path = '' as $$
+declare decision_id uuid;
+begin
+  if auth.uid() is null or not public.can_upload_project_evidence(p_project_id) then
+    raise exception 'Your project role cannot review assurance evidence.';
+  end if;
+  perform 1 from public.projects where id = p_project_id for update;
+  if not found then raise exception 'Project was not found.'; end if;
+  return public.save_assurance_observation_decision_without_project_lock(
+    p_project_id, p_target_type, p_observation_id, p_observation_fingerprint,
+    p_decision, p_reason, p_corrected);
+end;
+$$;
+revoke all on function public.save_assurance_observation_decision(uuid, text, uuid, text, text, text, jsonb)
+  from public, anon;
+grant execute on function public.save_assurance_observation_decision(uuid, text, uuid, text, text, text, jsonb)
+  to authenticated;
+
 
 create function public.assurance_prior_risk_snapshot(p_project_id uuid, p_review_id uuid)
 returns jsonb language plpgsql security definer set search_path = '' as $$
@@ -301,6 +470,9 @@ begin
 end;
 $$;
 revoke all on function public.invalidate_assurance_reference_results(uuid) from public, anon, authenticated;
+-- Prevent direct authenticated review updates from locking a review before the
+-- project. Review mutations must use the project-first security-definer RPCs.
+drop policy if exists "assurance_reviews_update_by_project_uploaders" on public.assurance_reviews;
 -- Claims serialize on the project before they lock a review. This preserves the
 -- reference-writer lock order and prevents two claims from locking each other's
 -- review rows through project-wide invalidation.
@@ -413,4 +585,8 @@ create trigger assurance_observation_coverage_prior_risk_reference_change
 drop trigger if exists assurance_observation_decisions_prior_risk_reference_change on public.assurance_observation_decisions;
 create trigger assurance_observation_decisions_prior_risk_reference_change
   after insert or update or delete on public.assurance_observation_decisions
+  for each row execute function public.invalidate_assurance_prior_risk_change();
+drop trigger if exists document_chunks_prior_risk_reference_change on public.document_chunks;
+create trigger document_chunks_prior_risk_reference_change
+  after insert or update or delete on public.document_chunks
   for each row execute function public.invalidate_assurance_prior_risk_change();

@@ -389,52 +389,16 @@ export async function approveCostBaseline(formData: FormData): Promise<void> {
     throw new Error("Enter the baseline effective date as YYYY-MM-DD.");
   }
 
-  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanApproveBaseline(membership.role);
 
-  const { data: observation, error: observationError } = await supabase
-    .from("cost_observations")
-    .select(
-      "id, document_id, measure, source_value, normalized_amount, currency, scope_level, scope_label",
-    )
-    .eq("id", observationId)
-    .eq("project_id", projectId)
-    .maybeSingle();
-  if (observationError) throw new Error(observationError.message);
-  if (!observation) throw new Error("That baseline candidate is not in this project.");
-  if (observation.measure !== "approved_baseline") {
-    throw new Error("Only an approved-baseline cost observation can be accepted as a baseline.");
-  }
-  if (observation.normalized_amount === null || !observation.currency) {
-    throw new Error(
-      "That candidate's amount or currency could not be read safely from the source. It stays a source value and cannot be accepted.",
-    );
-  }
-
-  const activeScope = supabase
-    .from("cost_baselines")
-    .update({ state: "superseded", superseded_at: new Date().toISOString() })
-    .eq("project_id", projectId)
-    .eq("scope_level", observation.scope_level)
-    .eq("state", "accepted");
-  const { error: supersedeError } = await (observation.scope_label === null
-    ? activeScope.is("scope_label", null)
-    : activeScope.eq("scope_label", observation.scope_label));
-  if (supersedeError) throw new Error(supersedeError.message);
-
-  const { error: insertError } = await supabase.from("cost_baselines").insert({
-    project_id: projectId,
-    scope_level: observation.scope_level,
-    scope_label: observation.scope_label,
-    amount: observation.normalized_amount,
-    currency: observation.currency,
-    effective_date: effectiveDate,
-    observation_id: observation.id,
-    source_document_id: observation.document_id,
-    approved_by: user.id,
-    approval_note: note || null,
+  const { error } = await supabase.rpc("accept_cost_baseline", {
+    p_project_id: projectId,
+    p_observation_id: observationId,
+    p_effective_date: effectiveDate,
+    p_note: note || null,
   });
-  if (insertError) throw new Error(insertError.message);
+  if (error) throw new Error(error.message);
 
   revalidateAssurance(projectId);
 }
@@ -458,30 +422,18 @@ export async function acceptWbsMapping(formData: FormData): Promise<void> {
     throw new Error("A label mapped to itself is not a mapping; identical labels already match.");
   }
 
-  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanApproveBaseline(membership.role);
 
-  // One accepted canonical target per source label: replace any prior one.
-  const { error: clearError } = await supabase
-    .from("wbs_mappings")
-    .delete()
-    .eq("project_id", projectId)
-    .eq("source_label", sourceLabel)
-    .eq("state", "accepted");
-  if (clearError) throw new Error(clearError.message);
-
-  const { error: insertError } = await supabase.from("wbs_mappings").insert({
-    project_id: projectId,
-    source_label: sourceLabel,
-    canonical_label: canonicalLabel,
-    state: "accepted",
-    proposed_by_model: false,
-    note: note || null,
-    created_by: user.id,
-    accepted_by: user.id,
-    accepted_at: new Date().toISOString(),
+  const { data: mappingId, error } = await supabase.rpc("replace_assurance_mapping", {
+    p_project_id: projectId,
+    p_mapping_kind: "wbs",
+    p_source_label: sourceLabel,
+    p_canonical_label: canonicalLabel,
+    p_note: note || null,
   });
-  if (insertError) throw new Error(insertError.message);
+  if (error) throw new Error(error.message);
+  if (!mappingId) throw new Error("The mapping could not be saved.");
 
   revalidateAssurance(projectId);
 }
@@ -498,12 +450,13 @@ export async function removeWbsMapping(formData: FormData): Promise<void> {
   const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanApproveBaseline(membership.role);
 
-  const { error } = await supabase
-    .from("wbs_mappings")
-    .delete()
-    .eq("project_id", projectId)
-    .eq("id", mappingId);
+  const { data: removed, error } = await supabase.rpc("remove_assurance_mapping", {
+    p_project_id: projectId,
+    p_mapping_kind: "wbs",
+    p_mapping_id: mappingId,
+  });
   if (error) throw new Error(error.message);
+  if (removed === false) return;
 
   revalidateAssurance(projectId);
 }
@@ -526,30 +479,18 @@ export async function acceptMilestoneMapping(formData: FormData): Promise<void> 
     throw new Error("A label mapped to itself is not a mapping; identical labels already match.");
   }
 
-  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanApproveBaseline(membership.role);
 
-  // One accepted canonical target per source label: replace any prior one.
-  const { error: clearError } = await supabase
-    .from("milestone_mappings")
-    .delete()
-    .eq("project_id", projectId)
-    .eq("source_label", sourceLabel)
-    .eq("state", "accepted");
-  if (clearError) throw new Error(clearError.message);
-
-  const { error: insertError } = await supabase.from("milestone_mappings").insert({
-    project_id: projectId,
-    source_label: sourceLabel,
-    canonical_label: canonicalLabel,
-    state: "accepted",
-    proposed_by_model: false,
-    note: note || null,
-    created_by: user.id,
-    accepted_by: user.id,
-    accepted_at: new Date().toISOString(),
+  const { data: mappingId, error } = await supabase.rpc("replace_assurance_mapping", {
+    p_project_id: projectId,
+    p_mapping_kind: "milestone",
+    p_source_label: sourceLabel,
+    p_canonical_label: canonicalLabel,
+    p_note: note || null,
   });
-  if (insertError) throw new Error(insertError.message);
+  if (error) throw new Error(error.message);
+  if (!mappingId) throw new Error("The mapping could not be saved.");
 
   revalidateAssurance(projectId);
 }
@@ -566,12 +507,13 @@ export async function removeMilestoneMapping(formData: FormData): Promise<void> 
   const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanApproveBaseline(membership.role);
 
-  const { error } = await supabase
-    .from("milestone_mappings")
-    .delete()
-    .eq("project_id", projectId)
-    .eq("id", mappingId);
+  const { data: removed, error } = await supabase.rpc("remove_assurance_mapping", {
+    p_project_id: projectId,
+    p_mapping_kind: "milestone",
+    p_mapping_id: mappingId,
+  });
   if (error) throw new Error(error.message);
+  if (removed === false) return;
 
   revalidateAssurance(projectId);
 }
