@@ -2,17 +2,19 @@
 -- Runs inside one transaction that always rolls back. Requires pgTAP.
 --   psql -v ON_ERROR_STOP=1 -f supabase/tests/document_job_expired_retry.test.sql
 begin;
-select plan(22);
+select plan(24);
 
 insert into auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, created_at, updated_at)
 values
   ('50000000-0000-4000-8000-000000000001', 'authenticated', 'authenticated', 'expired-retry-manager@example.invalid', '', now(), '{}'::jsonb, now(), now()),
-  ('50000000-0000-4000-8000-000000000002', 'authenticated', 'authenticated', 'expired-retry-sponsor@example.invalid', '', now(), '{}'::jsonb, now(), now())
+  ('50000000-0000-4000-8000-000000000002', 'authenticated', 'authenticated', 'expired-retry-sponsor@example.invalid', '', now(), '{}'::jsonb, now(), now()),
+  ('50000000-0000-4000-8000-000000000005', 'authenticated', 'authenticated', 'expired-retry-reviewer@example.invalid', '', now(), '{}'::jsonb, now(), now())
 on conflict (id) do nothing;
 insert into public.profiles (id, full_name)
 values
   ('50000000-0000-4000-8000-000000000001', 'Expired retry manager'),
-  ('50000000-0000-4000-8000-000000000002', 'Expired retry sponsor')
+  ('50000000-0000-4000-8000-000000000002', 'Expired retry sponsor'),
+  ('50000000-0000-4000-8000-000000000005', 'Expired retry reviewer')
 on conflict (id) do nothing;
 insert into public.organizations (id, name)
 values ('50000000-0000-4000-8000-000000000003', 'Expired retry org')
@@ -23,7 +25,8 @@ on conflict (id) do nothing;
 insert into public.project_members (project_id, user_id, role)
 values
   ('50000000-0000-4000-8000-000000000004', '50000000-0000-4000-8000-000000000001', 'project_manager'),
-  ('50000000-0000-4000-8000-000000000004', '50000000-0000-4000-8000-000000000002', 'sponsor');
+  ('50000000-0000-4000-8000-000000000004', '50000000-0000-4000-8000-000000000002', 'sponsor'),
+  ('50000000-0000-4000-8000-000000000004', '50000000-0000-4000-8000-000000000005', 'pmo_reviewer');
 
 insert into public.documents (id, project_id, uploader_id, document_type, title, file_name, file_size, mime_type, storage_path, processing_status)
 values
@@ -89,6 +92,19 @@ select throws_ok(
   'P0001',
   'Not authorized to retry document processing.',
   'a project sponsor cannot requeue a job'
+);
+select set_config('request.jwt.claims', '{"sub":"50000000-0000-4000-8000-000000000005","role":"authenticated"}', true);
+select throws_ok(
+  $$select public.retry_expired_document_job('50000000-0000-4000-8000-000000000004', '50000000-0000-4000-8000-000000000011', '50000000-0000-4000-8000-000000000021', 'bbbbbbbb-0000-4000-8000-000000000002', '2999-01-01T00:00:00Z')$$,
+  'P0001',
+  'Not authorized to retry document processing.',
+  'a pmo_reviewer cannot call the expired-lease retry RPC directly'
+);
+select throws_ok(
+  $$select public.retry_document_job('50000000-0000-4000-8000-000000000004', '50000000-0000-4000-8000-000000000012')$$,
+  'P0001',
+  'Not authorized to retry document processing.',
+  'a pmo_reviewer cannot call the failed-job retry RPC directly'
 );
 select set_config('request.jwt.claims', '{"sub":"50000000-0000-4000-8000-000000000001","role":"authenticated"}', true);
 select throws_ok(

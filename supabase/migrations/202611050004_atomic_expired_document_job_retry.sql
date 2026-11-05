@@ -21,7 +21,13 @@ declare
   retry_error_message text;
   result_status public.document_processing_status;
 begin
-  if not public.can_upload_project_evidence(retry_project_id) then
+  perform 1
+  from public.project_members
+  where project_id = retry_project_id
+    and user_id = auth.uid()
+    and role in ('admin', 'pmc_consultant', 'project_manager')
+  for share;
+  if not found then
     raise exception 'Not authorized to retry document processing.';
   end if;
   if retry_project_id is null
@@ -148,7 +154,13 @@ declare
   new_job_id uuid;
   document_status public.document_processing_status;
 begin
-  if not public.can_upload_project_evidence(retry_project_id) then
+  perform 1
+  from public.project_members
+  where project_id = retry_project_id
+    and user_id = auth.uid()
+    and role in ('admin', 'pmc_consultant', 'project_manager')
+  for share;
+  if not found then
     raise exception 'Not authorized to retry document processing.';
   end if;
 
