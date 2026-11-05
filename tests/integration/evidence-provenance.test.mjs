@@ -1997,7 +1997,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
   assert.equal(cached.parserVersion, "document-parser/18");
-  assert.equal(cached.schemaVersion, "phase6-document-extraction/37");
+  assert.equal(cached.schemaVersion, "phase6-document-extraction/38");
 
   assert.equal(cached.status, "completed");
   assert.deepEqual(

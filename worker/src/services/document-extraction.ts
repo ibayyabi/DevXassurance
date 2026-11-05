@@ -414,7 +414,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/37";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/38";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -1316,6 +1316,41 @@ function citedPercentCellForClaim(
       valueMatches;
   });
   return matches.length === 1 ? matches[0] : null;
+}
+
+function citedPercentTextSupportsClaim(
+  group: ChunkGroup,
+  citation: SourceCitation | null | undefined,
+  rawValue: string | null | undefined,
+  percentValue: number,
+): boolean {
+  const cited = citedReference(group, citation);
+  if (!cited || !rawValue) return false;
+  const location = cited.reference.sourceLocation;
+  const sourceText = cited.reference.text;
+  const cellRangeStart = location?.cellRangeStart;
+  if (
+    location?.kind !== "xlsx" ||
+    typeof location.sheetName !== "string" ||
+    typeof location.rowStart !== "number" ||
+    location.rowStart !== location.rowEnd ||
+    typeof cellRangeStart !== "string" ||
+    cellRangeStart !== location.cellRangeEnd ||
+    typeof sourceText !== "string" ||
+    !sourceText.includes(rawValue.trim()) ||
+    !/\b(?:actual|planned|progress|complete|completed|completion|rencana|realisasi|kemajuan)\b/iu.test(sourceText) ||
+    /\b(?:risk|likelihood|probability|rating|impact|severity)\b/iu.test(sourceText) ||
+    /(?:=|;\s*formula cache:)/iu.test(sourceText) ||
+    !/(?:%|\bpercent(?:age)?\b|\bpersen\b)/iu.test(rawValue) ||
+    !citedTextSupportsNumericValue(rawValue, sourceText) ||
+    !citedTextSupportsNumericValue(`${percentValue}%`, sourceText)
+  ) {
+    return false;
+  }
+  return !(cited.chunk.formulaCells ?? []).some((formula) =>
+    formula.sheetName === location.sheetName &&
+    normalizedCellReference(formula.cellReference) === normalizedCellReference(cellRangeStart)
+  );
 }
 
 function normalizedCellReference(reference: string): string {
@@ -3566,6 +3601,9 @@ function validateGroupExtraction(
     const citedPercentCell = percentValue === null || percentValue === undefined
       ? null
       : citedPercentCellForClaim(group, citation, rawValue, percentValue);
+    const citedPercentText = percentValue === null || percentValue === undefined
+      ? false
+      : citedPercentTextSupportsClaim(group, citation, rawValue, percentValue);
     if (percentValue !== null && percentValue !== undefined && citation && rawValue) {
       const progressSemanticsError = citedProgressPercentSemanticsError(
         group,
@@ -3579,11 +3617,14 @@ function validateGroupExtraction(
     const citationIsXlsx = Boolean(
       citation && citedReference(group, citation)?.reference.sourceLocation?.kind === "xlsx",
     );
-    if (percentValue !== null && percentValue !== undefined && citationIsXlsx && !citedPercentCell) {
+    if (
+      percentValue !== null && percentValue !== undefined &&
+      citationIsXlsx && !citedPercentCell && !citedPercentText
+    ) {
       rowErrors.push(`${path}.percent has no explicit, source-backed percentage unit`);
     } else if (percentValue !== null && percentValue !== undefined && excerpt &&
       !citedTextSupportsNumericValue(`${percentValue}%`, rawValue ?? "") &&
-      !citedPercentCell) {
+      !citedPercentCell && !citedPercentText) {
       rowErrors.push(`${path}.percent does not match a percentage in the cited excerpt`);
     }
     if (
