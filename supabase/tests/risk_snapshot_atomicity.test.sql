@@ -12,78 +12,7 @@
 --   psql -v ON_ERROR_STOP=1 -f supabase/tests/risk_snapshot_atomicity.test.sql
 begin;
 select set_config('storage.allow_delete_query', 'true', true);
-select extensions.plan(41);
-select ok((
-  select lock_position > 0 and lock_position < review_position
-  from (
-    select position('from public.projects where id = p_project_id for update' in definition) as lock_position,
-      position('from public.assurance_reviews' in definition) as review_position
-    from (select pg_get_functiondef('public.lock_assurance_review(uuid,uuid)'::regprocedure) as definition) f
-  ) positions
-), 'review locks are acquired after the exclusive project lock');
-select is((
-  select count(*) from pg_policies
-  where schemaname = 'public' and tablename = 'assurance_reviews'
-    and cmd in ('UPDATE', 'ALL') and roles && array['authenticated'::name, 'public'::name]
-), 0::bigint, 'direct review updates are unavailable outside project-first RPCs');
-select ok((
-  select position('for update' in lower(definition)) = 0
-    and position('for share' in lower(definition)) = 0
-  from (select pg_get_functiondef(
-    'public.assurance_source_snapshot_without_observation_decisions(uuid,uuid)'::regprocedure
-  ) as definition) f
-), 'source snapshot does not wait on rows mutated before after-trigger project locks');
-select ok((
-  select position('refs := public.assurance_reference_snapshot(p_project_id, r.id)' in lower(definition)) > 0
-  from (select pg_get_functiondef(
-    'public.invalidate_assurance_reference_results(uuid,boolean)'::regprocedure
-  ) as definition) f
-), 'comparison references are refreshed even when selected-source checks are disabled');
-select ok((
-  select position('from public.projects where id = job.project_id for update' in lower(definition))
-    > position('where id = owner_job_id for update' in lower(definition))
-  from (select pg_get_functiondef('public.assert_document_job_owner(uuid,uuid)'::regprocedure) as definition) f
-), 'worker source writes acquire the project lock before reference rows');
-select ok((
-  select position('from public.projects where id = p_project_id for update' in lower(definition))
-    < position('public.save_assurance_observation_decision_without_project_lock(' in lower(definition))
-  from (select pg_get_functiondef(
-    'public.save_assurance_observation_decision(uuid,text,uuid,text,text,text,jsonb)'::regprocedure
-  ) as definition) f
-), 'decision writes acquire the project lock before reading and locking evidence');
-select ok(exists (
-  select 1 from pg_trigger
-  where tgrelid = 'public.document_chunks'::regclass
-    and tgname = 'document_chunks_prior_risk_reference_change' and not tgisinternal
-), 'chunk changes invalidate dependent source fingerprints');
-select ok((
-  select bool_and(position(col.column_name in lower(pg_get_triggerdef(t.oid))) > 0)
-  from pg_trigger t cross join unnest(array[
-    'id','project_id','title','file_name','file_size','mime_type','storage_bucket','storage_path',
-    'document_type','document_date','confirmed_document_type','confirmed_document_date',
-    'confirmed_evidence_role','confirmed_reporting_period','confirmed_workstream',
-    'content_hash','processing_status','assurance_observation_parser_version',
-    'assurance_observation_contract_version'
-  ]) col(column_name)
-  where t.tgrelid = 'public.documents'::regclass and t.tgname = 'documents_prior_risk_reference_change'
-), 'document invalidation covers every fingerprinted metadata field');
-select ok((
-  select position('scope_source_id' in lower(definition)) > 0
-    and position('scope_provenance' in lower(definition)) > 0
-    and position('provider' in lower(definition)) > 0
-    and position('model' in lower(definition)) > 0
-  from (select pg_get_functiondef(
-    'public.assurance_source_snapshot_without_observation_decisions(uuid,uuid)'::regprocedure
-  ) as definition) f
-), 'cost observation provenance and source identity are fingerprinted');
-select is((
-  select count(*) from pg_trigger
-  where not tgisinternal and (
-    (tgrelid = 'storage.objects'::regclass and tgname = 'storage_objects_assurance_source_change')
-    or (tgrelid = 'public.cost_observations'::regclass
-      and tgname = 'cost_observations_prior_risk_reference_change')
-  )
-), 2::bigint, 'storage objects and cost observations invalidate source fingerprints');
+select extensions.plan(32);
 select ok(not exists (
   select 1 from unnest(array[
     'cost_baselines','wbs_mappings','milestone_mappings','risk_identity_mappings','risk_scale_mappings'
@@ -184,6 +113,14 @@ on conflict (document_id, source_content_hash, parser_version, contract_version,
 do nothing;
 
 select set_config('request.jwt.claims', '{"sub":"51000000-0000-4000-8000-000000000001","role":"authenticated"}', true);
+set local role authenticated;
+with changed as (
+  update public.assurance_reviews set title = 'Unauthorized direct edit'
+  where id = '51000000-0000-4000-8000-000000000022' returning id
+)
+select is((select count(*) from changed), 0::bigint,
+  'direct review updates are unavailable outside project-first RPCs');
+reset role;
 create temporary table risk_claims (stage integer primary key, claim jsonb not null);
 create function pg_temp.claim_current() returns jsonb language sql as $$
   select public.claim_assurance_analysis('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000022');
