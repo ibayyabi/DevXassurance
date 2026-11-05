@@ -3545,7 +3545,7 @@ function validateGroupExtraction(
       ...(scopeEvidence ? { scope_provenance: scopeEvidence } : {}),
       ...(scopeEvidence && scopeSourceId ? { scope_source_id: scopeSourceId } : {}),
       period_label: periodLabel!,
-      period_basis: progressPeriodBasisForCell(citedPercentCell, citation, periodLabel, asOfDate),
+      period_basis: progressPeriodBasisForCell(citedPercentCell, citation, periodLabel ?? null, asOfDate ?? null),
       as_of_date: asOfDate ?? null,
       evidence_chunk_index: citation!.evidence_chunk_index,
       source_location: citation!.source_location,
