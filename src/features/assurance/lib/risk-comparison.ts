@@ -254,10 +254,15 @@ export function buildRiskComparison(input: {
   };
   const previousCutoffGroup = groupCutoff(previousSnapshots);
   const currentCutoffGroup = groupCutoff(currentSnapshots);
-  const canonicals = [...new Set([...previous.keys(), ...current.keys()])]
-    .sort((first, second) => first.localeCompare(second));
+  const canonicals = [...new Set([...previous.keys(), ...current.keys()])];
   const previousHasUnidentified = previousSnapshots.some((snapshot) => snapshot.sourceId === null);
-  const items: RiskItemFinding[] = [];
+  const previousOnlyCount = canonicals.filter(
+    (canonical) => previous.has(canonical) && !current.has(canonical),
+  ).length;
+  const currentOnlyCount = canonicals.filter(
+    (canonical) => current.has(canonical) && !previous.has(canonical),
+  ).length;
+  const unmatchedIdsOnBothSides = previousOnlyCount > 0 && currentOnlyCount > 0;
 
   const coverageIncomplete = hasPreviousSnapshot &&
     (!previousCoverageComplete || !currentCoverageComplete);
@@ -280,6 +285,11 @@ export function buildRiskComparison(input: {
       items.push({ ...base, changeType: "period_not_comparable", ratingDelta: null });
       continue;
     }
+    if (unmatchedIdsOnBothSides && (previousItem === null) !== (currentItem === null)) {
+      items.push({ ...base, changeType: "identity_not_comparable", ratingDelta: null });
+      continue;
+    }
+
 
     if (previousItem && currentItem) {
       if (relation !== "comparable") {

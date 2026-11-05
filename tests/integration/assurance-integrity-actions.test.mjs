@@ -42,9 +42,12 @@ function fixture(options = {}) {
     rpc: async (name, input) => {
       calls.push({name,input});
       if (options.rpc) { const override = options.rpc(name,input); if (override) return override; }
-      if (name === 'claim_assurance_analysis') return {data:options.claim??{
-        attempt_id:'attempt-1',sources,progress_decisions:[],
-      }};
+      if (name === 'claim_assurance_analysis') {
+        const claim=options.claim??{attempt_id:'attempt-1',sources,observation_decisions:[]};
+        return {data:{...claim,prior_risk_snapshot:claim.prior_risk_snapshot??{
+          current_cutoff:'2026-10-31',review:null,sources:[],observation_decisions:[],gap_reason:'no_prior_current_review',
+        }}};
+      }
       if (input.p_operation === 'context') return {data:context};
       if (input.p_operation === 'export_check') return {data:{attempt_id:'attempt-1',report_fingerprint:'content-1',preview:{
         report_type:'assurance_report',reporting_period:'October 2026',original_sections:{project_health:'Saved content'},

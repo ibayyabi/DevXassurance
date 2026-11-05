@@ -79,10 +79,11 @@ flowchart TD
 
 **Ticket 05 → 06 status/provenance handoff (claimed; deterministic tests authored, not run):**
 - Read `risk_item_findings[]` with `previous`/`current` snapshots and `changeType`; citations carry document ID/title, content hash, excerpt, source location, cutoff, and reviewer decision/source values.
-- `risk_comparison_provenance` identifies contract `pmo_risk_comparison_v2`, mapping `referenceFingerprint`/versions, selected earlier review, source versions, decision summary, and coverage/cutoff completeness.
-- Previous evidence is the nearest earlier completed review's project-scoped `current` role, never the approved baseline; only version-matched observations and decisions participate.
-- Missing prior review, incomplete coverage, absent/ambiguous/conflicting cutoffs, or unknown identity/scale must remain visible gaps; no inferred closure or composite Risk score.
-- W5 Alarm IDs and W6 changes are shown only from validated cited source rows; do not claim W7 outcomes absent validated source evidence.
+- `risk_comparison_provenance` identifies `pmo_risk_comparison_v2`, mapping/reference fingerprint and versions, selected earlier review, source versions, decision summary, and coverage/cutoff completeness.
+- The atomic claim returns `prior_risk_snapshot` (nearest earlier project-scoped `current` role, versions, observations, risk coverage, and matching decisions); the client must not re-query previous sources after claim.
+- Prior selection/evidence/decision changes and a newly nearer eligible review invalidate dependent in-flight or published analysis; project scoping and 03 decision fencing remain in force.
+- Missing prior review, incomplete coverage, absent/ambiguous/conflicting cutoffs, or unknown identity/scale remain visible gaps; no inferred closure or composite Risk score.
+- Migration order: `202611050001_assurance_observation_decisions.sql` → ticket 04 `202611050002_progress_rag_rules.sql` → `202611050003_risk_snapshot_atomicity.sql`; do not run/deploy from this ticket.
 
 ### 06 — Overview dan navigasi review — blocker: 04, 05
 

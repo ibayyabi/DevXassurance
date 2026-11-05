@@ -67,15 +67,7 @@ function fixture(options = {}) {
     source("base", "baseline", "Baseline W4", "a".repeat(64), options.baselineObservations ?? [], allProcessed),
     source("current", "current", "Current W5", "b".repeat(64), options.currentObservations ?? [], allProcessed),
   ];
-  const previousRisk = options.previousRisk ?? {};
-  const tables = {
-    assurance_reviews: previousRisk.reviews ?? [],
-    assurance_review_documents: previousRisk.links ?? [],
-    documents: previousRisk.documents ?? [],
-    assurance_observations: previousRisk.observations ?? [],
-    assurance_observation_coverage: previousRisk.coverage ?? [],
-    assurance_observation_decisions: previousRisk.decisions ?? [],
-  };
+  const tables = {};
   const supabase = {
     rpc: async (name, input) => {
       calls.push({ name, input });
@@ -84,10 +76,17 @@ function fixture(options = {}) {
         if (override) return override;
       }
       if (name === "claim_assurance_analysis") {
-        return { data: options.claim ?? {
+        const claim = options.claim ?? {
           attempt_id: "attempt-1",
           sources,
           observation_decisions: options.decisions ?? [],
+        };
+        return { data: {
+          ...claim,
+          prior_risk_snapshot: claim.prior_risk_snapshot ?? {
+            current_cutoff: "2026-10-16", review: null, sources: [],
+            observation_decisions: [], gap_reason: "no_prior_current_review",
+          },
         } };
       }
       return { data: true, error: null };
@@ -576,27 +575,16 @@ test("a corrected risk rating changes the actual risk change detection", async (
     project_id: "project-1", document_id: "prior-doc", source_content_hash: previousHash,
     parser_version: "parser/1", contract_version: "contract/1", observation_fingerprint: "prior-fp",
   };
-  const previousRisk = {
-    reviews: [{
+  const priorRiskSnapshot = {
+    current_cutoff: "2026-10-16",
+    review: {
       id: "review-prior", project_id: "project-1", reporting_period: "2026-10-09",
-      cutoff_precision: "date", status: "findings_ready",
-    }],
-    links: [{
-      project_id: "project-1", review_id: "review-prior",
-      document_id: "prior-doc", evidence_role: "current",
-    }],
-    documents: [{
-      id: "prior-doc", project_id: "project-1", title: "Prior W4 risk report",
-      content_hash: previousHash, assurance_observation_parser_version: "parser/1",
-      assurance_observation_contract_version: "contract/1", processing_status: "completed",
-    }],
-    observations: [previousObservation],
-    coverage: [{
-      project_id: "project-1", document_id: "prior-doc", source_content_hash: previousHash,
-      parser_version: "parser/1", contract_version: "contract/1", domain: "risk",
-      state: "processed", total_groups: 1, processed_groups: 1, reason: null,
-    }],
-    decisions: [],
+      cutoff_precision: "date", status: "eligible",
+    },
+    sources: [source("prior-doc", "current", "Prior W4 risk report", previousHash,
+      [previousObservation], [coverageRow("risk", "processed")])],
+    observation_decisions: [],
+    gap_reason: null,
   };
   const sources = [
     source("base", "baseline", "Baseline W4", "a".repeat(64), [
@@ -608,14 +596,13 @@ test("a corrected risk rating changes the actual risk change detection", async (
   ];
   const corrected = fixture({
     claim: {
-      attempt_id: "attempt-1", sources,
+      attempt_id: "attempt-1", sources, prior_risk_snapshot: priorRiskSnapshot,
       observation_decisions: [
         { id: "d1", target_type: "assurance", document_id: "current", observation_fingerprint: "f".repeat(64),
           decision: "corrected", corrected_observation: { rating_label: "High" }, reason: "peringkat sumber salah baca",
           decided_by: "user-1", decided_at: "2026-11-05T00:00:00Z", observation_ids: ["r-cur"] },
       ],
     },
-    previousRisk,
   });
   await corrected.assurance.runAssuranceAnalysis(form());
   const publication = corrected.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
@@ -628,8 +615,10 @@ test("a corrected risk rating changes the actual risk change detection", async (
     "a corrected high rating must not leave the risk assessed as on track");
 
   const raw = fixture({
-    claim: { attempt_id: "attempt-1", sources, observation_decisions: [] },
-    previousRisk,
+    claim: {
+      attempt_id: "attempt-1", sources, observation_decisions: [],
+      prior_risk_snapshot: priorRiskSnapshot,
+    },
   });
   await raw.assurance.runAssuranceAnalysis(form());
   const rawPublication = raw.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");

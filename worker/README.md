@@ -45,11 +45,16 @@ The same grouped extraction collects source-backed milestone, progress, and risk
 
 #### Risk snapshots across cut-offs
 
-For each analysis, the previous risk snapshot is fetched from the nearest
-strictly earlier completed review (`findings_ready`, `report_draft`, or
-`approved`) in the same project, using only that review's `current`-role
-documents. The approved project baseline is never a previous snapshot. Review
-cut-off selects the earlier review; it is not copied onto a risk observation.
+`claim_assurance_analysis` selects and returns the previous risk snapshot in its
+atomic `prior_risk_snapshot` payload: the nearest strictly earlier eligible
+review in the same project, using only that review's `current`-role documents.
+The approved project baseline is never substituted. The combined reference
+fingerprint captures review selection, linked document versions, risk
+observations, coverage, and matching reviewer decisions; claim, finish,
+currentness, and invalidation use the same snapshot. The application performs
+no post-claim previous-source reads. Ticket 04's approved progress rule and
+reference keys remain part of that same fingerprint and claim response.
+
 Observation, coverage, and reviewer decision rows must match each document's
 project, content hash, parser version, and contract version. Accepted and
 corrected decisions are applied with attribution; rejected and stale-version

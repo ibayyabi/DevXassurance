@@ -92,7 +92,7 @@ const source = (document_id, role, title, hash, assurance_observations, coverage
   assurance_observation_coverage: coverage,
 });
 const observation = (id, domain, observation_type, value, excerpt = "verbatim excerpt") => ({
-  id, domain, observation_type, observation,
+  id, domain, observation_type, observation: value,
   evidence_chunk_index: 0, excerpt, page_number: 3, section_label: "Weekly Report",
   source_location: { sheet_name: "Weekly Report", cell_reference: "D7" },
 });
@@ -103,20 +103,18 @@ const riskObservation = (id, riskId, extra = {}) =>
     ...extra,
   });
 
-async function runRiskPipeline({ sources, observationDecisions = [], database = {} }) {
+async function runRiskPipeline({
+  sources,
+  observationDecisions = [],
+  priorRiskSnapshot = {
+    current_cutoff: "2026-10-23", review: null, sources: [],
+    observation_decisions: [], gap_reason: "no_prior_current_review",
+  },
+}) {
   const calls = [];
   const queries = [];
-  const tables = {
-    assurance_reviews: [
-      { id: "review-current", project_id: "project-1", reporting_period: "2026-10-23", cutoff_precision: "date" },
-      ...(database.reviews ?? []),
-    ],
-    assurance_review_documents: database.links ?? [],
-    documents: database.documents ?? [],
-    assurance_observations: database.observations ?? [],
-    assurance_observation_coverage: database.coverage ?? [],
-    assurance_observation_decisions: database.decisions ?? [],
-  };
+  const tables = {};
+
   const supabase = {
     rpc: async (name, input) => {
       calls.push({ name, input });
@@ -125,6 +123,7 @@ async function runRiskPipeline({ sources, observationDecisions = [], database = 
           attempt_id: "attempt-1", sources, observation_decisions: observationDecisions,
           reference_fingerprint: "reference-fingerprint-1",
           reference_versions: { risk_identity_mappings: 2, risk_scale_mappings: 1 },
+          prior_risk_snapshot: priorRiskSnapshot,
         } };
       }
       return { data: true, error: null };
@@ -324,15 +323,27 @@ test("a proposed mapping is not applied; an accepted one groups the IDs", () => 
   assert.equal(itemOf(acceptedMapping, "R-SB01-001").changeType, "unchanged");
 });
 
-test("new is ID-specific when another prior risk is simply not reported", () => {
+test("unmatched IDs on both sides remain identity gaps while exact IDs compare", () => {
   const comparison = buildRiskComparison({
     previousSnapshots: [snapshot("R-SB01-001", W5), snapshot("R-SB01-002", W5)],
     currentSnapshots: [snapshot("R-SB01-001", W6), snapshot("R-SB01-003", W6)],
     identityMappings: [],
     scaleMappings: [],
   });
+  assert.equal(itemOf(comparison, "R-SB01-001").changeType, "unchanged");
+  assert.equal(itemOf(comparison, "R-SB01-002").changeType, "identity_not_comparable");
+  assert.equal(itemOf(comparison, "R-SB01-003").changeType, "identity_not_comparable");
+});
+
+test("new is ID-specific when all previous IDs are accounted for", () => {
+  const comparison = buildRiskComparison({
+    previousSnapshots: [snapshot("R-SB01-001", W5), snapshot("R-SB01-002", W5)],
+    currentSnapshots: [snapshot("R-SB01-001", W6), snapshot("R-SB01-002", W6), snapshot("R-SB01-003", W6)],
+    identityMappings: [],
+    scaleMappings: [],
+  });
   assert.equal(itemOf(comparison, "R-SB01-003").changeType, "new");
-  assert.equal(itemOf(comparison, "R-SB01-002").changeType, "not_reported");
+  assert.equal(itemOf(comparison, "R-SB01-002").changeType, "unchanged");
   assert.equal(itemOf(comparison, "R-SB01-001").changeType, "unchanged");
 });
 
@@ -474,6 +485,9 @@ test("analysis uses the prior review's current-role source, version, and reviewe
       riskObservation("current-r1", "R-SB01-001", {
         as_of_date: "2026-10-23", rating_label: "High", rating_value: 3,
       }),
+      riskObservation("current-r2", "R-SB01-002", {
+        as_of_date: "2026-10-23", rating_label: "Medium", rating_value: 2,
+      }),
       riskObservation("current-r3", "R-SB01-003", {
         as_of_date: "2026-10-23", rating_label: "Medium", rating_value: 2,
       }),
@@ -482,16 +496,46 @@ test("analysis uses the prior review's current-role source, version, and reviewe
       }),
     ]),
   ];
-  const previousReview = {
-    id: "review-previous", project_id: "project-1",
-    reporting_period: "2026-10-16", cutoff_precision: "date", status: "findings_ready",
-  };
-  const newerDraftReview = {
-    id: "review-newer-draft", project_id: "project-1",
-    reporting_period: "2026-10-20", cutoff_precision: "date", status: "draft",
+  const priorRiskSnapshot = {
+    current_cutoff: "2026-10-23",
+    review: {
+      id: "review-previous", project_id: "project-1",
+      reporting_period: "2026-10-16", cutoff_precision: "date", status: "eligible",
+    },
+    sources: [source("previous-doc", "current", "W5 Alarm report", previousHash, [
+      previousObservation("previous-r1", "R-SB01-001", "previous-fp", {
+        rating_label: "Low", rating_value: 1,
+      }),
+      previousObservation("previous-r2", "R-SB01-002", "previous-r2-fp", {
+        rating_label: "High", rating_value: 5,
+      }),
+      previousObservation("previous-rejected", "R-REJECTED", "old-rejected-fp"),
+    ], [coverageRow("risk", "processed")])],
+    observation_decisions: [
+      {
+        id: "previous-correction", project_id: "project-1", target_type: "assurance",
+        document_id: "previous-doc", source_content_hash: previousHash,
+        parser_version: "parser/1", contract_version: "contract/1",
+        observation_fingerprint: "previous-fp", decision: "corrected",
+        corrected_observation: { rating_value: 2 }, reason: "Peringkat dikoreksi reviewer sebelumnya",
+        decided_by: "reviewer-previous", decided_at: "2026-11-04T01:00:00Z",
+        observation_ids: ["previous-r1"],
+      },
+      {
+        id: "previous-rejection", project_id: "project-1", target_type: "assurance",
+        document_id: "previous-doc", source_content_hash: previousHash,
+        parser_version: "parser/1", contract_version: "contract/1",
+        observation_fingerprint: "old-rejected-fp", decision: "rejected",
+        corrected_observation: null, reason: "ID tidak terdukung",
+        decided_by: "reviewer-previous", decided_at: "2026-11-04T01:01:00Z",
+        observation_ids: ["previous-rejected"],
+      },
+    ],
+    gap_reason: null,
   };
   const result = await runRiskPipeline({
     sources,
+    priorRiskSnapshot,
     observationDecisions: [
       {
         id: "current-accepted", target_type: "assurance", document_id: "current-doc",
@@ -507,57 +551,6 @@ test("analysis uses the prior review's current-role source, version, and reviewe
         decided_at: "2026-11-05T01:01:00Z", observation_ids: ["current-rejected"],
       },
     ],
-    database: {
-      reviews: [previousReview, newerDraftReview],
-      links: [
-        { project_id: "project-1", review_id: "review-previous", document_id: "previous-doc", evidence_role: "current" },
-        { project_id: "project-1", review_id: "review-newer-draft", document_id: "draft-doc", evidence_role: "current" },
-        { project_id: "project-1", review_id: "review-current", document_id: "current-doc", evidence_role: "current" },
-        { project_id: "project-1", review_id: "review-current", document_id: "approved-baseline-doc", evidence_role: "baseline" },
-      ],
-      documents: [{
-        id: "previous-doc", project_id: "project-1", title: "W5 Alarm report",
-        content_hash: previousHash, assurance_observation_parser_version: "parser/1",
-        assurance_observation_contract_version: "contract/1", processing_status: "completed",
-      }],
-      observations: [
-        previousObservation("previous-r1", "R-SB01-001", "previous-fp", {
-          rating_label: "Low", rating_value: 1,
-        }),
-        previousObservation("previous-r2", "R-SB01-002", "previous-r2-fp", {
-          rating_label: "High", rating_value: 5,
-        }),
-        previousObservation("previous-rejected", "R-REJECTED", "old-rejected-fp"),
-        {
-          ...previousObservation("stale-r9", "R-STALE", "stale-fp"),
-          source_content_hash: "d".repeat(64),
-        },
-      ],
-      coverage: [{
-        project_id: "project-1", document_id: "previous-doc",
-        source_content_hash: previousHash, parser_version: "parser/1",
-        contract_version: "contract/1", domain: "risk", state: "processed",
-        total_groups: 1, processed_groups: 1, reason: null,
-      }],
-      decisions: [
-        {
-          id: "previous-correction", project_id: "project-1", target_type: "assurance",
-          document_id: "previous-doc", source_content_hash: previousHash,
-          parser_version: "parser/1", contract_version: "contract/1",
-          observation_fingerprint: "previous-fp", decision: "corrected",
-          corrected_observation: { rating_value: 2 }, reason: "Peringkat dikoreksi reviewer sebelumnya",
-          decided_by: "reviewer-previous", decided_at: "2026-11-04T01:00:00Z",
-        },
-        {
-          id: "previous-rejection", project_id: "project-1", target_type: "assurance",
-          document_id: "previous-doc", source_content_hash: previousHash,
-          parser_version: "parser/1", contract_version: "contract/1",
-          observation_fingerprint: "old-rejected-fp", decision: "rejected",
-          corrected_observation: null, reason: "ID tidak terdukung",
-          decided_by: "reviewer-previous", decided_at: "2026-11-04T01:01:00Z",
-        },
-      ],
-    },
   });
 
   const publication = result.calls.find((call) =>
@@ -576,10 +569,12 @@ test("analysis uses the prior review's current-role source, version, and reviewe
   assert.equal(alarm.current.reviewDecision.decidedBy, "reviewer-current");
 
   const alarm002 = metadata.risk_item_findings.find((item) => item.canonicalId === "R-SB01-002");
-  assert.equal(alarm002.changeType, "not_reported");
+  assert.equal(alarm002.changeType, "unchanged");
   assert.equal(alarm002.previous.sourceRef.documentId, "previous-doc");
   assert.equal(alarm002.previous.sourceRef.sourceContentHash, previousHash);
   assert.equal(alarm002.previous.asOfDate, "2026-10-16");
+  assert.equal(alarm002.current.sourceRef.documentId, "current-doc");
+  assert.equal(alarm002.current.sourceRef.sourceContentHash, currentHash);
 
   const alarm003 = metadata.risk_item_findings.find((item) => item.canonicalId === "R-SB01-003");
   assert.equal(alarm003.changeType, "new");
@@ -608,18 +603,15 @@ test("analysis uses the prior review's current-role source, version, and reviewe
     assert.ok(mappingRead.filters.some(([kind, key, value]) =>
       kind === "eq" && key === "state" && value === "accepted"));
   }
-  const previousReviewQuery = result.queries.find((query) =>
-    query.table === "assurance_reviews" && !query.filters.some(([, key]) => key === "id"));
-  assert.ok(previousReviewQuery.filters.some(([kind, key, value]) =>
-    kind === "eq" && key === "project_id" && value === "project-1"));
-  const previousLinksQuery = result.queries.find((query) => query.table === "assurance_review_documents");
-  assert.ok(previousLinksQuery.filters.some(([kind, key, value]) =>
-    kind === "eq" && key === "evidence_role" && value === "current"));
-  const previousObservationQuery = result.queries.find((query) => query.table === "assurance_observations");
-  assert.ok(previousObservationQuery.filters.some(([kind, key, value]) =>
-    kind === "eq" && key === "project_id" && value === "project-1"));
-  assert.ok(previousObservationQuery.filters.some(([kind, key, value]) =>
-    kind === "in" && key === "document_id" && value.includes("previous-doc")));
+  assert.deepEqual(
+    result.queries.filter((query) => [
+      "assurance_reviews", "assurance_review_documents", "documents",
+      "assurance_observations", "assurance_observation_coverage",
+      "assurance_observation_decisions",
+    ].includes(query.table)),
+    [],
+    "previous review selection and all risk evidence arrive inside the atomic claim",
+  );
   const mappingWrites = result.calls.filter((call) => call.name === "replace_assurance_mapping");
   assert.deepEqual(mappingWrites, [], "analysis never writes or auto-accepts a mapping");
 });
