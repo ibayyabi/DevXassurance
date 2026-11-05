@@ -539,6 +539,46 @@ type ProgressStatusEntry = {
   unspecified: ProgressObservation[];
 };
 
+function sameProgressVarianceFormulaRow(
+  planned: ProgressObservation,
+  actual: ProgressObservation,
+): boolean {
+  const plannedRef = planned.sourceRef;
+  const actualRef = actual.sourceRef;
+  const plannedRow = plannedRef?.sourceLocation;
+  const actualRow = actualRef?.sourceLocation;
+  const plannedCell = plannedRef?.valueSourceLocation;
+  const actualCell = actualRef?.valueSourceLocation;
+  return Boolean(
+    plannedRef &&
+      actualRef &&
+      plannedRef.documentId === actualRef.documentId &&
+      plannedRef.sourceContentHash &&
+      plannedRef.sourceContentHash === actualRef.sourceContentHash &&
+      plannedRow?.kind === "xlsx" &&
+      actualRow?.kind === "xlsx" &&
+      typeof plannedRow.sheetName === "string" &&
+      plannedRow.sheetName === actualRow.sheetName &&
+      typeof plannedRow.rowStart === "number" &&
+      plannedRow.rowStart === plannedRow.rowEnd &&
+      plannedRow.rowStart === actualRow.rowStart &&
+      plannedRow.rowStart === actualRow.rowEnd &&
+      plannedCell?.kind === "xlsx" &&
+      actualCell?.kind === "xlsx" &&
+      plannedCell.sheetName === plannedRow.sheetName &&
+      actualCell.sheetName === plannedRow.sheetName &&
+      plannedCell.rowStart === plannedRow.rowStart &&
+      plannedCell.rowEnd === plannedRow.rowStart &&
+      actualCell.rowStart === plannedRow.rowStart &&
+      actualCell.rowEnd === plannedRow.rowStart &&
+      typeof plannedCell.cellRangeStart === "string" &&
+      plannedCell.cellRangeStart === plannedCell.cellRangeEnd &&
+      typeof actualCell.cellRangeStart === "string" &&
+      actualCell.cellRangeStart === actualCell.cellRangeEnd &&
+      plannedCell.cellRangeStart !== actualCell.cellRangeStart,
+  );
+}
+
 /**
  * Computed progress RAG is an actual-minus-planned variance for one proven
  * scope, exact current cut-off, equal source period labels, and matching proven
@@ -598,13 +638,18 @@ export function buildProgressComputedStatuses(input: {
     const actualConflict = entry.actual.length > 1;
     const planned = entry.planned.length === 1 ? entry.planned[0] : null;
     const actual = entry.actual.length === 1 ? entry.actual[0] : null;
+    const basisPairProven = Boolean(
+      planned?.periodBasis &&
+      actual?.periodBasis &&
+      planned.periodBasis === actual.periodBasis &&
+      (planned.periodBasis !== "paired_variance_formula" ||
+        sameProgressVarianceFormulaRow(planned, actual)),
+    );
     const periodComparable = Boolean(
       planned?.periodLabel &&
       actual?.periodLabel &&
       planned.periodLabel === actual.periodLabel &&
-      planned.periodBasis &&
-      actual.periodBasis &&
-      planned.periodBasis === actual.periodBasis,
+      basisPairProven,
     );
     const variancePercentPoints =
       periodComparable &&
@@ -638,7 +683,9 @@ export function buildProgressComputedStatuses(input: {
                           ? "unproven_measurement_basis"
                           : planned.periodBasis !== actual.periodBasis
                             ? "measurement_basis_mismatch"
-                            : null;
+                            : !basisPairProven
+                              ? "unproven_measurement_basis"
+                              : null;
     const condition = reason || variancePercentPoints === null
       ? "unassessed"
       : variancePercentPoints < (redBelow as number)

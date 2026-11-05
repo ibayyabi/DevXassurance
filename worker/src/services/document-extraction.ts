@@ -414,7 +414,7 @@ class TransientProviderError extends Error {}
 
 // Bump whenever validation semantics change: cached extraction groups are keyed
 // by this version, so rows validated under older rules are never reused.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/36";
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/37";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -1318,11 +1318,110 @@ function citedPercentCellForClaim(
   return matches.length === 1 ? matches[0] : null;
 }
 
-function progressPeriodBasisForCell(
-  cell: ParsedSourceCell | null,
+function normalizedCellReference(reference: string): string {
+  return reference.replace(/\$/gu, "").toUpperCase();
+}
+
+function progressVarianceOperands(
+  formula: string,
+): { actualCell: string; plannedCell: string } | null {
+  const expression = formula.replace(/^\s*=/u, "").replace(/\s+/gu, "");
+  const reference = "\\$?[A-Z]{1,3}\\$?\\d+";
+  const direct = expression.match(new RegExp(`^(${reference})-(${reference})$`, "iu"));
+  if (direct) return { actualCell: direct[1], plannedCell: direct[2] };
+  const guarded = expression.match(
+    new RegExp(`^IF\\((${reference})="","",(${reference})-(${reference})\\)$`, "iu"),
+  );
+  if (!guarded || normalizedCellReference(guarded[1]) !== normalizedCellReference(guarded[2])) {
+    return null;
+  }
+  return { actualCell: guarded[2], plannedCell: guarded[3] };
+}
+
+function progressHeaderProvesPercentKind(
+  cell: ParsedSourceCell,
+  kind: "actual" | "planned",
+): boolean {
+  const label = cell.label ?? "";
+  return progressMeasureKindFromCue(label) === kind &&
+    /(?:%|\bpercent(?:age)?\b|\bpersen\b)/iu.test(label) &&
+    !/\b(?:risk|likelihood|probability|rating|impact|severity)\b/iu.test(label);
+}
+
+/** Formula syntax proves only the pair; cached formula values are never read. */
+function progressVarianceFormulaSupportsCell(
+  group: ChunkGroup,
   citation: SourceCitation | null | undefined,
-  periodLabel: string | null,
-  asOfDate: string | null,
+  citedCell: ParsedSourceCell,
+): boolean {
+  const cited = citedReference(group, citation);
+  const location = cited?.reference.sourceLocation;
+  if (
+    location?.kind !== "xlsx" ||
+    location.sheetName !== citedCell.sheetName ||
+    location.rowStart !== citedCell.row ||
+    location.rowEnd !== citedCell.row
+  ) {
+    return false;
+  }
+  const rowCells = cited.reference.rowCells ??
+    (cited.reference.cell ? [cited.reference.cell] : []);
+  const currentCell = normalizedCellReference(citedCell.cell);
+  const currentKind = progressMeasureKindFromCue(citedCell.label);
+  if (!rowCells.some((cell) =>
+    cell.sheetName === citedCell.sheetName &&
+    cell.row === citedCell.row &&
+    normalizedCellReference(cell.cell) === currentCell
+  )) {
+    return false;
+  }
+
+  return (cited.chunk.formulaCells ?? []).some((formulaCell) => {
+    if (
+      formulaCell.sheetName !== citedCell.sheetName ||
+      formulaCell.rowStart !== citedCell.row ||
+      formulaCell.rowEnd !== citedCell.row
+    ) {
+      return false;
+    }
+    const operands = progressVarianceOperands(formulaCell.formula);
+    if (!operands) return false;
+    const actualRef = normalizedCellReference(operands.actualCell);
+    const plannedRef = normalizedCellReference(operands.plannedCell);
+    if (actualRef === plannedRef) return false;
+    const actual = rowCells.find((cell) =>
+      cell.sheetName === citedCell.sheetName &&
+      cell.row === citedCell.row && normalizedCellReference(cell.cell) === actualRef
+    );
+    const planned = rowCells.find((cell) =>
+      cell.sheetName === citedCell.sheetName &&
+      cell.row === citedCell.row && normalizedCellReference(cell.cell) === plannedRef
+    );
+    const variance = rowCells.find((cell) =>
+      cell.sheetName === citedCell.sheetName &&
+      cell.row === citedCell.row &&
+      normalizedCellReference(cell.cell) === normalizedCellReference(formulaCell.cellReference)
+    );
+    if (
+      !actual ||
+      !planned ||
+      !variance ||
+      !/\b(?:variance|delta|selisih|deviasi)\b/iu.test(variance.label ?? "") ||
+      !progressHeaderProvesPercentKind(actual, "actual") ||
+      !progressHeaderProvesPercentKind(planned, "planned")
+    ) {
+      return false;
+    }
+    return currentKind === "actual"
+      ? currentCell === actualRef
+      : currentKind === "planned" && currentCell === plannedRef;
+  });
+}
+
+function progressPeriodBasisForCell(
+  group: ChunkGroup,
+  citation: SourceCitation | null | undefined,
+  cell: ParsedSourceCell | null,
 ): ProgressPeriodBasis | null {
   if (!cell) return null;
   const label = cell.label ?? "";
@@ -1332,9 +1431,8 @@ function progressPeriodBasisForCell(
   if (/\b(?:weekly|week|mingguan|minggu)\b/iu.test(label)) return "weekly";
   if (/\b(?:monthly|month|bulanan|bulan)\b/iu.test(label)) return "monthly";
   if (/\b(?:daily|day|harian|hari)\b/iu.test(label)) return "daily";
-  const location = citation?.source_location;
-  return location?.kind === "xlsx" && periodLabel && asOfDate
-    ? "period_snapshot"
+  return progressVarianceFormulaSupportsCell(group, citation, cell)
+    ? "paired_variance_formula"
     : null;
 }
 
@@ -3545,7 +3643,7 @@ function validateGroupExtraction(
       ...(scopeEvidence ? { scope_provenance: scopeEvidence } : {}),
       ...(scopeEvidence && scopeSourceId ? { scope_source_id: scopeSourceId } : {}),
       period_label: periodLabel!,
-      period_basis: progressPeriodBasisForCell(citedPercentCell, citation, periodLabel ?? null, asOfDate ?? null),
+      period_basis: progressPeriodBasisForCell(group, citation, citedPercentCell),
       as_of_date: asOfDate ?? null,
       evidence_chunk_index: citation!.evidence_chunk_index,
       source_location: citation!.source_location,

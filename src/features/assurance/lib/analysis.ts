@@ -6,11 +6,12 @@ export type ReviewCondition =
 
 export type ReviewDomain = "budget" | "schedule" | "risk";
 export type ProgressPeriodBasis =
-  | "period_snapshot"
   | "cumulative"
   | "weekly"
   | "monthly"
-  | "daily";
+  | "daily"
+  | "paired_variance_formula";
+
 
 
 /** Exact versioned evidence reference returned by the analysis claim. */

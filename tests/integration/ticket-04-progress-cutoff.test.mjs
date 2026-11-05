@@ -72,7 +72,7 @@ function progress(overrides = {}) {
     percent: null,
     measureKind: "unspecified",
     periodLabel: "W5",
-    periodBasis: "period_snapshot",
+    periodBasis: "weekly",
     asOfDate: null,
     excerpt: null,
     sourceRef: null,
@@ -454,6 +454,94 @@ test("same-period cumulative plan and weekly actual are not comparable", () => {
   assert.equal(status.reason, "measurement_basis_mismatch");
   assert.equal(status.variancePercentPoints, null);
   assert.equal(status.condition, "unassessed");
+});
+
+test("neutral planned and actual headers at the same W4 cut-off stay unassessed without proof of basis", () => {
+  const status = buildProgressComputedStatuses({
+    observations: [
+      progress({
+        measureKind: "planned",
+        percent: 11.45,
+        periodLabel: "W4",
+        periodBasis: null,
+        asOfDate: "2026-10-09",
+        sourceRef: { observationId: "neutral-planned-w4" },
+      }),
+      progress({
+        measureKind: "actual",
+        percent: 12.5,
+        periodLabel: "W4",
+        periodBasis: null,
+        asOfDate: "2026-10-09",
+        sourceRef: { observationId: "neutral-actual-w4" },
+      }),
+    ],
+    wbsMappings: [],
+    cutoffDate: "2026-10-09",
+    rule: approvedRule,
+  })[0];
+  assert.equal(status.condition, "unassessed");
+  assert.equal(status.reason, "unproven_measurement_basis");
+  assert.equal(status.variancePercentPoints, null);
+  assert.equal(status.planned.sourceRef.observationId, "neutral-planned-w4");
+  assert.equal(status.actual.sourceRef.observationId, "neutral-actual-w4");
+});
+
+test("formula-paired progress requires both exact cited cells from the same source row", () => {
+  const sourceRef = (observationId, cell, row) => ({
+    observationId,
+    documentId: "w4",
+    sourceContentHash: "a".repeat(64),
+    sourceLocation: {
+      kind: "xlsx",
+      sheetName: "Weekly Report",
+      rowStart: row,
+      rowEnd: row,
+    },
+    valueSourceLocation: {
+      kind: "xlsx",
+      sheetName: "Weekly Report",
+      rowStart: row,
+      rowEnd: row,
+      cellRangeStart: cell,
+      cellRangeEnd: cell,
+    },
+  });
+  const statusForActualRow = (row) =>
+    buildProgressComputedStatuses({
+      observations: [
+        progress({
+          measureKind: "planned",
+          percent: 11.45,
+          periodLabel: "W4",
+          periodBasis: "paired_variance_formula",
+          asOfDate: "2026-10-09",
+          sourceRef: sourceRef("planned", "C7", 7),
+        }),
+        progress({
+          measureKind: "actual",
+          percent: 12.5,
+          periodLabel: "W4",
+          periodBasis: "paired_variance_formula",
+          asOfDate: "2026-10-09",
+          sourceRef: sourceRef("actual", `D${row}`, row),
+        }),
+      ],
+      wbsMappings: [],
+      cutoffDate: "2026-10-09",
+      rule: approvedRule,
+    })[0];
+
+  const sameRow = statusForActualRow(7);
+  assert.equal(sameRow.condition, "on_track");
+  assert.ok(Math.abs(sameRow.variancePercentPoints - 1.05) < 1e-9);
+
+  const differentRows = statusForActualRow(8);
+  assert.equal(differentRows.condition, "unassessed");
+  assert.equal(differentRows.reason, "unproven_measurement_basis");
+  assert.equal(differentRows.variancePercentPoints, null);
+  assert.equal(differentRows.planned.sourceRef.observationId, "planned");
+  assert.equal(differentRows.actual.sourceRef.observationId, "actual");
 });
 
 test("missing period or measurement basis stays unassessed", () => {
