@@ -446,6 +446,7 @@ begin
     begin
       source_snapshot := case when p_include_source_changes
         then public.assurance_source_snapshot(p_project_id, r.id) else null end;
+      refs := public.assurance_reference_snapshot(p_project_id, r.id);
     exception when others then
       source_snapshot := null;
       refs := null;

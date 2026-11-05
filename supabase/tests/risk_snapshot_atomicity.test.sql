@@ -12,7 +12,7 @@
 --   psql -v ON_ERROR_STOP=1 -f supabase/tests/risk_snapshot_atomicity.test.sql
 begin;
 select set_config('storage.allow_delete_query', 'true', true);
-select extensions.plan(40);
+select extensions.plan(41);
 select ok((
   select lock_position > 0 and lock_position < review_position
   from (
@@ -33,6 +33,12 @@ select ok((
     'public.assurance_source_snapshot_without_observation_decisions(uuid,uuid)'::regprocedure
   ) as definition) f
 ), 'source snapshot does not wait on rows mutated before after-trigger project locks');
+select ok((
+  select position('refs := public.assurance_reference_snapshot(p_project_id, r.id)' in lower(definition)) > 0
+  from (select pg_get_functiondef(
+    'public.invalidate_assurance_reference_results(uuid,boolean)'::regprocedure
+  ) as definition) f
+), 'comparison references are refreshed even when selected-source checks are disabled');
 select ok((
   select position('from public.projects where id = job.project_id for update' in lower(definition))
     > position('where id = owner_job_id for update' in lower(definition))
