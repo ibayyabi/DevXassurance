@@ -3,10 +3,11 @@
 // scripted provider fixture; no database, no network, no cloud calls.
 //
 // Route test: node --test tests/integration/document-worker-lease-recovery.test.mjs
-// Database lease/retry coverage uses the existing transactional pgTAP suites
-// against a disposable local Supabase database (requires pgTAP):
+// Database lease/retry coverage uses transactional pgTAP suites against a
+// disposable local Supabase database (requires pgTAP):
 //   psql -v ON_ERROR_STOP=1 -f supabase/tests/document_job_fencing.test.sql
 //   psql -v ON_ERROR_STOP=1 -f supabase/tests/document_job_reliability.test.sql
+//   psql -v ON_ERROR_STOP=1 -f supabase/tests/document_job_expired_retry.test.sql
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
