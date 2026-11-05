@@ -51,6 +51,13 @@ export type ProgressObservation = {
   scopeLevel: "project" | "wbs" | "unknown";
   scopeLabel: string | null;
   percent: number | null;
+  /**
+   * The measurement kind the cited source itself proves (a "Planned %" or
+   * "Actual %"/"Realisasi %" header, or the same cue inside a narrative
+   * statement). Role or magnitude never implies it; "unspecified" values are
+   * preserved but never paired into a planned/actual comparison.
+   */
+  measureKind: "actual" | "planned" | "unspecified";
   periodLabel: string | null;
   asOfDate: string | null;
   excerpt: string | null;

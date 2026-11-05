@@ -236,12 +236,36 @@ export function milestoneSourceLabels(input: {
   ].sort((first, second) => first.localeCompare(second));
 }
 
+export type ProgressComparisonGapReason =
+  | "current_cutoff_unknown"
+  | "current_cutoff_mismatch"
+  | "snapshot_cutoff_unknown"
+  | "snapshot_not_earlier"
+  | "conflicting_observations";
+
+export type ProgressComparisonGap = {
+  reason: ProgressComparisonGapReason;
+  observation: ProgressObservation;
+};
+
 export type ProgressScopeResult = {
   scopeLevel: "project" | "wbs" | "unknown";
   scopeLabel: string | null;
+  measureKind: ProgressObservation["measureKind"];
   current: ProgressObservation | null;
   prior: ProgressObservation | null;
+  baseline: ProgressObservation | null;
   deltaPercentPoints: number | null;
+  deltaGapReason:
+    | "no_current"
+    | "current_cutoff_unknown"
+    | "current_cutoff_mismatch"
+    | "no_prior_snapshot"
+    | "unproven_measure_kind"
+    | "uncomparable_scope"
+    | "conflicting_observations"
+    | null;
+  gaps: ProgressComparisonGap[];
 };
 
 function progressScopeKey(
@@ -249,73 +273,365 @@ function progressScopeKey(
   wbsMappings: readonly WbsMapping[],
   index: number,
 ) {
-  if (observation.scopeLevel === "project") return { key: "project", label: null as string | null };
+  const kind =
+    observation.measureKind === "actual" || observation.measureKind === "planned"
+      ? observation.measureKind
+      : "unspecified";
+  if (observation.scopeLevel === "project") return { key: `project::${kind}`, label: null as string | null };
   if (observation.scopeLevel === "unknown") {
     return {
       key: `unknown::${observation.role}::${observation.sourceRef?.observationId ?? index}`,
       label: null,
     };
   }
+  if (!observation.scopeLabel) {
+    return {
+      key: `unlabeled-wbs::${observation.role}::${observation.sourceRef?.observationId ?? index}`,
+      label: null,
+    };
+  }
   const canonical = canonicalWbsLabel(observation.scopeLabel, wbsMappings);
   return canonical
-    ? { key: `wbs::${canonical}`, label: canonical }
-    : { key: "unmapped-wbs", label: null };
+    ? { key: `wbs::${canonical}::${kind}`, label: canonical }
+    : {
+        key: `unmapped-wbs::${observation.role}::${observation.sourceRef?.observationId ?? index}`,
+        label: null,
+      };
 }
 
+type ProgressScopeEntry = {
+  scopeLevel: "project" | "wbs" | "unknown";
+  scopeLabel: string | null;
+  measureKind: ProgressObservation["measureKind"];
+  currentCandidates: ProgressObservation[];
+  snapshots: ProgressObservation[];
+  approvedBaselines: ProgressObservation[];
+};
+
+function addProgressCandidate(
+  scopes: Map<string, ProgressScopeEntry>,
+  observation: ProgressObservation,
+  key: string,
+  label: string | null,
+): void {
+  const kind = observation.measureKind === "planned" || observation.measureKind === "actual"
+    ? observation.measureKind
+    : "unspecified";
+  const entry = scopes.get(key) ?? {
+    scopeLevel: observation.scopeLevel,
+    scopeLabel: label,
+    measureKind: kind,
+    currentCandidates: [],
+    snapshots: [],
+    approvedBaselines: [],
+  };
+  if (observation.role === "current") {
+    entry.currentCandidates.push(observation);
+  } else if (observation.asOfDate || observation.periodLabel) {
+    entry.snapshots.push(observation);
+  } else {
+    entry.approvedBaselines.push(observation);
+  }
+  scopes.set(key, entry);
+}
+
+function hasConflictingPercentages(observations: readonly ProgressObservation[]): boolean {
+  return new Set(observations.map((observation) => observation.percent)).size > 1;
+}
 
 /**
- * Reported progress preserved as stated, at project or WBS level. A reported
- * percentage is never aggregated from WBS percentages into a project total and
- * never converted into a forecast date. Progress is compared across periods
- * only within the same comparable scope — the reviewer-selected current period
- * against a prior baseline period — and each source keeps its own period/as-of.
- * A WBS progress value with no label is preserved but not compared.
+ * Progress stays source-reported and per scope/measurement kind. Dated
+ * baseline-role observations are snapshots, not approved baselines; only
+ * undated baseline-role evidence occupies the separate baseline slot. A delta
+ * needs an explicit current cut-off and a strictly earlier snapshot. Unknown
+ * or conflicting evidence is returned as a cited gap, never silently chosen.
  */
 export function buildProgressComparison(input: {
   observations: readonly ProgressObservation[];
   wbsMappings: readonly WbsMapping[];
+  cutoffDate?: string | null;
 }): ProgressScopeResult[] {
-  const scopes = new Map<
-    string,
-    { scopeLevel: "project" | "wbs" | "unknown"; scopeLabel: string | null; current: ProgressObservation | null; prior: ProgressObservation | null }
-  >();
-
+  const scopes = new Map<string, ProgressScopeEntry>();
   input.observations.forEach((observation, index) => {
     const { key, label } = progressScopeKey(observation, input.wbsMappings, index);
-    const entry =
-      scopes.get(key) ??
-      { scopeLevel: observation.scopeLevel, scopeLabel: label, current: null, prior: null };
-    if (observation.role === "current") {
-      if (!entry.current) entry.current = observation;
-    } else if (!entry.prior) {
-      entry.prior = observation;
-    }
-    scopes.set(key, entry);
+    addProgressCandidate(scopes, observation, key, label);
   });
 
   return [...scopes.values()]
     .sort((first, second) => {
       const order = { project: 0, wbs: 1, unknown: 2 };
       return order[first.scopeLevel] - order[second.scopeLevel] ||
-        (first.scopeLabel ?? "").localeCompare(second.scopeLabel ?? "");
+        (first.scopeLabel ?? "").localeCompare(second.scopeLabel ?? "") ||
+        first.measureKind.localeCompare(second.measureKind);
     })
     .map((entry) => {
+      const gaps: ProgressComparisonGap[] = [];
+      const cutoffDate = input.cutoffDate ?? null;
+      const matchingCurrent = cutoffDate
+        ? entry.currentCandidates.filter((observation) => observation.asOfDate === cutoffDate)
+        : entry.currentCandidates;
+      const currentOutsideCutoff = cutoffDate
+        ? entry.currentCandidates.filter((observation) => observation.asOfDate !== cutoffDate)
+        : [];
+      gaps.push(...currentOutsideCutoff.map((observation) => ({
+        reason: observation.asOfDate ? "current_cutoff_mismatch" as const : "current_cutoff_unknown" as const,
+        observation,
+      })));
+
+      const currentConflict = hasConflictingPercentages(matchingCurrent);
+      if (currentConflict) {
+        gaps.push(...matchingCurrent.map((observation) => ({
+          reason: "conflicting_observations" as const,
+          observation,
+        })));
+      }
+      const current = matchingCurrent.length && !currentConflict
+        ? matchingCurrent[0]
+        : !cutoffDate && entry.currentCandidates.length === 1
+          ? entry.currentCandidates[0]
+          : null;
+      if (!cutoffDate && entry.currentCandidates.length > 1 && !currentConflict) {
+        gaps.push(...entry.currentCandidates.map((observation) => ({
+          reason: "conflicting_observations" as const,
+          observation,
+        })));
+      }
+      if (cutoffDate && matchingCurrent.length === 0 && !currentOutsideCutoff.length && entry.currentCandidates.length) {
+        gaps.push(...entry.currentCandidates.map((observation) => ({
+          reason: observation.asOfDate ? "current_cutoff_mismatch" as const : "current_cutoff_unknown" as const,
+          observation,
+        })));
+      }
+      const baselineConflict = hasConflictingPercentages(entry.approvedBaselines);
+      if (baselineConflict) {
+        gaps.push(...entry.approvedBaselines.map((observation) => ({
+          reason: "conflicting_observations" as const,
+          observation,
+        })));
+      }
+      const baseline = entry.approvedBaselines.length && !baselineConflict
+        ? entry.approvedBaselines[0]
+        : null;
+
+      let prior: ProgressObservation | null = null;
+      let priorConflict = false;
+      if (current?.asOfDate) {
+        const earlier = entry.snapshots.filter(
+          (observation) => observation.asOfDate! < current.asOfDate!,
+        );
+        const latestDate = earlier.reduce<string | null>(
+          (latest, observation) => !latest || observation.asOfDate! > latest
+            ? observation.asOfDate
+            : latest,
+          null,
+        );
+        const latest = latestDate
+          ? earlier.filter((observation) => observation.asOfDate === latestDate)
+          : [];
+        priorConflict = hasConflictingPercentages(latest);
+        if (priorConflict) {
+          gaps.push(...latest.map((observation) => ({
+            reason: "conflicting_observations" as const,
+            observation,
+          })));
+        } else if (latest.length) {
+          prior = latest[0];
+        }
+        gaps.push(...entry.snapshots
+          .filter((observation) => !observation.asOfDate)
+          .map((observation) => ({ reason: "snapshot_cutoff_unknown" as const, observation })));
+        gaps.push(...entry.snapshots
+          .filter((observation) => observation.asOfDate! >= current.asOfDate!)
+          .map((observation) => ({ reason: "snapshot_not_earlier" as const, observation })));
+      } else {
+        gaps.push(...entry.snapshots.map((observation) => ({
+          reason: "snapshot_cutoff_unknown" as const,
+          observation,
+        })));
+      }
+
       const comparableScope = entry.scopeLevel === "project" ||
         (entry.scopeLevel === "wbs" && entry.scopeLabel !== null);
-      const deltaPercentPoints =
-        comparableScope &&
-        entry.current?.percent !== null &&
-        entry.current?.percent !== undefined &&
-        entry.prior?.percent !== null &&
-        entry.prior?.percent !== undefined
-          ? entry.current.percent - entry.prior.percent
+      const deltaGapReason: ProgressScopeResult["deltaGapReason"] =
+        currentConflict || priorConflict
+          ? "conflicting_observations"
+          : cutoffDate && currentOutsideCutoff.some((observation) => !observation.asOfDate)
+            ? "current_cutoff_unknown"
+            : cutoffDate && currentOutsideCutoff.length
+              ? "current_cutoff_mismatch"
+              : !current
+                ? "no_current"
+                : entry.measureKind === "unspecified"
+                  ? "unproven_measure_kind"
+                  : !cutoffDate || !current.asOfDate
+                    ? "current_cutoff_unknown"
+                    : !comparableScope
+                      ? "uncomparable_scope"
+                      : !prior || !prior.asOfDate || prior.asOfDate >= current.asOfDate
+                        ? "no_prior_snapshot"
+                        : null;
+      const deltaPercentPoints = deltaGapReason === null &&
+        current?.percent !== null &&
+        current?.percent !== undefined &&
+        prior?.percent !== null &&
+        prior?.percent !== undefined
+          ? current.percent - prior.percent
           : null;
       return {
         scopeLevel: entry.scopeLevel,
         scopeLabel: entry.scopeLabel,
-        current: entry.current,
-        prior: entry.prior,
+        measureKind: entry.measureKind,
+        current,
+        prior,
+        baseline,
         deltaPercentPoints,
+        deltaGapReason,
+        gaps,
       };
     });
+}
+
+export type ProgressRagRule = {
+  rule_version: string;
+  thresholds: Record<string, unknown>;
+  note: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+};
+
+export type ProgressComputedStatus = {
+  scopeLevel: "project" | "wbs" | "unknown";
+  scopeLabel: string | null;
+  asOfDate: string | null;
+  periodLabel: string | null;
+  planned: ProgressObservation | null;
+  actual: ProgressObservation | null;
+  variancePercentPoints: number | null;
+  condition: "on_track" | "needs_attention" | "critical" | "unassessed";
+  ruleVersion: string | null;
+  reason:
+    | "no_approved_rule"
+    | "invalid_rule"
+    | "unknown_scope"
+    | "cutoff_unknown"
+    | "cutoff_mismatch"
+    | "unproven_measure_kind"
+    | "missing_planned_or_actual"
+    | "conflicting_observations"
+    | null;
+};
+
+type ProgressStatusEntry = {
+  scopeLevel: "project" | "wbs" | "unknown";
+  scopeLabel: string | null;
+  asOfDate: string | null;
+  periodLabel: string | null;
+  planned: ProgressObservation[];
+  actual: ProgressObservation[];
+  unspecified: ProgressObservation[];
+};
+
+/**
+ * Computed progress RAG is an actual-minus-planned variance for one proven
+ * scope and one exact current cut-off. Thresholds are explicitly supplied by
+ * the project's approved rule; absent or malformed rules stay unassessed.
+ */
+export function buildProgressComputedStatuses(input: {
+  observations: readonly ProgressObservation[];
+  wbsMappings: readonly WbsMapping[];
+  cutoffDate: string | null;
+  rule: ProgressRagRule | null;
+}): ProgressComputedStatus[] {
+  const rule = input.rule;
+  const thresholds = rule?.thresholds;
+  const amberBelow = thresholds?.amber_below_pp;
+  const redBelow = thresholds?.red_below_pp;
+  const hasApproval = rule !== null &&
+    typeof rule.rule_version === "string" &&
+    rule.rule_version.trim().length > 0 &&
+    typeof rule.approved_by === "string" &&
+    rule.approved_by.trim().length > 0 &&
+    typeof rule.approved_at === "string" &&
+    rule.approved_at.trim().length > 0;
+  const validRule = hasApproval &&
+    typeof amberBelow === "number" && Number.isFinite(amberBelow) &&
+    amberBelow >= -100 && amberBelow <= 100 &&
+    typeof redBelow === "number" && Number.isFinite(redBelow) &&
+    redBelow >= -100 && redBelow <= 100 && redBelow < amberBelow;
+  const entries = new Map<string, ProgressStatusEntry>();
+  input.observations.forEach((observation, index) => {
+    if (observation.role !== "current") return;
+    const scope = progressScopeKey(observation, input.wbsMappings, index);
+    const scopeKey = observation.scopeLevel === "project"
+      ? "project"
+      : observation.scopeLevel === "wbs" && scope.label
+        ? `wbs::${scope.label}`
+        : `unknown::${observation.role}::${observation.sourceRef?.observationId ?? index}`;
+    const dateKey = observation.asOfDate ??
+      `unknown::${observation.sourceRef?.observationId ?? index}`;
+    const key = `${scopeKey}::${dateKey}`;
+    const entry = entries.get(key) ?? {
+      scopeLevel: observation.scopeLevel,
+      scopeLabel: scope.label,
+      asOfDate: observation.asOfDate,
+      periodLabel: observation.periodLabel,
+      planned: [],
+      actual: [],
+      unspecified: [],
+    };
+    if (observation.measureKind === "planned") entry.planned.push(observation);
+    else if (observation.measureKind === "actual") entry.actual.push(observation);
+    else entry.unspecified.push(observation);
+    entries.set(key, entry);
+  });
+
+  return [...entries.values()].map((entry) => {
+    const plannedConflict = entry.planned.length > 1;
+    const actualConflict = entry.actual.length > 1;
+    const planned = entry.planned.length === 1 ? entry.planned[0] : null;
+    const actual = entry.actual.length === 1 ? entry.actual[0] : null;
+    const variancePercentPoints =
+      planned?.percent !== null && planned?.percent !== undefined &&
+      actual?.percent !== null && actual?.percent !== undefined
+        ? actual.percent - planned.percent
+        : null;
+    const reason: ProgressComputedStatus["reason"] =
+      !input.rule
+        ? "no_approved_rule"
+        : !validRule
+          ? "invalid_rule"
+          : entry.scopeLevel === "unknown" ||
+              (entry.scopeLevel === "wbs" && !entry.scopeLabel)
+            ? "unknown_scope"
+            : !entry.asOfDate || !input.cutoffDate
+              ? "cutoff_unknown"
+              : entry.asOfDate !== input.cutoffDate
+                ? "cutoff_mismatch"
+                : plannedConflict || actualConflict
+                  ? "conflicting_observations"
+                  : !planned || !actual
+                    ? entry.unspecified.length
+                      ? "unproven_measure_kind"
+                      : "missing_planned_or_actual"
+                    : null;
+    const condition = reason || variancePercentPoints === null
+      ? "unassessed"
+      : variancePercentPoints < (redBelow as number)
+        ? "critical"
+        : variancePercentPoints < (amberBelow as number)
+          ? "needs_attention"
+          : "on_track";
+    return {
+      scopeLevel: entry.scopeLevel,
+      scopeLabel: entry.scopeLabel,
+      asOfDate: entry.asOfDate,
+      periodLabel: entry.periodLabel,
+      planned,
+      actual,
+      variancePercentPoints,
+      condition,
+      ruleVersion: input.rule?.rule_version ?? null,
+      reason,
+    };
+  });
 }

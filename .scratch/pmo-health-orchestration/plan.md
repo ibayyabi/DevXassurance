@@ -71,6 +71,8 @@ flowchart TD
 **Hasil:** planned/actual source-backed per komponen dan tanggal, snapshot sebelumnya terpisah dari approved baseline; tampilkan perubahan hanya jika scope/unit/periode terbukti sebanding.
 **Penerimaan:** W4/W5 SB01 12,50% → 20,40%, delta +7,90 pp, dengan sumber kedua cut-off. Test identik filename, data unit ambigu, metadata bulan saja, konflik, missing W4/W5, dan data masa depan; semua hasil ambigu/gap tanpa perubahan diam-diam. Perhitungan planned/actual dan status harus menggunakan aturan yang disetujui dan berversi.
 
+**Read model for ticket 06:** `analysis_metadata.progress_observations` is one row per proven scope/measure kind and retains current, dated prior snapshot, undated approved baseline, percentage-point delta/gap, and per-leg `sourceRef` (document ID/title, source hash, parser/contract versions, exact page/sheet/cell and excerpt). `progress_source_rag_claims` preserves the source's separate cited label and formula-cache freshness; `progress_rag_rule` exposes only the active approved project version; `progress_computed_statuses` gives per-scope/cut-off status and rule version or an explicit unassessed reason. No WBS roll-up or default rule.
+
 ### 05 — Risk snapshot — blocker: 03; gunakan kontrak identitas dan periode dari 01
 
 **Owner:** satu agent memiliki risk comparator/panel; telusuri implementasi dan ticket 04 yang sudah ada sebelum mengubah. 

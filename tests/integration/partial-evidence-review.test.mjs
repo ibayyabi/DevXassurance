@@ -83,7 +83,7 @@ function fixture(options = {}) {
       }
       return { data: true, error: null };
     },
-    from: () => ({
+    from: (table) => ({
       select() { return this; },
       eq() { return this; },
       in() { return this; },
@@ -91,7 +91,9 @@ function fixture(options = {}) {
       limit() { return this; },
       maybeSingle() {
         return Promise.resolve({
-          data: { reporting_period: "2026-10-16", cutoff_precision: "date" },
+          data: table === "progress_rag_rules"
+            ? null
+            : { reporting_period: "2026-10-16", cutoff_precision: "date" },
           error: null,
         });
       },
@@ -130,7 +132,8 @@ const form = (extra = {}) => {
 const progressObservation = (id, percent, extra = {}) =>
   observation(id, "progress", "progress", {
     raw_value: `${percent}%`, percent, scope_level: "project", scope_label: null,
-    period_label: null, as_of_date: null, ...extra,
+    measure_kind: "actual",
+    period_label: null, as_of_date: id.includes("base") ? "2026-10-09" : "2026-10-16", ...extra,
   });
 
 test("rejected observations are excluded from analysis while accepted ones stay used", async () => {
@@ -157,7 +160,20 @@ test("rejected observations are excluded from analysis while accepted ones stay 
 test("correction replaces the compared percent; the metadata keeps the original value", async () => {
   const f = fixture({
     baselineObservations: [progressObservation("p-base", 12.5)],
-    currentObservations: [progressObservation("p-cur", 20.4)],
+    currentObservations: [progressObservation("p-cur", 20.4, {
+      source_rag_claim: {
+        label: "Green",
+        evidence_chunk_index: 0,
+        excerpt: "RAG: Green",
+        page_number: null,
+        section_label: "Weekly Report",
+        freshness: "cached_formula_unverified",
+        source_location: {
+          kind: "xlsx", sheetName: "Weekly Report",
+          rowStart: 8, rowEnd: 8, cellRangeStart: "F8", cellRangeEnd: "F8",
+        },
+      },
+    })],
     decisions: [
       { document_id: "current", observation_fingerprint: "f".repeat(64), decision: "corrected",
         corrected_observation: { percent: 21.4 }, reason: "konfirmasi lapangan", decided_by: "user-1",
@@ -168,9 +184,24 @@ test("correction replaces the compared percent; the metadata keeps the original 
   const publication = f.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
   const scopes = publication.input.p_result_metadata.progress_observations;
   assert.equal(scopes[0].current.percent, 21.4, "the comparison uses the corrected percent");
+  assert.equal(scopes[0].prior.percent, 12.5, "W4 remains the dated prior snapshot");
+  assert.ok(Math.abs(scopes[0].deltaPercentPoints - 8.9) < 1e-9);
+  assert.equal(scopes[0].current.sourcePercent, 20.4);
+  assert.equal(scopes[0].current.reviewDecision.decision, "corrected");
+  assert.equal(scopes[0].current.sourceRef.sourceContentHash, "b".repeat(64));
   const sourceRow = publication.input.p_result_metadata.progress_source_observations
     .find((row) => row.observation_id === "p-cur");
   assert.equal(sourceRow.percent, 20.4, "the published source row keeps the original extraction");
+  const ragClaim = publication.input.p_result_metadata.progress_source_rag_claims[0];
+  assert.equal(ragClaim.rag_label, "Green");
+  assert.equal(ragClaim.freshness, "cached_formula_unverified");
+  assert.equal(ragClaim.source_version.content_hash, "b".repeat(64));
+  assert.equal(ragClaim.source_location.cellRangeStart, "F8");
+  assert.equal(
+    publication.input.p_result_metadata.progress_computed_statuses[0].reason,
+    "no_approved_rule",
+    "the correction never supplies a project RAG rule",
+  );
   const summary = publication.input.p_metadata.observation_review_summary;
   assert.deepEqual(
     { reviewed: summary.reviewed, corrected: summary.corrected, total: summary.total_observations },
@@ -434,12 +465,13 @@ test("restricted roles cannot review observations or select evidence", async () 
 test("progress comparison still separates corrected review state from unreviewed observations", () => {
   const result = scheduleComparison.buildProgressComparison({
     observations: [
-      { role: "baseline", scopeLevel: "project", scopeLabel: null, percent: 12.5, periodLabel: null, asOfDate: null, excerpt: "12,5%", sourceRef: null },
-      { role: "current", scopeLevel: "project", scopeLabel: null, percent: 21.4, periodLabel: null, asOfDate: null, excerpt: "21,4%", sourceRef: null,
+      { role: "baseline", scopeLevel: "project", scopeLabel: null, percent: 12.5, measureKind: "actual", periodLabel: "W4", asOfDate: "2026-10-09", excerpt: "12,5%", sourceRef: null },
+      { role: "current", scopeLevel: "project", scopeLabel: null, percent: 21.4, measureKind: "actual", periodLabel: "W5", asOfDate: "2026-10-16", excerpt: "21,4%", sourceRef: null,
         reviewDecision: { decision: "corrected", percent: 21.4, reason: "konfirmasi lapangan" } },
-      { role: "current", scopeLevel: "wbs", scopeLabel: "Alarm", percent: 40, periodLabel: null, asOfDate: null, excerpt: "40%", sourceRef: null },
+      { role: "current", scopeLevel: "wbs", scopeLabel: "Alarm", percent: 40, measureKind: "actual", periodLabel: "W5", asOfDate: "2026-10-16", excerpt: "40%", sourceRef: null },
     ],
     wbsMappings: [],
+    cutoffDate: "2026-10-16",
   });
   const project = result.find((scope) => scope.scopeLevel === "project");
   assert.equal(project.current.reviewDecision.decision, "corrected");

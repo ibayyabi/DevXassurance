@@ -40,6 +40,7 @@ import {
 import {
   buildMilestoneComparisons,
   buildProgressComparison,
+  buildProgressComputedStatuses,
   buildScheduleFinding,
   milestoneSourceLabels,
 } from "@/features/assurance/lib/schedule-comparison";
@@ -231,7 +232,9 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
     const wbs = await buildWbsComparison(
       supabase, projectId, reportingPeriod, costDecisions.baseline, costDecisions.current,
     );
-    const schedule = await buildScheduleComparison(supabase, projectId, reviewData.extraction);
+    const schedule = await buildScheduleComparison(
+      supabase, projectId, reportingPeriod, reviewData.extraction,
+    );
     const risk = await buildRiskSnapshotComparison(supabase, projectId, reviewData.extraction);
     reviewData.extraction.risk = buildRiskAssessment(
       reviewData.extraction, risk.comparison, reviewData.riskStatements,
@@ -267,6 +270,7 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
           comparison_engine: {
             budget: "pmo_cost_contract_v1",
             schedule: "pmo_schedule_observations_v1",
+            progress: "pmo_progress_cut_off_v1",
             risk: "pmo_risk_observations_v1",
           },
           thresholds: {
@@ -283,6 +287,9 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
           schedule_milestone_labels: schedule.milestoneLabels,
           progress_observations: schedule.progress,
           progress_source_observations: reviewData.progressSourceObservations,
+          progress_source_rag_claims: reviewData.progressSourceRagClaims,
+          progress_rag_rule: schedule.progressRagRule,
+          progress_computed_statuses: schedule.progressComputedStatuses,
           risk_item_findings: risk.comparison.items,
           risk_unidentified_items: risk.comparison.unidentified,
           risk_source_ids: risk.sourceIds,
@@ -957,9 +964,10 @@ async function buildWbsComparison(
 async function buildScheduleComparison(
   supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
   projectId: string,
+  cutoffDate: string,
   extraction: ReviewExtraction,
 ) {
-  const [milestoneMappingResult, wbsMappingResult] = await Promise.all([
+  const [milestoneMappingResult, wbsMappingResult, ragRulesResult] = await Promise.all([
     supabase
       .from("milestone_mappings")
       .select(milestoneMappingColumns)
@@ -970,9 +978,24 @@ async function buildScheduleComparison(
       .select(wbsMappingColumns)
       .eq("project_id", projectId)
       .eq("state", "accepted"),
+    supabase
+      .from("progress_rag_rules")
+      .select("rule_version, thresholds, note, approved_by, approved_at")
+      .eq("project_id", projectId)
+      .eq("state", "active")
+      .limit(1)
+      .maybeSingle(),
   ]);
   if (milestoneMappingResult.error) throw new Error(milestoneMappingResult.error.message);
   if (wbsMappingResult.error) throw new Error(wbsMappingResult.error.message);
+  if (ragRulesResult.error) throw new Error(ragRulesResult.error.message);
+  const ragRule = ((ragRulesResult.data ?? null) as {
+    rule_version: string;
+    thresholds: Record<string, unknown>;
+    note: string | null;
+    approved_by: string | null;
+    approved_at: string | null;
+  } | null);
 
   const milestoneMappings = ((milestoneMappingResult.data ?? []) as MilestoneMappingRow[]).map(
     mapMilestoneMappingRow,
@@ -989,12 +1012,34 @@ async function buildScheduleComparison(
   const progress = buildProgressComparison({
     observations: extraction.progress.observations,
     wbsMappings,
+    cutoffDate,
+  });
+  const progressComputedStatuses = buildProgressComputedStatuses({
+    observations: extraction.progress.observations,
+    wbsMappings,
+    cutoffDate,
+    rule: ragRule,
   });
   const milestoneLabels = milestoneSourceLabels({
     baselineMilestones: extraction.schedule.baselineMilestones,
     currentMilestones: extraction.schedule.currentMilestones,
   });
-  return { finding, comparisons, progress, milestoneLabels };
+  return {
+    finding,
+    comparisons,
+    progress,
+    progressComputedStatuses,
+    milestoneLabels,
+    progressRagRule: ragRule
+      ? {
+          rule_version: ragRule.rule_version,
+          thresholds: ragRule.thresholds,
+          note: ragRule.note,
+          approved_by: ragRule.approved_by,
+          approved_at: ragRule.approved_at,
+        }
+      : null,
+  };
 }
 
 /**
@@ -1103,6 +1148,7 @@ function buildReviewExtraction(
 ): {
   extraction: ReviewExtraction;
   progressSourceObservations: Record<string, unknown>[];
+  progressSourceRagClaims: Record<string, unknown>[];
   riskStatements: {
     current: { source: AssuranceSource; row: AssuranceObservationRow }[];
     baseline: { source: AssuranceSource; row: AssuranceObservationRow }[];
@@ -1175,6 +1221,11 @@ function buildReviewExtraction(
       percent: correctedPercent ??
         (typeof observation.percent === "number" ? observation.percent : null),
       sourcePercent: typeof observation.percent === "number" ? observation.percent : null,
+      // measure_kind is the extraction's cited-source proof; a reviewer
+      // correction changes the percent, never the measurement kind.
+      measureKind: observation.measure_kind === "planned" || observation.measure_kind === "actual"
+        ? observation.measure_kind
+        : "unspecified",
       periodLabel: snapshotText(observation.period_label),
       asOfDate: snapshotText(observation.as_of_date),
       excerpt: row.excerpt,
@@ -1257,6 +1308,46 @@ function buildReviewExtraction(
     source_location: sourceLocationRecord(row.source_location),
   }));
 
+  // A source-reported RAG label (a cited cell such as "Green") stays exactly
+  // what the source claims: it is published beside the comparison for the
+  // reviewer and never becomes the computed condition. Rejected observations
+  // are excluded here too — a rejected row's RAG claim is not evidence.
+  const progressSourceRagClaims = progressRows
+    .map(({ source, row }) => {
+      const claim = row.observation.source_rag_claim;
+      if (typeof claim !== "object" || claim === null || Array.isArray(claim)) return null;
+      const ragClaim = claim as Record<string, unknown>;
+      const ragLabel = snapshotText(ragClaim.label);
+      if (!ragLabel) return null;
+      const sourceLocation = typeof ragClaim.source_location === "object" &&
+        ragClaim.source_location !== null && !Array.isArray(ragClaim.source_location)
+        ? ragClaim.source_location as Record<string, unknown>
+        : row.source_location;
+      return {
+        role: source.role,
+        document_id: source.document_id,
+        document_title: source.title,
+        source_version: source.source_version,
+        observation_id: row.id,
+        scope_level: snapshotText(row.observation.scope_level),
+        scope_label: snapshotText(row.observation.scope_label),
+        rag_label: ragLabel,
+        freshness: ragClaim.freshness === "cached_formula_unverified"
+          ? "cached_formula_unverified"
+          : ragClaim.freshness === "source_literal" ? "source_literal" : "unknown",
+        period_label: snapshotText(row.observation.period_label),
+        as_of_date: snapshotText(row.observation.as_of_date),
+        evidence_chunk_index: typeof ragClaim.evidence_chunk_index === "number"
+          ? ragClaim.evidence_chunk_index
+          : row.evidence_chunk_index,
+        excerpt: snapshotText(ragClaim.excerpt) ?? row.excerpt,
+        page_number: typeof ragClaim.page_number === "number" ? ragClaim.page_number : row.page_number,
+        section_label: snapshotText(ragClaim.section_label) ?? row.section_label,
+        source_location: sourceLocationRecord(sourceLocation),
+      };
+    })
+    .filter((claim): claim is NonNullable<typeof claim> => claim !== null);
+
   return {
     extraction: {
       schedule: {
@@ -1286,6 +1377,7 @@ function buildReviewExtraction(
       },
     },
     progressSourceObservations,
+    progressSourceRagClaims,
     // Decision-filtered register statements: the risk assessment must read the
     // same effective evidence as every other comparison, so a rejected
     // no_open_high_or_critical claim can never produce on_track.

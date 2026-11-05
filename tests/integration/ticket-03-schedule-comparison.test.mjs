@@ -92,13 +92,15 @@ function mapping(overrides = {}) {
 }
 
 function progress(overrides = {}) {
+  const role = overrides.role ?? "current";
   return {
-    role: "current",
+    role,
     scopeLevel: "project",
     scopeLabel: null,
     percent: 60,
-    periodLabel: "October 2026",
-    asOfDate: "2026-10-31",
+    measureKind: "actual",
+    periodLabel: role === "baseline" ? "September 2026" : "October 2026",
+    asOfDate: role === "baseline" ? "2026-09-30" : "2026-10-31",
     excerpt: "Overall completion is 60%.",
     ...overrides,
   };
@@ -218,6 +220,7 @@ test("progress is preserved as reported and compared only across comparable scop
       progress({ role: "current", scopeLevel: "wbs", scopeLabel: "1.2", percent: 80 }),
     ],
     wbsMappings: [],
+    cutoffDate: "2026-10-31",
   });
   const byScope = Object.fromEntries(
     results.map((result) => [result.scopeLevel === "project" ? "project" : result.scopeLabel, result]),
@@ -237,7 +240,11 @@ test("WBS progress is compared across periods only through accepted WBS mappings
     progress({ role: "current", scopeLevel: "wbs", scopeLabel: "WP-1.2", percent: 70 }),
     progress({ role: "baseline", scopeLevel: "wbs", scopeLabel: "1.2", percent: 50, periodLabel: "September 2026" }),
   ];
-  const withoutMapping = buildProgressComparison({ observations, wbsMappings: [] });
+  const withoutMapping = buildProgressComparison({
+    observations,
+    wbsMappings: [],
+    cutoffDate: "2026-10-31",
+  });
   // Differing WBS labels stay two separate scopes, neither compared.
   assert.equal(withoutMapping.length, 2);
   assert.ok(withoutMapping.every((result) => result.deltaPercentPoints === null));
@@ -247,6 +254,7 @@ test("WBS progress is compared across periods only through accepted WBS mappings
     wbsMappings: [
       { id: "w", sourceLabel: "WP-1.2", canonicalLabel: "1.2", state: "accepted", proposedByModel: false, note: null, acceptedBy: "r", acceptedAt: "2026-10-01T00:00:00.000Z" },
     ],
+    cutoffDate: "2026-10-31",
   });
   assert.equal(withMapping.length, 1);
   assert.equal(withMapping[0].deltaPercentPoints, 20);
@@ -259,6 +267,7 @@ test("a WBS progress value without a label is preserved but never compared", () 
       progress({ role: "baseline", scopeLevel: "wbs", scopeLabel: null, percent: 20 }),
     ],
     wbsMappings: [],
+    cutoffDate: "2026-10-31",
   });
   assert.equal(results.length, 1);
   assert.equal(results[0].deltaPercentPoints, null);
