@@ -54,7 +54,8 @@ begin
     'cost_observations', coalesce((
       select jsonb_agg(jsonb_build_object(
         'id', o.id, 'project_id', o.project_id, 'document_id', o.document_id,
-        'measure', o.measure, 'source_value', o.source_value,
+        'source_content_hash', o.source_content_hash, 'parser_version', o.parser_version,
+        'contract_version', o.contract_version, 'measure', o.measure, 'source_value', o.source_value,
         'normalized_amount', o.normalized_amount, 'currency', o.currency,
         'scope_level', o.scope_level, 'scope_label', o.scope_label,
         'wbs_code', o.wbs_code, 'wbs_parent_code', o.wbs_parent_code,
@@ -62,7 +63,10 @@ begin
         'period_label', o.period_label, 'as_of_date', o.as_of_date,
         'status_label', o.status_label, 'evidence_chunk_index', o.evidence_chunk_index,
         'excerpt', o.excerpt, 'page_number', o.page_number, 'section_label', o.section_label,
-        'source_location', o.source_location, 'evidence_role', l.evidence_role
+        'provider', o.provider, 'model', o.model,
+        'scope_source_id', o.scope_source_id, 'scope_provenance', o.scope_provenance,
+        'source_location', o.source_location, 'observation_fingerprint', o.observation_fingerprint,
+        'evidence_role', l.evidence_role
       ) order by o.measure, o.scope_label nulls first, o.evidence_chunk_index, o.id)
       from public.cost_observations o
       where o.project_id = p_project_id and o.document_id = d.id
@@ -418,9 +422,13 @@ create or replace function public.invalidate_assurance_reference_results(p_proje
 returns void language plpgsql security definer set search_path = '' as $$
 declare
   r record;
+  source_snapshot jsonb;
   refs jsonb;
   success jsonb;
   attempt jsonb;
+  source_changed boolean;
+  reference_changed boolean;
+  invalidation_reason text;
   changed boolean;
 begin
   for r in
@@ -434,31 +442,39 @@ begin
       r.status = 'analyzing' and attempt->>'outcome' = 'analyzing'
     ) then continue; end if;
     begin
+      source_snapshot := public.assurance_source_snapshot(p_project_id, r.id);
       refs := public.assurance_reference_snapshot(p_project_id, r.id);
     exception when others then
+      source_snapshot := null;
       refs := null;
     end;
-    if refs is not null and r.status = 'analyzing'
+    if source_snapshot is not null and refs is not null and r.status = 'analyzing'
       and attempt->>'outcome' = 'analyzing'
       and coalesce((attempt->>'lease_until')::timestamptz, '-infinity') > clock_timestamp()
+      and attempt->>'fingerprint' is not distinct from source_snapshot->>'fingerprint'
       and attempt->>'reference_fingerprint' is not distinct from refs->>'fingerprint' then
       continue;
     end if;
-    -- Missing reference fingerprints cannot prove a reference changed; legacy
-    -- results remain non-current, and ticket 03 records decision-only invalidation.
-    changed := success->>'id' is not null
-      and success->>'reference_fingerprint' is not null
+    source_changed := success->>'id' is not null and success->>'fingerprint' is not null
+      and success->>'fingerprint' is distinct from source_snapshot->>'fingerprint';
+    source_changed := source_changed or (r.status = 'analyzing' and attempt->>'outcome' = 'analyzing'
+      and attempt->>'fingerprint' is not null
+      and attempt->>'fingerprint' is distinct from source_snapshot->>'fingerprint');
+    reference_changed := success->>'id' is not null and success->>'reference_fingerprint' is not null
       and success->>'reference_fingerprint' is distinct from refs->>'fingerprint';
-    changed := changed or (r.status = 'analyzing' and attempt->>'outcome' = 'analyzing'
+    reference_changed := reference_changed or (r.status = 'analyzing' and attempt->>'outcome' = 'analyzing'
       and attempt->>'reference_fingerprint' is not null
       and attempt->>'reference_fingerprint' is distinct from refs->>'fingerprint');
+    changed := source_changed or reference_changed;
     if not changed then continue; end if;
+    invalidation_reason := case when source_changed then 'Selected evidence changed'
+      else 'Approved comparison references changed' end;
     update public.assurance_reviews set status = 'evidence_ready', current_step = 'analysis',
-      analysis_error = 'Approved comparison references changed. Run the analysis again.',
+      analysis_error = invalidation_reason || '. Run the analysis again.',
       approved_at = null, reviewed_by = null,
       analysis_metadata = analysis_metadata || jsonb_build_object(
         'reference_invalidation', jsonb_build_object(
-          'reason', 'Approved comparison references changed', 'at', clock_timestamp()
+          'reason', invalidation_reason, 'at', clock_timestamp()
         )
       ) || case when attempt->>'outcome' = 'analyzing' then
         jsonb_build_object('latest_attempt', attempt || jsonb_build_object(
@@ -571,8 +587,11 @@ create trigger assurance_review_documents_prior_risk_reference_change
   for each row execute function public.invalidate_assurance_prior_risk_change();
 drop trigger if exists documents_prior_risk_reference_change on public.documents;
 create trigger documents_prior_risk_reference_change
-  after insert or update of project_id, title, content_hash, processing_status,
-    assurance_observation_parser_version, assurance_observation_contract_version or delete on public.documents
+  after insert or update of id, project_id, title, file_name, file_size, mime_type,
+    storage_bucket, storage_path, document_type, document_date, confirmed_document_type,
+    confirmed_document_date, confirmed_evidence_role, confirmed_reporting_period, confirmed_workstream,
+    content_hash, processing_status, assurance_observation_parser_version,
+    assurance_observation_contract_version or delete on public.documents
   for each row execute function public.invalidate_assurance_prior_risk_change();
 drop trigger if exists assurance_observations_prior_risk_reference_change on public.assurance_observations;
 create trigger assurance_observations_prior_risk_reference_change
@@ -590,3 +609,48 @@ drop trigger if exists document_chunks_prior_risk_reference_change on public.doc
 create trigger document_chunks_prior_risk_reference_change
   after insert or update or delete on public.document_chunks
   for each row execute function public.invalidate_assurance_prior_risk_change();
+drop trigger if exists cost_observations_prior_risk_reference_change on public.cost_observations;
+create trigger cost_observations_prior_risk_reference_change
+  after insert or update or delete on public.cost_observations
+  for each row execute function public.invalidate_assurance_prior_risk_change();
+
+-- These rows are locked by reference snapshots; allow writes only through RPCs
+-- that acquire the project lock before mutation.
+revoke insert, update, delete on table public.cost_baselines, public.wbs_mappings,
+  public.milestone_mappings, public.risk_identity_mappings, public.risk_scale_mappings
+  from public, anon, authenticated;
+
+create or replace function public.invalidate_assurance_storage_object_change()
+returns trigger language plpgsql security definer set search_path = '' as $$
+declare project_ids uuid[]; project_id uuid;
+begin
+  if pg_trigger_depth() > 1 then return null; end if;
+  if tg_op = 'UPDATE' and
+    (to_jsonb(old) - array['last_accessed_at', 'owner', 'owner_id'])
+      is not distinct from
+    (to_jsonb(new) - array['last_accessed_at', 'owner', 'owner_id']) then return null; end if;
+  if tg_op = 'DELETE' then
+    select array_agg(distinct d.project_id order by d.project_id) into project_ids
+    from public.documents d where d.storage_bucket = old.bucket_id and d.storage_path = old.name;
+  elsif tg_op = 'INSERT' then
+    select array_agg(distinct d.project_id order by d.project_id) into project_ids
+    from public.documents d where d.storage_bucket = new.bucket_id and d.storage_path = new.name;
+  else
+    select array_agg(distinct d.project_id order by d.project_id) into project_ids
+    from public.documents d where (d.storage_bucket = old.bucket_id and d.storage_path = old.name)
+      or (d.storage_bucket = new.bucket_id and d.storage_path = new.name);
+  end if;
+  foreach project_id in array coalesce(project_ids, '{}'::uuid[]) loop
+    perform 1 from public.projects where id = project_id for update;
+    if found then perform public.invalidate_assurance_reference_results(project_id); end if;
+  end loop;
+  return null;
+end;
+$$;
+revoke all on function public.invalidate_assurance_storage_object_change() from public, anon, authenticated;
+grant execute on function public.invalidate_assurance_storage_object_change() to service_role;
+
+drop trigger if exists storage_objects_assurance_source_change on storage.objects;
+create trigger storage_objects_assurance_source_change
+  after insert or update or delete on storage.objects
+  for each row execute function public.invalidate_assurance_storage_object_change();

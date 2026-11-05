@@ -5,13 +5,13 @@
 -- B: BEGIN; set JWT claims; SELECT claim_assurance_analysis(project, B);
 -- B waits before taking review B. COMMIT A, then B returns and commits.
 -- Repeat reversed. Source-write check: A claims and keeps its transaction
--- open; B updates selected prior assurance_observations and waits in its
--- after-trigger for the project lock. A finishes against its captured source
--- and commits; B must then commit and invalidate currentness. No deadlock.
--- pgTAP runs after migrations 202611050001, 202611050002, and 202611050003.
+-- open; B updates selected prior evidence or uses Storage API to delete/update
+-- its selected object. The after-trigger waits for project; A finishes against
+-- its captured MVCC source and commits; B then invalidates currentness. No
+-- deadlock. pgTAP runs after migrations 202611050001, 202611050002, and 003.
 --   psql -v ON_ERROR_STOP=1 -f supabase/tests/risk_snapshot_atomicity.test.sql
 begin;
-select extensions.plan(23);
+select extensions.plan(38);
 select ok((
   select lock_position > 0 and lock_position < review_position
   from (
@@ -49,6 +49,41 @@ select ok(exists (
   where tgrelid = 'public.document_chunks'::regclass
     and tgname = 'document_chunks_prior_risk_reference_change' and not tgisinternal
 ), 'chunk changes invalidate dependent source fingerprints');
+select ok((
+  select bool_and(position(col.column_name in lower(pg_get_triggerdef(t.oid))) > 0)
+  from pg_trigger t cross join unnest(array[
+    'id','project_id','title','file_name','file_size','mime_type','storage_bucket','storage_path',
+    'document_type','document_date','confirmed_document_type','confirmed_document_date',
+    'confirmed_evidence_role','confirmed_reporting_period','confirmed_workstream',
+    'content_hash','processing_status','assurance_observation_parser_version',
+    'assurance_observation_contract_version'
+  ]) col(column_name)
+  where t.tgrelid = 'public.documents'::regclass and t.tgname = 'documents_prior_risk_reference_change'
+), 'document invalidation covers every fingerprinted metadata field');
+select ok((
+  select position('scope_source_id' in lower(definition)) > 0
+    and position('scope_provenance' in lower(definition)) > 0
+    and position('provider' in lower(definition)) > 0
+    and position('model' in lower(definition)) > 0
+  from (select pg_get_functiondef(
+    'public.assurance_source_snapshot_without_observation_decisions(uuid,uuid)'::regprocedure
+  ) as definition) f
+), 'cost observation provenance and source identity are fingerprinted');
+select is((
+  select count(*) from pg_trigger
+  where not tgisinternal and (
+    (tgrelid = 'storage.objects'::regclass and tgname = 'storage_objects_assurance_source_change')
+    or (tgrelid = 'public.cost_observations'::regclass
+      and tgname = 'cost_observations_prior_risk_reference_change')
+  )
+), 2::bigint, 'storage objects and cost observations invalidate source fingerprints');
+select ok(not exists (
+  select 1 from unnest(array[
+    'cost_baselines','wbs_mappings','milestone_mappings','risk_identity_mappings','risk_scale_mappings'
+  ]) rt(table_name)
+  cross join (values ('INSERT'),('UPDATE'),('DELETE')) p(privilege)
+  where has_table_privilege('authenticated', 'public.' || rt.table_name, p.privilege)
+), 'reference table writes are restricted to project-lock RPCs');
 
 insert into auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, created_at, updated_at)
 values
@@ -119,6 +154,18 @@ values
   ('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000031', repeat('a',64), 'parser/1', 'pmo-assurance-observations/1', 'risk', 'processed', 1, 1),
   ('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000032', repeat('b',64), 'parser/1', 'pmo-assurance-observations/1', 'risk', 'processed', 1, 1),
   ('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000033', repeat('c',64), 'parser/1', 'pmo-assurance-observations/1', 'risk', 'processed', 1, 1);
+insert into public.cost_observations (
+  id, project_id, document_id, measure, source_value, normalized_amount, currency,
+  scope_level, scope_label, evidence_chunk_index, excerpt, source_location,
+  provider, model, source_content_hash, parser_version, contract_version
+) values (
+  '51000000-0000-4000-8000-000000000061',
+  '51000000-0000-4000-8000-000000000003',
+  '51000000-0000-4000-8000-000000000033',
+  'actual_to_date', 'USD 10', 10, 'USD', 'project', null, 0, 'Current cost',
+  '{"sheet_name":"Costs","cell_reference":"A1"}'::jsonb,
+  'fixture', 'fixture', repeat('c',64), 'parser/1', 'pmo-assurance-observations/1'
+);
 insert into public.assurance_observation_decisions
   (id, project_id, target_type, document_id, source_content_hash, parser_version, contract_version,
    observation_fingerprint, decision, corrected_observation, reason, decided_by)
@@ -216,6 +263,33 @@ select is(public.assurance_analysis_is_current('51000000-0000-4000-8000-00000000
 select pg_temp.add_claim(6);
 select is(pg_temp.finish_current((select claim from risk_claims where stage=6)), true,
   'analysis can publish after the changed prior decision is included');
+update public.documents set file_name = 'current-reviewed.pdf',
+  confirmed_workstream = 'Electrical'
+where id = '51000000-0000-4000-8000-000000000033';
+select is(public.assurance_analysis_is_current('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000022'), false,
+  'fingerprinted document metadata changes invalidate published source data');
+select is((select status from public.assurance_reviews where id = '51000000-0000-4000-8000-000000000022'),
+  'evidence_ready', 'document metadata changes invalidate the published review');
+select pg_temp.add_claim(7);
+select is(pg_temp.finish_current((select claim from risk_claims where stage=7)), true,
+  'analysis can publish after the changed document metadata is included');
+update public.cost_observations set provider = 'reviewed'
+where id = '51000000-0000-4000-8000-000000000061';
+select is(public.assurance_analysis_is_current('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000022'), false,
+  'cost-observation provenance changes invalidate published source fingerprints');
+select is((select status from public.assurance_reviews where id = '51000000-0000-4000-8000-000000000022'),
+  'evidence_ready', 'cost-observation changes invalidate the published review');
+select pg_temp.add_claim(8);
+select is(pg_temp.finish_current((select claim from risk_claims where stage=8)), true,
+  'analysis can publish after the changed cost evidence is included');
+update storage.objects
+set metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object('risk_atomicity', 'updated')
+where bucket_id = 'project-evidence'
+  and name = '51000000-0000-4000-8000-000000000003/current.pdf';
+select is(public.assurance_analysis_is_current('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000022'), false,
+  'storage-object metadata updates invalidate published source fingerprints');
+select is((select status from public.assurance_reviews where id = '51000000-0000-4000-8000-000000000022'),
+  'evidence_ready', 'storage-object update invalidates the published review');
 insert into public.assurance_reviews (id, project_id, reporting_period, cutoff_precision, title, created_by, status, current_step)
 values ('51000000-0000-4000-8000-000000000024', '51000000-0000-4000-8000-000000000003', '2026-10-20', 'date', 'Nearer review after analysis', '51000000-0000-4000-8000-000000000001', 'findings_ready', 'findings');
 insert into public.assurance_review_documents (project_id, review_id, document_id, evidence_role, added_by)
@@ -225,11 +299,20 @@ select is(public.assurance_analysis_is_current('51000000-0000-4000-8000-00000000
 
 insert into public.assurance_review_documents (project_id, review_id, document_id, evidence_role, added_by)
 values ('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000024', '51000000-0000-4000-8000-000000000034', 'current', '51000000-0000-4000-8000-000000000001');
-select pg_temp.add_claim(7);
-select is((select claim->'prior_risk_snapshot'->>'gap_reason' from risk_claims where stage=7),
+select pg_temp.add_claim(9);
+select is((select claim->'prior_risk_snapshot'->>'gap_reason' from risk_claims where stage=9),
   'prior_source_version_unavailable', 'a cross-project linked source is an honest scoped gap');
-select is(jsonb_array_length((select claim->'prior_risk_snapshot'->'sources' from risk_claims where stage=7)),
+select is(jsonb_array_length((select claim->'prior_risk_snapshot'->'sources' from risk_claims where stage=9)),
   0, 'cross-project source observations are never returned in the prior payload');
+delete from storage.objects
+where bucket_id = 'project-evidence'
+  and name = '51000000-0000-4000-8000-000000000003/current.pdf';
+select is(pg_temp.finish_current((select claim from risk_claims where stage=9)), false,
+  'storage deletion after claim prevents stale publication');
+select is(public.assurance_analysis_is_current('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000022'), false,
+  'currentness rejects a selected source after its storage object is deleted');
+select is((select status from public.assurance_reviews where id = '51000000-0000-4000-8000-000000000022'),
+  'evidence_ready', 'storage deletion invalidates the in-flight review');
 select throws_ok(
   $$select public.claim_assurance_analysis('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000025')$$,
   'P0001', 'Assurance review was not found in this project.',
