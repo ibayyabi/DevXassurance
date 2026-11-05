@@ -43,6 +43,20 @@ The same group request also collects PMO cost evidence, whatever the document's 
 
 The same grouped extraction collects source-backed milestone, progress, and risk observations. Fenced cloud RPCs persist cost evidence and typed observations with their source hash, parser version, and `pmo-assurance-observations/1` contract version. Coverage is tracked separately for budget, schedule, progress, and risk; rejected or unprocessed evidence is not reported as absent. The document's current observation version is updated only after the observation and coverage write succeeds.
 
+#### Risk snapshots across cut-offs
+
+The risk comparison treats the reviewer-selected prior register as a previous
+snapshot, not the approved project baseline. Items match only by exact risk ID
+or a reviewer-accepted identity mapping, and ratings compare only within the
+same scale or an accepted scale mapping. "New", "increased", and "decreased"
+are stated only when both registers state their cut-off (source date or period
+label) and the cut-offs are provably distinct; registers stating the same
+cut-off are the same snapshot and are never mixed into a before/after. A risk
+missing from the later register stays an explicit "not reported" gap — absence
+is never closure; only a status the source itself states as closed is treated
+as closed. Unprocessed coverage, missing observations, and unmapped differing
+IDs or scales remain gaps the panel shows, never silent zeros or green.
+
 Reviewers can accept, correct, or reject supported observations individually on the Assurance page, including before a document is linked to a review. Decisions retain the reviewer, reason, source version, and original observation; changed decisions invalidate dependent assessments. The observation-decision migration must be applied by the project owner before deployment.
 
 Documents marked Needs Review are selectable only when coverage exists for their current source version. Processing warnings remain visible, and unprocessed domains remain evidence gaps, not absence, zero, or a green condition.

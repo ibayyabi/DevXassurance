@@ -45,8 +45,11 @@ import {
 } from "@/features/assurance/lib/schedule-comparison";
 import {
   buildRiskComparison,
+  riskRatingClass,
   riskSourceIds,
   riskSourceScales,
+  riskStatusIsOpen,
+  type RiskComparison,
 } from "@/features/assurance/lib/risk-comparison";
 import {
   formatReportingPeriod,
@@ -543,30 +546,22 @@ async function acceptRiskMapping(
     throw new Error("A label mapped to itself is not a mapping; identical labels already match.");
   }
 
-  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanApproveBaseline(membership.role);
 
-  // One accepted canonical target per source label: replace any prior one.
-  const { error: clearError } = await supabase
-    .from(table)
-    .delete()
-    .eq("project_id", projectId)
-    .eq("source_label", sourceLabel)
-    .eq("state", "accepted");
-  if (clearError) throw new Error(clearError.message);
-
-  const { error: insertError } = await supabase.from(table).insert({
-    project_id: projectId,
-    source_label: sourceLabel,
-    canonical_label: canonicalLabel,
-    state: "accepted",
-    proposed_by_model: false,
-    note: note || null,
-    created_by: user.id,
-    accepted_by: user.id,
-    accepted_at: new Date().toISOString(),
+  // One accepted canonical target per source label: the RPC supersedes any
+  // prior mapping and inserts the replacement in one transaction, invalidating
+  // affected analyses on the same commit.
+  const mappingKind = table === "risk_identity_mappings" ? "risk_identity" : "risk_scale";
+  const { data: mappingId, error } = await supabase.rpc("replace_assurance_mapping", {
+    p_project_id: projectId,
+    p_mapping_kind: mappingKind,
+    p_source_label: sourceLabel,
+    p_canonical_label: canonicalLabel,
+    p_note: note || null,
   });
-  if (insertError) throw new Error(insertError.message);
+  if (error) throw new Error(error.message);
+  if (!mappingId) throw new Error("The mapping could not be saved.");
 
   revalidateAssurance(projectId);
 }
@@ -582,12 +577,16 @@ async function removeRiskMapping(
   const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanApproveBaseline(membership.role);
 
-  const { error } = await supabase
-    .from(table)
-    .delete()
-    .eq("project_id", projectId)
-    .eq("id", mappingId);
+  // Supersede rather than delete: the mapping history and its attribution stay,
+  // and analyses built on it are invalidated on the same commit.
+  const mappingKind = table === "risk_identity_mappings" ? "risk_identity" : "risk_scale";
+  const { data: removed, error } = await supabase.rpc("remove_assurance_mapping", {
+    p_project_id: projectId,
+    p_mapping_kind: mappingKind,
+    p_mapping_id: mappingId,
+  });
   if (error) throw new Error(error.message);
+  if (removed === false) return;
 
   revalidateAssurance(projectId);
 }
@@ -1298,7 +1297,7 @@ function buildReviewExtraction(
 
 function buildRiskAssessment(
   extraction: ReviewExtraction,
-  comparison: ReturnType<typeof buildRiskComparison>,
+  comparison: RiskComparison,
   riskStatements: {
     current: { source: AssuranceSource; row: AssuranceObservationRow }[];
     baseline: { source: AssuranceSource; row: AssuranceObservationRow }[];
@@ -1513,23 +1512,6 @@ function assuranceEvidenceReference(
   };
 }
 
-function riskStatusIsOpen(status: string | null): boolean | null {
-  if (!status) return null;
-  const normalized = status.toLocaleLowerCase();
-  const closed = /\b(?:not|no longer|never)\s+open\b|\b(?:closed|resolved|mitigated|complete|completed|cancelled|inactive|ditutup|selesai|teratasi)\b/iu.test(normalized);
-  const open = /\b(?:open|active|ongoing|unmitigated|terbuka|aktif|berjalan)\b/iu.test(normalized);
-  return closed === open ? null : open;
-}
-
-function riskRatingClass(label: string | null): "critical" | "high" | "other" | "unknown" {
-  if (!label) return "unknown";
-  const normalized = label.toLocaleLowerCase();
-  if (/\b(?:not|non|below)\s+(?:high|critical)\b/iu.test(normalized)) return "other";
-  if (/\b(?:critical|extreme|very high|kritis|sangat tinggi)\b/iu.test(normalized)) return "critical";
-  if (/\b(?:high|tinggi)\b/iu.test(normalized)) return "high";
-  if (/\b(?:medium|moderate|low|sedang|rendah)\b/iu.test(normalized)) return "other";
-  return "unknown";
-}
 function buildActionRows(findings: ReturnType<typeof evaluateAssuranceReview>) {
   const titles = {
     budget:

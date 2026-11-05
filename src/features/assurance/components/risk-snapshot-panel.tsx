@@ -27,6 +27,10 @@ type RiskSnapshot = {
   periodLabel: string | null;
   asOfDate: string | null;
   excerpt: string | null;
+  sourceRef?: {
+    documentTitle: string | null;
+    sourceContentHash: string | null;
+  } | null;
   reviewDecision?: {
     decision: "accepted" | "corrected";
     status: string | null;
@@ -46,8 +50,11 @@ type RiskChangeType =
   | "unchanged"
   | "rating_changed"
   | "rating_not_comparable"
-  | "present"
-  | "resolved";
+  | "period_not_comparable"
+  | "identity_not_comparable"
+  | "closed"
+  | "not_reported"
+  | "present";
 
 type RiskItemFinding = {
   changeType: RiskChangeType;
@@ -55,11 +62,13 @@ type RiskItemFinding = {
   baseline: RiskSnapshot | null;
   current: RiskSnapshot | null;
   ratingDelta: number | null;
+  previousCutoff?: string | null;
+  currentCutoff?: string | null;
 };
 
 type UnidentifiedRisk = { role: "baseline" | "current"; snapshot: RiskSnapshot };
 
-const roleLabels: Record<string, string> = { baseline: "Baseline", current: "Periode Berjalan" };
+const roleLabels: Record<string, string> = { baseline: "Potret Sebelumnya", current: "Periode Berjalan" };
 
 export function RiskSnapshotPanel({
   projectId,
@@ -86,7 +95,7 @@ export function RiskSnapshotPanel({
     <SectionCard
       icon={ShieldAlert}
       title="Potret risiko — bandingkan item risiko hanya jika identitasnya terpasti"
-      subtitle="Risiko dicocokkan hanya melalui ID yang sama persis atau pemetaan yang disetujui peninjau — nama yang mirip bukan identitas. “Baru” dan “meningkat” hanya muncul bila identitasnya cocok dan ada potret sebelumnya yang dapat dibandingkan. Peringkat hanya dibandingkan dalam skala yang sama atau pemetaan skala yang disetujui. Tidak ada skor Risiko total proyek yang dihasilkan."
+      subtitle="Risiko dicocokkan hanya melalui ID yang sama persis atau pemetaan yang disetujui peninjau — nama yang mirip bukan identitas. “Baru” dan “meningkat” hanya muncul bila identitasnya cocok, ada potret sebelumnya yang terpisah dari baseline yang disetujui, dan tanggal cut-off keduanya terbukti berbeda. Peringkat hanya dibandingkan dalam skala yang sama atau pemetaan skala yang disetujui. Risiko yang tidak lagi dilaporkan tetap menjadi celah bukti, bukan otomatis ditutup — hanya status “closed” dari sumber yang menutup risiko. Tidak ada skor Risiko total proyek yang dihasilkan."
     >
       {/* Item-level risk findings */}
       <h3 className="text-sm font-semibold text-ink">Temuan risiko per item</h3>
@@ -280,6 +289,12 @@ function RiskSources({
       {lines.map((line) => (
         <li key={line.role}>
           <span className="font-medium text-ink">{line.role}:</span> “{line.snapshot.excerpt}”
+          {line.snapshot.sourceRef?.documentTitle && ` — ${line.snapshot.sourceRef.documentTitle}`}
+          {line.snapshot.sourceRef?.sourceContentHash && (
+            <span className="ml-1 font-mono opacity-75">
+              #{line.snapshot.sourceRef.sourceContentHash.slice(0, 8)}
+            </span>
+          )}
           {line.snapshot.periodLabel && ` — ${line.snapshot.periodLabel}`}
           {line.snapshot.asOfDate && ` (per ${line.snapshot.asOfDate})`}
           {line.snapshot.reviewDecision?.decision === "corrected" && (
@@ -307,24 +322,40 @@ function RiskSources({
   );
 }
 
+function cutoffText(cutoff: string | null | undefined) {
+  return cutoff ? ` (per ${cutoff})` : "";
+}
+
 function describeChange(item: RiskItemFinding) {
   const rating = (snapshot: RiskSnapshot | null) =>
     snapshot?.ratingLabel ?? (snapshot?.ratingValue !== null && snapshot?.ratingValue !== undefined ? String(snapshot.ratingValue) : "—");
+  const doc = (snapshot: RiskSnapshot | null) =>
+    snapshot?.sourceRef?.documentTitle ?? null;
+  const statedClosed = (snapshot: RiskSnapshot | null) =>
+    snapshot?.status && snapshot.status.toLocaleLowerCase().match(/\b(?:closed|ditutup|selesai|teratasi|resolved|mitigated)\b/) !== null
+      ? ` Sumber menyatakan status ${snapshot.status}.`
+      : "";
   switch (item.changeType) {
     case "new":
-      return `Pertama dilaporkan pada periode ini di ${rating(item.current)}${scaleSuffix(item.current)}.`;
-    case "resolved":
-      return `Ada di potret sebelumnya (${rating(item.baseline)}${scaleSuffix(item.baseline)}), tidak dilaporkan kini.`;
+      return `Pertama dilaporkan pada periode ini di ${rating(item.current)}${scaleSuffix(item.current)}${doc(item.current) ? ` — ${doc(item.current)}` : ""}${cutoffText(item.currentCutoff)}.`;
+    case "not_reported":
+      return `Ada di potret sebelumnya (${rating(item.baseline)}${scaleSuffix(item.baseline)}${cutoffText(item.previousCutoff)}), tetapi tidak lagi dilaporkan. Ketiadaan laporan bukan bukti risiko sudah ditutup — butuh konfirmasi dari sumber.${statedClosed(item.baseline)}`;
+    case "closed":
+      return `Sumber menyatakan risiko ini closed/tidak lagi terbuka pada periode berjalan${doc(item.current) ? ` — ${doc(item.current)}` : ""}${cutoffText(item.currentCutoff)}.`;
     case "increased":
     case "decreased":
     case "unchanged":
-      return `Peringkat ${rating(item.baseline)} → ${rating(item.current)}${scaleSuffix(item.current)}${item.ratingDelta !== null ? ` (${item.ratingDelta >= 0 ? "+" : ""}${item.ratingDelta})` : ""}.`;
+      return `Peringkat ${rating(item.baseline)} → ${rating(item.current)}${scaleSuffix(item.current)}${item.ratingDelta !== null ? ` (${item.ratingDelta >= 0 ? "+" : ""}${item.ratingDelta})` : ""}${cutoffText(item.previousCutoff)} →${cutoffText(item.currentCutoff)}${doc(item.current) ? ` — ${doc(item.current)}` : ""}.`;
     case "rating_changed":
-      return `Peringkat berubah ${rating(item.baseline)} → ${rating(item.current)}; arah tidak dapat dipastikan tanpa nilai numerik.`;
+      return `Peringkat berubah ${rating(item.baseline)} → ${rating(item.current)}${scaleSuffix(item.current)}; arah tidak dapat dipastikan tanpa nilai numerik pada skala yang sama.`;
     case "rating_not_comparable":
       return `Ada di keduanya, tetapi peringkat memakai skala berbeda (${item.baseline?.scaleLabel ?? "—"} vs ${item.current?.scaleLabel ?? "—"}) tanpa pemetaan skala yang disetujui.`;
+    case "period_not_comparable":
+      return `Tidak dapat dibandingkan antarwaktu: potret sebelumnya dan periode berjalan${item.previousCutoff && item.currentCutoff ? " menyatakan cut-off yang sama" : " tidak sama-sama menyatakan tanggal cut-off"} sehingga bukan dua potret yang berbeda.`;
+    case "identity_not_comparable":
+      return `Ada ID risiko yang belum dipetakan di sisi lain periode; tanpa pemetaan yang disetujui, item ini belum bisa dinyatakan baru atau sudah tidak dilaporkan.`;
     default:
-      return "Ada di kedua potret; tidak ada peringkat yang dapat dibandingkan.";
+      return "Ada di potret berjalan; tidak ada perbandingan yang dapat dinyatakan.";
   }
 }
 
@@ -339,9 +370,12 @@ function changeLabel(change: RiskChangeType) {
     decreased: "Menurun",
     unchanged: "Tidak berubah",
     rating_changed: "Peringkat berubah",
-    rating_not_comparable: "Tidak dapat dibandingkan",
+    rating_not_comparable: "Skala tidak dapat dibandingkan",
+    period_not_comparable: "Cut-off tidak dapat dibandingkan",
+    identity_not_comparable: "Identitas belum terpetakan",
+    closed: "Ditutup sumber",
+    not_reported: "Tidak lagi dilaporkan",
     present: "Ada",
-    resolved: "Tidak dilaporkan lagi",
   };
   return labels[change];
 }
@@ -349,6 +383,7 @@ function changeLabel(change: RiskChangeType) {
 function changeTone(change: RiskChangeType) {
   if (change === "increased" || change === "new") return "bg-status-critical-bg text-status-critical-text";
   if (change === "rating_changed" || change === "rating_not_comparable") return "bg-status-warn-bg text-status-warn-text";
-  if (change === "decreased" || change === "unchanged" || change === "resolved") return "bg-status-ok-bg text-status-ok-text";
+  if (change === "period_not_comparable" || change === "identity_not_comparable" || change === "not_reported") return "bg-status-warn-bg text-status-warn-text";
+  if (change === "decreased" || change === "unchanged") return "bg-status-ok-bg text-status-ok-text";
   return "bg-plan-track text-ink-muted";
 }
