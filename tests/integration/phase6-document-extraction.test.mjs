@@ -1342,6 +1342,15 @@ test("a provider quota defers the remaining groups for retry instead of reportin
   const source = sourceDocument("QUOTA");
   let quotaExhausted = true;
   let groupCalls = [];
+  let releaseFirstGroup;
+  const firstGroupGate = new Promise((resolve) => { releaseFirstGroup = resolve; });
+  let markDeferredCheckpoint;
+  const deferredCheckpointSaved = new Promise((resolve) => { markDeferredCheckpoint = resolve; });
+  const saveGroup = store.saveGroup.bind(store);
+  store.saveGroup = async (row) => {
+    await saveGroup(row);
+    if (row.status === "failed") markDeferredCheckpoint();
+  };
 
   await withLocalOllama(async (_url, init) => {
     const prompt = JSON.parse(init.body).messages[1].content;
@@ -1351,6 +1360,7 @@ test("a provider quota defers the remaining groups for retry instead of reportin
     if (isExecutiveSummaryPrompt(prompt)) return modelResponse(validModelOutput(prompt));
     const chunkIndex = documentContextFromPrompt(prompt)[0].chunk_index;
     groupCalls.push(chunkIndex);
+    if (quotaExhausted && chunkIndex === 0) await firstGroupGate;
     if (quotaExhausted && chunkIndex === 2) {
       return new Response(JSON.stringify({ error: "quota exceeded" }), {
         status: 429,
@@ -1359,26 +1369,60 @@ test("a provider quota defers the remaining groups for retry instead of reportin
     }
     return modelResponse(validModelOutput(prompt));
   }, async () => {
-    const deferred = await processDocumentJob(job(source, { fileName: "quota.txt" }), store);
+    const firstAttempt = processDocumentJob(job(source, { fileName: "quota.txt" }), store);
+    let timeout;
+    try {
+      await Promise.race([
+        deferredCheckpointSaved,
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("429 group was not checkpointed")), 5_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+      releaseFirstGroup();
+    }
+    const deferred = await firstAttempt;
     assert.equal(deferred.status, "failed");
     assert.equal(deferred.errorCode, "llm_provider_transient_failure");
 
-    const rows = [...store.rows.values()];
-    const deferredRows = rows.filter((row) => row.status === "failed");
-    assert.equal(deferredRows.length, 1);
-    assert.ok(rows.some((row) => row.status === "completed"));
-    const [deferredRow] = deferredRows;
+    const firstAttemptRows = [...store.rows.values()];
+    const deferredRow = firstAttemptRows.find((row) => row.status === "failed");
+    assert.ok(deferredRow, "the 429 group remains deferred instead of becoming absent");
+    const completedBeforeRetry = firstAttemptRows.filter((row) => row.status === "completed");
+    assert.ok(completedBeforeRetry.length, "some completed groups are checkpointed for reuse");
+    const completedGroupKeys = new Set(completedBeforeRetry.map((row) => row.groupKey));
+    const completedStartChunks = new Set(completedBeforeRetry.map((row) => row.chunkStartIndex));
     assert.equal(deferredRow.result, null);
     assert.ok(deferredRow.attemptCount >= 1);
     assert.match(deferredRow.lastError, /HTTP 429/);
-    assert.equal(groupCalls.filter((chunkIndex) => chunkIndex === 2).length, 1, "a 429 is deferred instead of retried immediately");
 
-    // The retry resumes only the deferred group; completed work is not re-sent.
+    // The typed transient failure leaves evidence unclassified; it is not an
+    // absence result. Previously completed checkpoints are the retry boundary.
     quotaExhausted = false;
     groupCalls = [];
     const retried = await processDocumentJob(job(source, { fileName: "quota.txt" }), store);
     assert.equal(retried.status, "completed", `${retried.errorCode}: ${retried.errorMessage}`);
-    assert.deepEqual([...new Set(groupCalls)], [2]);
+    const retryStartChunks = new Set(groupCalls);
+    assert.ok(
+      [...completedStartChunks].every((chunkIndex) => !retryStartChunks.has(chunkIndex)),
+      "retry does not send groups with completed checkpoints",
+    );
+    const resumedGroups = [...store.rows.values()].filter(
+      (row) => row.status === "completed" && !completedGroupKeys.has(row.groupKey),
+    );
+    assert.ok(
+      resumedGroups.some((row) => row.groupKey === deferredRow.groupKey),
+      "retry sends the group deferred by HTTP 429",
+    );
+    assert.ok(
+      resumedGroups.some((row) => row.groupKey !== deferredRow.groupKey),
+      "retry also sends a group that had not started before deferral",
+    );
+    assert.ok(
+      resumedGroups.every((row) => retryStartChunks.has(row.chunkStartIndex)),
+      "every newly completed group was actually sent on retry",
+    );
     assert.deepEqual(
       [...new Set([...store.rows.values()].map((row) => row.status))],
       ["completed"],
