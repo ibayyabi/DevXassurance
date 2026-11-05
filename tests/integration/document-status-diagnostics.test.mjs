@@ -115,14 +115,18 @@ test("diagnostic reads stay project-scoped and never expose service-role access"
         },
         order(_column, options) {
           seen.order = options;
-          return Promise.resolve({ data: [], error: null });
+          return {
+            range() {
+              return Promise.resolve({ data: [], error: null });
+            },
+          };
         },
       };
     },
   };
   await fetchJobDiagnostics(supabase, "project-a", ["doc-1", "doc-2"]);
   assert.equal(seen.table, "ai_jobs");
-  assert.deepEqual(seen.eq, [["project_id", "project-a"], ["job_type", "parse_document"]]);
+  assert.deepEqual(seen.eq, [["job_type", "parse_document"], ["project_id", "project-a"]]);
   assert.deepEqual(seen.in, [["document_id", ["doc-1", "doc-2"]]]);
   assert.deepEqual(seen.order, { ascending: true }, "created_at order keeps the latest job per document");
 });
@@ -141,7 +145,11 @@ test("a diagnostics read error degrades to no diagnostics instead of failing the
           return this;
         },
         order() {
-          return Promise.resolve({ data: null, error: { message: "permission denied" } });
+          return {
+            range() {
+              return Promise.resolve({ data: null, error: { message: "permission denied" } });
+            },
+          };
         },
       };
     },
@@ -181,11 +189,121 @@ test("latest job per document wins when several parse jobs exist", async () => {
           return this;
         },
         order() {
-          return Promise.resolve({ data: rows, error: null });
+          return {
+            range() {
+              return Promise.resolve({ data: rows, error: null });
+            },
+          };
         },
       };
     },
   };
   const diagnostics = await fetchJobDiagnostics(supabase, "project-a", ["doc-1"]);
   assert.equal(diagnostics.get("doc-1").jobId, "job-2");
+});
+
+test("more than one page of jobs keeps the latest job per document", async () => {
+  const pageSize = (await import(`data:text/javascript;base64,${Buffer.from(ts.transpileModule(
+    readFileSync(path.join(repoRoot, "src/features/documents/lib/job-diagnostics.ts"), "utf8"),
+    { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } },
+  ).outputText).toString("base64")}`)).JOB_DIAGNOSTICS_PAGE_SIZE;
+  const totalRows = pageSize + 300;
+  const rows = Array.from({ length: totalRows }, (_, index) => ({
+    id: `job-${index}`,
+    // The newest page carries doc-1's latest job; earlier pages hold stale ones.
+    document_id: index < totalRows - 300 ? "doc-0" : "doc-1",
+    status: index === totalRows - 1 ? "queued" : "failed",
+    error_code: null,
+    error_message: null,
+    attempt_count: 1,
+    max_attempts: 3,
+    lease_expires_at: null,
+    available_at: null,
+    claimed_at: null,
+  }));
+  const ranges = [];
+  const supabase = {
+    from() {
+      return {
+        select() {
+          return this;
+        },
+        eq() {
+          return this;
+        },
+        in() {
+          return this;
+        },
+        order() {
+          return {
+            range(from, to) {
+              ranges.push([from, to]);
+              return Promise.resolve({
+                data: rows.slice(from, to + 1),
+                error: null,
+              });
+            },
+          };
+        },
+      };
+    },
+  };
+  const diagnostics = await fetchJobDiagnostics(supabase, "project-a", ["doc-0", "doc-1"]);
+  assert.equal(ranges.length, 2, "pagination continues past the first full page");
+  assert.deepEqual(ranges[0], [0, pageSize - 1]);
+  assert.deepEqual(ranges[1], [pageSize, pageSize + pageSize - 1]);
+  // The last row (highest created_at) wins for doc-1 despite 300+ earlier jobs.
+  assert.equal(diagnostics.get("doc-1").jobId, `job-${totalRows - 1}`);
+  assert.equal(diagnostics.get("doc-1").status, "queued");
+});
+
+test("an exactly-full last page requests one more range before stopping", async () => {
+  const { JOB_DIAGNOSTICS_PAGE_SIZE: pageSize } = await import(
+    `data:text/javascript;base64,${Buffer.from(ts.transpileModule(
+      readFileSync(path.join(repoRoot, "src/features/documents/lib/job-diagnostics.ts"), "utf8"),
+      { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } },
+    ).outputText).toString("base64")}`
+  );
+  const rows = Array.from({ length: pageSize }, (_, index) => ({
+    id: `job-${index}`,
+    document_id: "doc-1",
+    status: "completed",
+    error_code: null,
+    error_message: null,
+    attempt_count: 1,
+    max_attempts: 3,
+    lease_expires_at: null,
+    available_at: null,
+    claimed_at: null,
+  }));
+  const ranges = [];
+  const supabase = {
+    from() {
+      return {
+        select() {
+          return this;
+        },
+        eq() {
+          return this;
+        },
+        in() {
+          return this;
+        },
+        order() {
+          return {
+            range(from, to) {
+              ranges.push([from, to]);
+              return Promise.resolve({
+                data: rows.slice(from, to + 1),
+                error: null,
+              });
+            },
+          };
+        },
+      };
+    },
+  };
+  const diagnostics = await fetchJobDiagnostics(supabase, "project-a", ["doc-1"]);
+  assert.equal(ranges.length, 2, "a full page is followed by one empty confirmation page");
+  assert.equal(diagnostics.get("doc-1").jobId, `job-${pageSize - 1}`);
 });

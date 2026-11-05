@@ -4,8 +4,8 @@
 // wasting provider quota or fighting a newer claim. Fencing itself stays in
 // the database: every durable write is still verified by claim token + live
 // lease in the same transaction; the heartbeat only decides when to stop work
-// early. A `setInterval`/timer seam lets deterministic tests drive renewals
-// with a simulated clock.
+// early. A scheduler seam lets deterministic tests drive renewals with a
+// simulated clock.
 export type LeaseRenewResult = {
   error: { message?: string } | null;
 };
@@ -13,14 +13,19 @@ export type LeaseRenewResult = {
 export type LeaseHeartbeat = {
   /** True once the database rejected a renewal because this attempt no longer owns the job. */
   lost(): boolean;
+  /**
+   * Ownership guard for the extraction layer: false once renewal was rejected
+   * OR the lease is assumed expired (repeated transient renewal failures with
+   * no successful renewal since the last known expiry), so a stale attempt
+   * cannot run provider requests indefinitely on a dead lease.
+   */
+  owns(): boolean;
   stop(): void;
 };
 
-/**
- * Minimal shape used from the Supabase client. The Postgrest RPC builder is a
+/** Minimal shape used from the Supabase client. The Postgrest RPC builder is a
  * thenable (it has `.then` but is not a real Promise), so the renewer accepts
- * anything awaitable that resolves to a result with an optional error.
- */
+ * anything awaitable that resolves to a result with an optional error. */
 export type LeaseRenewer = {
   rpc: (
     name: string,
@@ -62,7 +67,14 @@ export function createLeaseHeartbeat(
     return () => clearInterval(timer);
   },
 ): LeaseHeartbeat {
-  let lostOwnership = false;
+  let rejected = false;
+  // A successful renewal means the lease is live for at least the claim
+  // interval; transient failures consume that headroom without extending it.
+  // Once more consecutive failures than the lease allows have passed, the
+  // attempt must assume the lease expired and stop new provider work — the
+  // database still fences every durable write either way.
+  let consecutiveTransientFailures = 0;
+  const maxToleratedFailures = Math.max(1, Math.floor(15 * 60_000 / intervalMs) - 1);
   const renew = async () => {
     try {
       const { error } = await renewer.rpc("extend_document_job_lease", {
@@ -70,17 +82,21 @@ export function createLeaseHeartbeat(
         p_claim_token: claimToken,
         p_minutes: 15,
       });
-      if (error && ownershipRejected(error)) lostOwnership = true;
-      // Transient renewal failures are tolerated: the lease has several
-      // intervals of headroom and the next tick retries; the database remains
-      // the authority on ownership for every durable write.
+      if (error && ownershipRejected(error)) {
+        rejected = true;
+        return;
+      }
+      consecutiveTransientFailures = 0;
     } catch (error) {
-      if (ownershipRejected(error)) lostOwnership = true;
+      if (ownershipRejected(error)) rejected = true;
+      else consecutiveTransientFailures += 1;
     }
   };
   const cancel = schedule(renew, intervalMs);
   return {
-    lost: () => lostOwnership,
+    lost: () => rejected,
+    owns: () =>
+      !rejected && consecutiveTransientFailures <= maxToleratedFailures,
     stop: cancel,
   };
 }

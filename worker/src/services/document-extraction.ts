@@ -457,6 +457,24 @@ const MAX_CLASSIFICATION_SOURCES = 12;
 const MAX_CLASSIFICATION_SOURCE_CHARACTERS = 700;
 let activeProviderRequests = 0;
 const providerRequestWaiters: Array<() => void> = [];
+
+/**
+ * Optional check consulted before every provider request (classification,
+ * group extraction, executive summary). The document worker injects a lease
+ * guard that returns false once the job's ownership was lost, so a stale
+ * attempt stops before spending provider quota. Ownership itself stays fenced
+ * in the database; this guard only decides whether to start new work.
+ */
+let ownershipGuard: (() => boolean) | null = null;
+
+export function setProviderOwnershipGuard(guard: (() => boolean) | null) {
+  ownershipGuard = guard;
+}
+
+function providerRequestBlocked() {
+  return ownershipGuard !== null && !ownershipGuard();
+}
+
 const FACT_TYPES = ["risk", "issue", "milestone", "decision", "owner_action"] as const;
 const DOCUMENT_TYPES = documentTypes.filter((type) => type !== "unknown");
 const DOCUMENT_TYPE_GUIDANCE = [
@@ -614,6 +632,16 @@ export async function extractDocumentGroups(
           extraction = await extractGroupWithCorrection(job, work.group, provider);
         } catch (error) {
           const attemptError = error as GroupAttemptError;
+          // Ownership was lost mid-run: do not checkpoint a "failed" group over
+          // a newer attempt's state and do not process further groups; the
+          // route's not_owned response ends this attempt without durable writes.
+          if (attemptError.errorCode === "llm_provider_ownership_lost") {
+            groupFailures.push({
+              code: "llm_provider_ownership_lost",
+              message: `Source chunks ${work.group.chunkStartIndex}-${work.group.chunkEndIndex}: skipped because the attempt lost ownership of the job.`,
+            });
+            break;
+          }
           const errorMessage = safeGroupError(attemptError);
           try {
             await store.saveGroup(groupRecord(job, contentHash, parserVersion, work.group, {
@@ -669,7 +697,9 @@ export async function extractDocumentGroups(
 
   if (groupFailures.length) {
     const codes = new Set(groupFailures.map((item) => item.code));
-    const errorCode = codes.has("extraction_group_checkpoint_rejected")
+    const errorCode = codes.has("llm_provider_ownership_lost")
+      ? "llm_provider_ownership_lost"
+      : codes.has("extraction_group_checkpoint_rejected")
       ? "extraction_group_checkpoint_rejected"
       : codes.has("extraction_group_checkpoint_failed")
       ? "extraction_group_checkpoint_failed"
@@ -999,6 +1029,12 @@ async function extractGroupWithCorrection(
   let errorCode = "llm_group_extraction_failed";
 
   for (let attempt = 1; attempt <= MAX_GROUP_ATTEMPTS; attempt += 1) {
+    if (providerRequestBlocked()) {
+      const error = new Error(lastError) as GroupAttemptError;
+      error.attempts = attempt - 1;
+      error.errorCode = "llm_provider_ownership_lost";
+      throw error;
+    }
     const attemptStarted = performance.now();
     try {
       const raw = await withProviderConcurrencySlot(() =>
@@ -1651,6 +1687,14 @@ async function classifyDocument(
   let lastErrors = ["The provider did not return a valid document classification."];
 
   for (let attempt = 1; attempt <= MAX_GROUP_ATTEMPTS; attempt += 1) {
+    if (providerRequestBlocked()) {
+      return {
+        suggestion: emptySuggestion,
+        qualityWarnings: [
+          "Document-level artifact classification was skipped: the processing attempt lost ownership of the job before the request was sent.",
+        ],
+      };
+    }
     const attemptStarted = performance.now();
     try {
       const raw = await withProviderConcurrencySlot(() =>
@@ -4208,6 +4252,7 @@ async function synthesizeExecutiveSummary(
   let lastError = "The provider did not return a valid prioritized summary.";
 
   for (let attempt = 1; attempt <= MAX_GROUP_ATTEMPTS; attempt += 1) {
+    if (providerRequestBlocked()) break;
     const attemptStarted = performance.now();
     try {
       const raw = await withProviderConcurrencySlot(() =>
@@ -4263,7 +4308,9 @@ async function synthesizeExecutiveSummary(
     });
   }
 
-  const warning = "The prioritized whole-document summary could not be validated; review the extracted evidence.";
+  const warning = ownershipGuard !== null && !ownershipGuard()
+    ? "The processing attempt lost ownership of the job; the prioritized summary was not requested."
+    : "The prioritized whole-document summary could not be validated; review the extracted evidence.";
   return {
     summary: {
       summary_text: "Executive summary unavailable. Review the extracted findings and source evidence.",

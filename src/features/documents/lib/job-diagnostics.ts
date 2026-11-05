@@ -1,7 +1,10 @@
 // Project-scoped job diagnostics for the document library. Reads the latest
 // parse job per document via the user's own Supabase client: RLS
 // (`ai_jobs_read_by_project_members`) keeps every row project-scoped and the
-// service-role key never reaches this path.
+// service-role key never reaches this path. All jobs of a project are paged
+// past the PostgREST row cap so the latest job per document is never silently
+// missing; a failed read yields no diagnostics instead of a wrong "active"
+// claim.
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type JobDiagnosticRow = {
@@ -31,6 +34,8 @@ export type JobDiagnostic = {
   leaseExpired: boolean;
 };
 
+export const JOB_DIAGNOSTICS_PAGE_SIZE = 1000;
+
 export function mapJobDiagnostic(row: JobDiagnosticRow, now: Date = new Date()): JobDiagnostic {
   const leaseExpiry = row.lease_expires_at ? new Date(row.lease_expires_at) : null;
   const availableAt = row.available_at ? new Date(row.available_at) : null;
@@ -53,6 +58,22 @@ export function mapJobDiagnostic(row: JobDiagnosticRow, now: Date = new Date()):
   };
 }
 
+type JobQuery = {
+  select: (columns: string) => JobQuery;
+  eq: (column: string, value: string) => JobQuery;
+  in: (column: string, values: string[]) => JobQuery;
+  order: (column: string, options: { ascending: boolean }) => JobQuery;
+  range: (from: number, to: number) => Promise<{ data: JobDiagnosticRow[] | null; error: { message: string } | null }>;
+};
+
+function jobDiagnosticsQuery(supabase: SupabaseClient): JobQuery {
+  return supabase
+    .from("ai_jobs")
+    .select(
+      "id, document_id, status, error_code, error_message, attempt_count, max_attempts, lease_expires_at, available_at, claimed_at",
+    ) as unknown as JobQuery;
+}
+
 export async function fetchJobDiagnostics(
   supabase: SupabaseClient,
   projectId: string,
@@ -60,21 +81,23 @@ export async function fetchJobDiagnostics(
 ): Promise<Map<string, JobDiagnostic>> {
   const byDocument = new Map<string, JobDiagnostic>();
   if (!documentIds.length) return byDocument;
-  const { data, error } = await supabase
-    .from("ai_jobs")
-    .select(
-      "id, document_id, status, error_code, error_message, attempt_count, max_attempts, lease_expires_at, available_at, claimed_at",
-    )
-    .eq("project_id", projectId)
-    .eq("job_type", "parse_document")
-    .in("document_id", documentIds)
-    .order("created_at", { ascending: true });
-  if (error) return byDocument;
   const now = new Date();
-  for (const row of data ?? []) {
-    // Rows arrive ordered by created_at; the last row per document is the
-    // latest job, matching how queue_document_parse_job/retry pick jobs.
-    byDocument.set(row.document_id, mapJobDiagnostic(row, now));
+  // Ascending created_at order plus overwrite-on-repeat keeps the latest job
+  // per document after full pagination. A page short of the full size ends the
+  // scan; a page exactly at the cap is followed by one more range request.
+  for (let offset = 0; ; offset += JOB_DIAGNOSTICS_PAGE_SIZE) {
+    const { data, error } = await jobDiagnosticsQuery(supabase)
+      .eq("job_type", "parse_document")
+      .eq("project_id", projectId)
+      .in("document_id", documentIds)
+      .order("created_at", { ascending: true })
+      .range(offset, offset + JOB_DIAGNOSTICS_PAGE_SIZE - 1);
+    if (error) return new Map();
+    const rows = data ?? [];
+    for (const row of rows) {
+      byDocument.set(row.document_id, mapJobDiagnostic(row, now));
+    }
+    if (rows.length < JOB_DIAGNOSTICS_PAGE_SIZE) break;
   }
   return byDocument;
 }

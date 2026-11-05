@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createLeaseHeartbeat } from "@/features/documents/lib/lease-heartbeat";
+import { setProviderOwnershipGuard } from "../../../../../worker/src/services/document-extraction";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
@@ -101,6 +102,7 @@ export async function POST(request: NextRequest) {
   // job and this attempt stops before wasting provider quota. Every durable
   // write remains fenced by the database regardless of the heartbeat.
   const heartbeat = createLeaseHeartbeat(supabase, jobId, claimToken);
+  setProviderOwnershipGuard(() => heartbeat.owns());
   const workerStarted = performance.now();
   let workerOutcome = "failed";
   try {
@@ -192,7 +194,10 @@ export async function POST(request: NextRequest) {
     });
 
     if (result.status === "failed") {
-      if (result.errorCode === "extraction_group_checkpoint_rejected") return notOwnedResponse();
+      if (
+        result.errorCode === "extraction_group_checkpoint_rejected" ||
+        result.errorCode === "llm_provider_ownership_lost"
+      ) return notOwnedResponse();
       const failure = {
         jobId,
         claimToken,
@@ -348,6 +353,7 @@ export async function POST(request: NextRequest) {
   }
   finally {
     heartbeat.stop();
+    setProviderOwnershipGuard(null);
     console.info("Document worker stage completed", {
       stage: "worker_total",
       jobId,

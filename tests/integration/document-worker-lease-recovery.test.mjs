@@ -56,6 +56,7 @@ function workerDependencies(overrides = {}) {
     },
     "../../../../../worker/src/services/document-extraction": {
       documentSuggestionUpdateFields: (value) => value,
+      setProviderOwnershipGuard: () => {},
     },
   };
 }
@@ -255,7 +256,7 @@ test("a 429 provider response defers work without reporting evidence absent and 
   );
 });
 
-test("heartbeat renews the lease and flags lost ownership on rejection", async (t) => {
+test("heartbeat renews the lease and flags lost ownership on rejection", async () => {
   const heartbeatModule = await import(
     `data:text/javascript;base64,${Buffer.from(ts.transpileModule(
       readFileSync(path.join(repoRoot, "src/features/documents/lib/lease-heartbeat.ts"), "utf8"),
@@ -286,18 +287,22 @@ test("heartbeat renews the lease and flags lost ownership on rejection", async (
   );
 
   assert.equal(heartbeat.lost(), false);
+  assert.equal(heartbeat.owns(), true);
   await fireTick();
   assert.equal(heartbeat.lost(), false, "a successful renewal keeps ownership");
+  assert.equal(heartbeat.owns(), true);
   await fireTick();
   assert.equal(heartbeat.lost(), true, "a rejected renewal marks ownership lost");
+  assert.equal(heartbeat.owns(), false, "a rejected renewal revokes the ownership guard");
   heartbeat.stop();
   assert.equal(cancelled, true);
 
-  // Transient renewal failures keep ownership; the database remains the
-  // authority on every durable write.
+  // Transient renewal failures keep ownership only within the lease headroom;
+  // past it the attempt must assume the lease expired and stop new work.
   const transientHeartbeat = heartbeatModule.createLeaseHeartbeat(
     {
       async rpc() {
+        transientCalls += 1;
         throw new Error("fetch failed");
       },
     },
@@ -311,5 +316,91 @@ test("heartbeat renews the lease and flags lost ownership on rejection", async (
   );
   await fireTick();
   assert.equal(transientHeartbeat.lost(), false);
+  assert.equal(transientHeartbeat.owns(), true, "one transient failure stays inside the lease headroom");
+  await fireTick();
+  assert.equal(transientHeartbeat.owns(), false, "a second failure past the headroom assumes lease expiry");
+  assert.equal(transientHeartbeat.lost(), false, "assumed expiry is not a database rejection");
   transientHeartbeat.stop();
+
+  // A short interval allows several tolerated failures before the deadline.
+  const tunedHeartbeat = heartbeatModule.createLeaseHeartbeat(
+    {
+      async rpc() {
+        throw new Error("fetch failed");
+      },
+    },
+    "job-a",
+    "token-a",
+    5 * 60_000,
+    (callback) => {
+      fireTick = callback;
+      return () => {};
+    },
+  );
+  await fireTick();
+  await fireTick();
+  assert.equal(tunedHeartbeat.owns(), true, "two transient failures still fit the 15-minute lease");
+  await fireTick();
+  assert.equal(tunedHeartbeat.owns(), false, "the third failure exhausts the lease headroom");
+  tunedHeartbeat.stop();
+});
+
+test("ownership lost mid-run stops remaining provider groups without durable writes", async (t) => {
+  const { loadWorkerModules } = await import("./helpers/worker-modules.mjs");
+  const { extraction } = await loadWorkerModules();
+  const { setProviderOwnershipGuard, extractDocumentGroups } = extraction;
+
+  // Simulate the route's guard wiring; ownership flips between group requests.
+  let owned = true;
+  setProviderOwnershipGuard(() => owned);
+  t.after(() => setProviderOwnershipGuard(null));
+
+  const providerCalls = [];
+  const savedFetch = globalThis.fetch;
+  process.env.XASS_LLM_PROVIDER = "ollama";
+  process.env.OLLAMA_BASE_URL = "http://ollama.test";
+  process.env.OLLAMA_MODEL = "test-model";
+  globalThis.fetch = async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    providerCalls.push(prompt.slice(0, 40));
+    // The first group request succeeds; ownership is lost before the next.
+    if (!prompt.startsWith("Classify the entire document")) owned = false;
+    return new Response(JSON.stringify({
+      message: { content: JSON.stringify({}) },
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  t.after(() => {
+    globalThis.fetch = savedFetch;
+    for (const key of ["XASS_LLM_PROVIDER", "OLLAMA_BASE_URL", "OLLAMA_MODEL"]) delete process.env[key];
+  });
+
+  const chunks = Array.from({ length: 6 }, (_, index) => ({
+    chunkIndex: index,
+    chunkText: `Group source block ${index} with progress 10%.`,
+    page_number: null,
+    section_label: null,
+    parserMetadata: { parserVersion: "test/ownership/1" },
+  }));
+  const outcome = await extractDocumentGroups(
+    { projectId: "project-a", documentId: "document-a", fileName: "ownership.txt", fileBuffer: new ArrayBuffer(8) },
+    chunks,
+    { parserVersion: "test/ownership/1" },
+    {
+      async loadGroups() {
+        return [];
+      },
+      async saveGroup() {
+        throw new Error("a stale attempt must not checkpoint after ownership loss");
+      },
+    },
+  );
+
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.errorCode, "llm_provider_ownership_lost");
+  const groupCalls = providerCalls.filter((call) => !call.startsWith("Classify the entire document"));
+  assert.ok(groupCalls.length >= 1, "the first group request ran before ownership was lost");
+  assert.ok(
+    groupCalls.length < 6,
+    `remaining groups must not be requested after ownership loss (got ${groupCalls.length})`,
+  );
 });
