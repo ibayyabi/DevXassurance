@@ -67,6 +67,15 @@ function fixture(options = {}) {
     source("base", "baseline", "Baseline W4", "a".repeat(64), options.baselineObservations ?? [], allProcessed),
     source("current", "current", "Current W5", "b".repeat(64), options.currentObservations ?? [], allProcessed),
   ];
+  const previousRisk = options.previousRisk ?? {};
+  const tables = {
+    assurance_reviews: previousRisk.reviews ?? [],
+    assurance_review_documents: previousRisk.links ?? [],
+    documents: previousRisk.documents ?? [],
+    assurance_observations: previousRisk.observations ?? [],
+    assurance_observation_coverage: previousRisk.coverage ?? [],
+    assurance_observation_decisions: previousRisk.decisions ?? [],
+  };
   const supabase = {
     rpc: async (name, input) => {
       calls.push({ name, input });
@@ -83,19 +92,27 @@ function fixture(options = {}) {
       }
       return { data: true, error: null };
     },
-    from: () => ({
-      select() { return this; },
-      eq() { return this; },
-      in() { return this; },
-      order() { return this; },
-      limit() { return this; },
-      maybeSingle() {
-        return Promise.resolve({
-          data: { reporting_period: "2026-10-16", cutoff_precision: "date" },
-          error: null,
-        });
-      },
-    }),
+    from: (table) => {
+      const filters = [];
+      const rows = () => (tables[table] ?? []).filter((row) => filters.every(([kind, key, value]) =>
+        kind === "eq" ? row[key] === value : value.includes(row[key])));
+      return {
+        select() { return this; },
+        eq(key, value) { filters.push(["eq", key, value]); return this; },
+        in(key, value) { filters.push(["in", key, value]); return this; },
+        order() { return this; },
+        limit() { return this; },
+        maybeSingle() {
+          return Promise.resolve({
+            data: { reporting_period: "2026-10-16", cutoff_precision: "date" },
+            error: null,
+          });
+        },
+        then(resolve, reject) {
+          return Promise.resolve({ data: rows(), error: null }).then(resolve, reject);
+        },
+      };
+    },
   };
   const dependencies = {
     "next/cache": { revalidatePath() {} },
@@ -546,10 +563,48 @@ test("a corrected risk rating changes the actual risk change detection", async (
     observation(id, "risk", "risk_snapshot", {
       risk_id: "R-SB01-001", name: "Alarm", status: "Open", rating_label: ratingLabel,
       rating_value: null, scale_label: "Low-Med-High", scope_level: null,
+      period_label: role === "baseline" ? "W4" : "W5",
+      as_of_date: role === "baseline" ? "2026-10-09" : "2026-10-16",
     });
+  const previousHash = "c".repeat(64);
+  const previousObservation = {
+    ...observation("r-prev", "risk", "risk_snapshot", {
+      risk_id: "R-SB01-001", name: "Alarm", status: "Open", rating_label: "Low",
+      rating_value: null, scale_label: "Low-Med-High", period_label: "W4",
+      as_of_date: "2026-10-09",
+    }),
+    project_id: "project-1", document_id: "prior-doc", source_content_hash: previousHash,
+    parser_version: "parser/1", contract_version: "contract/1", observation_fingerprint: "prior-fp",
+  };
+  const previousRisk = {
+    reviews: [{
+      id: "review-prior", project_id: "project-1", reporting_period: "2026-10-09",
+      cutoff_precision: "date", status: "findings_ready",
+    }],
+    links: [{
+      project_id: "project-1", review_id: "review-prior",
+      document_id: "prior-doc", evidence_role: "current",
+    }],
+    documents: [{
+      id: "prior-doc", project_id: "project-1", title: "Prior W4 risk report",
+      content_hash: previousHash, assurance_observation_parser_version: "parser/1",
+      assurance_observation_contract_version: "contract/1", processing_status: "completed",
+    }],
+    observations: [previousObservation],
+    coverage: [{
+      project_id: "project-1", document_id: "prior-doc", source_content_hash: previousHash,
+      parser_version: "parser/1", contract_version: "contract/1", domain: "risk",
+      state: "processed", total_groups: 1, processed_groups: 1, reason: null,
+    }],
+    decisions: [],
+  };
   const sources = [
-    source("base", "baseline", "Baseline W4", "a".repeat(64), [snapshot("r-base", "baseline", "Low")], allProcessed),
-    source("current", "current", "Current W5", "b".repeat(64), [snapshot("r-cur", "current", "Low")], allProcessed),
+    source("base", "baseline", "Baseline W4", "a".repeat(64), [
+      snapshot("r-base", "baseline", "Low"),
+    ], allProcessed),
+    source("current", "current", "Current W5", "b".repeat(64), [
+      snapshot("r-cur", "current", "Low"),
+    ], allProcessed),
   ];
   const corrected = fixture({
     claim: {
@@ -560,18 +615,22 @@ test("a corrected risk rating changes the actual risk change detection", async (
           decided_by: "user-1", decided_at: "2026-11-05T00:00:00Z", observation_ids: ["r-cur"] },
       ],
     },
+    previousRisk,
   });
   await corrected.assurance.runAssuranceAnalysis(form());
   const publication = corrected.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
   const item = publication.input.p_result_metadata.risk_item_findings.find((entry) => entry.canonicalId === "R-SB01-001");
   assert.equal(item.current.ratingLabel, "High", "the comparison uses the corrected rating");
   assert.equal(item.current.sourceRatingLabel, "Low", "the extracted rating stays for display");
-  assert.equal(item.changeType, "rating_changed", "the corrected rating produces an increased-risk finding");
+  assert.equal(item.changeType, "rating_changed", "the corrected ordinal label changes the finding without inventing a numeric direction");
   const riskFinding = publication.input.p_findings.find((finding) => finding.domain === "risk");
   assert.notEqual(riskFinding.condition, "on_track",
     "a corrected high rating must not leave the risk assessed as on track");
 
-  const raw = fixture({ claim: { attempt_id: "attempt-1", sources, observation_decisions: [] } });
+  const raw = fixture({
+    claim: { attempt_id: "attempt-1", sources, observation_decisions: [] },
+    previousRisk,
+  });
   await raw.assurance.runAssuranceAnalysis(form());
   const rawPublication = raw.calls.find((call) => call.name === "finish_assurance_analysis_with_decision_fingerprint");
   const rawItem = rawPublication.input.p_result_metadata.risk_item_findings.find((entry) => entry.canonicalId === "R-SB01-001");

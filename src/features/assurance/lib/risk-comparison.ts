@@ -256,6 +256,7 @@ export function buildRiskComparison(input: {
   const currentCutoffGroup = groupCutoff(currentSnapshots);
   const canonicals = [...new Set([...previous.keys(), ...current.keys()])]
     .sort((first, second) => first.localeCompare(second));
+  const previousHasUnidentified = previousSnapshots.some((snapshot) => snapshot.sourceId === null);
   const items: RiskItemFinding[] = [];
 
   const coverageIncomplete = hasPreviousSnapshot &&
