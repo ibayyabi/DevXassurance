@@ -34,9 +34,11 @@ import type {
 import type { MilestoneMapping } from "@/features/assurance/lib/schedule-comparison";
 import type { RiskMapping } from "@/features/assurance/lib/risk-comparison";
 import { ProcessingRefresh } from "@/features/assurance/components/processing-refresh";
+import { ObservationReviewPanel } from "@/features/assurance/components/observation-review-panel";
 import type {
   AssuranceDocument,
   AssuranceFinding,
+  AssuranceObservationReview,
   AssuranceReview,
 } from "@/features/assurance/lib/queries";
 import { formatReportingPeriod } from "@/features/assurance/lib/review-period";
@@ -71,6 +73,7 @@ export function AssuranceWorkspace({
   review,
   reviews,
   documents,
+  observationReview,
   costObservations,
   costBaselines,
   wbsScopeLabels,
@@ -84,6 +87,7 @@ export function AssuranceWorkspace({
   review: AssuranceReview | null;
   reviews: AssuranceReview[];
   documents: AssuranceDocument[];
+  observationReview: AssuranceObservationReview | null;
   costObservations: CostObservation[];
   costBaselines: CostBaseline[];
   wbsScopeLabels: string[];
@@ -267,6 +271,13 @@ export function AssuranceWorkspace({
         identityMappings={riskIdentityMappings}
         scaleMappings={riskScaleMappings}
         canApprove={canApproveBaseline}
+      />
+
+      <ObservationReviewPanel
+        projectId={projectId}
+        reviewId={review.id}
+        observationReview={observationReview}
+        canReview={canApproveBaseline}
       />
 
       <FindingsStep
@@ -520,13 +531,35 @@ function FindingsStep({
   evidenceReady: boolean;
   canCorrect: boolean;
 }) {
+  // Published findings are stale once the analysis error indicates evidence or
+  // reviewer decisions changed: suppress their condition colors and overall
+  // label until a re-analysis republishes over them.
+  const findingsStale =
+    review.findings.length > 0 &&
+    review.status === "evidence_ready" &&
+    Boolean(review.analysisError);
   return (
     <SectionCard
       icon={ListChecks}
       title="Langkah 3, Temuan — tiga kondisi, dengan alasan berbahasa sederhana"
       subtitle="Tanpa persentase kesehatan. Bukti yang kurang tetap terlihat belum lengkap."
-      aside={evidenceReady && review.findings.length > 0 ? <StatusPill tone={overallTone(review.findings)}>{overallLabel(review.findings)}</StatusPill> : undefined}
+      aside={
+        review.findings.length > 0 && evidenceReady ? (
+          findingsStale ? (
+            <StatusPill tone="warn">Temuan tidak mutakhir</StatusPill>
+          ) : (
+            <StatusPill tone={overallTone(review.findings)}>{overallLabel(review.findings)}</StatusPill>
+          )
+        ) : undefined
+      }
     >
+      {findingsStale && (
+        <p className="mb-4 rounded-lg bg-status-warn-bg p-3 text-sm text-status-warn-text" role="alert">
+          Temuan di bawah berasal dari analisis sebelumnya dan sudah tidak mutakhir karena bukti
+          atau keputusan peninjau berubah. Jalankan analisis lagi sebelum memakainya; kondisi
+          lama tidak dihitung sebagai hasil berlaku.
+        </p>
+      )}
       {!evidenceReady ? (
         <div className="rounded-xl border border-dashed border-ui-border p-6 text-sm text-ink-muted">
           Temuan belum mutakhir sampai bukti Baseline Disetujui dan Periode Berjalan yang selesai tersedia.

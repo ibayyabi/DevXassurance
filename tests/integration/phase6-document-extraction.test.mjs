@@ -1139,7 +1139,7 @@ const costSource =
   "COST EVIDENCE Approved project budget USD 1,250,000 approved on 2026-01-05. " +
   "Estimate at completion is USD 1,312,500 for October 2026. " +
   "Actual cost to date USD 600,000. Committed cost is about USD 1.2 million. " +
-  "WBS 1.2 Build, code 1.2, parent 1, Build phase: Construction of the core platform. Estimate at completion USD 900,000.";
+  "WBS 1.2 Build, code 1.2, parent 1, Build phase: Construction of the core platform. Estimate at completion for WBS 1.2 Build is USD 900,000.";
 
 function costModelOutput(prompt, observations) {
   const group = validModelOutput(prompt);
@@ -1159,7 +1159,7 @@ function costModelOutput(prompt, observations) {
   };
 }
 
-async function extractCostObservations(observations) {
+async function extractCostObservations(observations, source = costSource) {
   return await withLocalOllama(
     async (_url, init) => {
       const prompt = JSON.parse(init.body).messages[1].content;
@@ -1167,8 +1167,8 @@ async function extractCostObservations(observations) {
     },
     async () =>
       await extractDocumentGroups(
-        job(costSource, { fileName: "cost-report.txt", title: "Cost Report" }),
-        [{ chunkIndex: 0, chunkText: costSource, sectionLabel: "Cost summary" }],
+        job(source, { fileName: "cost-report.txt", title: "Cost Report" }),
+        [{ chunkIndex: 0, chunkText: source, sectionLabel: "Cost summary" }],
         { parserVersion: "cost-evidence-test-v1" },
         memoryGroupStore(),
       ),
@@ -1227,6 +1227,19 @@ test("cost observations keep the source value and carry deterministic normalizat
   );
   assert.equal(observations[1].evidence_chunk_index, 0);
   assert.ok(costSource.includes(observations[1].excerpt));
+});
+
+test("cost currency stays unknown when the cited context has unrelated currency mentions", async () => {
+  const source =
+    "Approved baseline amount: 100 | Reporting currency: USD | Legacy currency: IDR";
+  const outcome = await extractCostObservations([
+    { measure: "approved_baseline", source_value: "100" },
+  ], source);
+
+  assert.equal(outcome.ok, true, `${outcome.errorCode}: ${outcome.errorMessage}`);
+  assert.equal(outcome.extraction.cost_observations.length, 1);
+  assert.equal(outcome.extraction.cost_observations[0].normalized_amount, 100);
+  assert.equal(outcome.extraction.cost_observations[0].currency, null);
 });
 
 const indonesianCostSource =
@@ -1469,6 +1482,26 @@ test("a WBS cost value captures the work-package identity, and a project total d
   assert.deepEqual(
     [project.wbs_code, project.wbs_parent_code, project.wbs_name, project.scope_description],
     [null, null, null, null],
+  );
+});
+
+test("a task mention inside a cost citation does not prove WBS scope", async () => {
+  const source =
+    "Approved baseline amount: USD 100. Task: Alarm Kebencanaan | Progress: 20%.";
+  const outcome = await extractCostObservations([
+    {
+      measure: "approved_baseline",
+      source_value: "USD 100",
+      scope_level: "wbs",
+      scope_label: "Alarm Kebencanaan",
+    },
+  ], source);
+
+  assert.equal(outcome.ok, true, `${outcome.errorCode}: ${outcome.errorMessage}`);
+  assert.deepEqual(outcome.extraction.cost_observations, []);
+  assert.match(
+    outcome.extraction.quality_warnings.join(" "),
+    /scope_label must be supported by a structural scope source/,
   );
 });
 

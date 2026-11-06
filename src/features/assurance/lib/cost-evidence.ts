@@ -18,6 +18,14 @@ export const costMeasureLabels: Record<CostMeasure, string> = {
 
 export type CostScopeLevel = "project" | "wbs";
 
+
+export type CostScopeProvenance = {
+  kind: "cited_row_column" | "declared_subject_key" | "declared_subject" | "sheet_title";
+  sourceId: string;
+  sheetName: string;
+  cellReference: string;
+  excerpt: string;
+};
 export type CostObservation = {
   id: string;
   documentId: string;
@@ -28,6 +36,8 @@ export type CostObservation = {
   currency: string | null;
   scopeLevel: CostScopeLevel;
   scopeLabel: string | null;
+  scopeSourceId: string | null;
+  scopeProvenance: CostScopeProvenance[] | null;
   wbsCode: string | null;
   wbsParentCode: string | null;
   wbsName: string | null;
@@ -95,7 +105,6 @@ const currencySymbols: Record<string, string> = {
   rp: "IDR",
   "€": "EUR",
   "£": "GBP",
-  "¥": "JPY",
   "₩": "KRW",
   "₹": "INR",
 };
@@ -109,16 +118,48 @@ const scaleWords =
  * dollar currencies.
  */
 export function normalizeCostCurrency(sourceValue: string) {
-  const upper = sourceValue.toUpperCase();
-  const code = currencyCodes.find((candidate) =>
-    new RegExp(`\\b${candidate}\\b`).test(upper),
+  const amountMatches = [...sourceValue.matchAll(/-?\d[\d., \u00a0]*\d|-?\d/g)];
+  const currencyTokenPattern = new RegExp(
+    `\\b(?:${currencyCodes.join("|")}|RP)\\b|[€£¥₩₹]`,
+    "giu",
   );
-  if (code) return code;
-  const lowered = sourceValue.toLowerCase();
-  for (const [symbol, mapped] of Object.entries(currencySymbols)) {
-    if (lowered.includes(symbol)) return mapped;
-  }
-  return null;
+  const currencyMatches = [...sourceValue.matchAll(currencyTokenPattern)];
+  if (amountMatches.length !== 1 || currencyMatches.length !== 1) return null;
+
+  const amount = amountMatches[0];
+  const currency = currencyMatches[0];
+  const amountStart = amount.index ?? -1;
+  const amountEnd = amountStart + amount[0].length;
+  const currencyStart = currency.index ?? -1;
+  const currencyEnd = currencyStart + currency[0].length;
+  const separator = currencyEnd <= amountStart
+    ? sourceValue.slice(currencyEnd, amountStart)
+    : amountEnd <= currencyStart
+      ? sourceValue.slice(amountEnd, currencyStart)
+      : null;
+  const token = currency[0];
+  const adjacent = separator !== null && (
+    /^[\s:(),\[\]]*$/u.test(separator) ||
+    (token.toLowerCase() === "rp" && /^\.\s*$/u.test(separator))
+  );
+  const amountLabelBefore = /\b(?:eac|estimate(?:d)?\s+at\s+completion|forecast|approved\s+baseline|baseline|actual(?:\s+(?:to\s+date|cost))?|committed(?:\s+cost)?|amount|value|budget|cost)\s*[:=]\s*$/iu.test(
+    sourceValue.slice(0, amountStart),
+  );
+  const currencyLabelBefore = /(?:reporting\s+)?currency\s*[:=]\s*$/iu.test(
+    sourceValue.slice(0, currencyStart),
+  );
+  const labeledAssociation =
+    amountLabelBefore &&
+    currencyLabelBefore &&
+    separator !== null &&
+    (amountEnd <= currencyStart
+      ? /^[\t \u00a0]*[|;,][\t \u00a0]*(?:reporting\s+)?currency\s*[:=]\s*$/iu.test(separator)
+      : /^[\t \u00a0]*[|;,][\t \u00a0]*(?:eac|estimate(?:d)?\s+at\s+completion|forecast|approved\s+baseline|baseline|actual(?:\s+(?:to\s+date|cost))?|committed(?:\s+cost)?|amount|value|budget|cost)\s*[:=]\s*$/iu.test(separator));
+  if (!adjacent && !labeledAssociation) return null;
+
+  return currencyCodes.find((candidate) => candidate === token.toUpperCase()) ??
+    currencySymbols[token.toLowerCase()] ??
+    null;
 }
 
 /**

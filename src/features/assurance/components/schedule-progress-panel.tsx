@@ -18,6 +18,12 @@ type MilestoneObservation = {
   periodLabel: string | null;
   asOfDate: string | null;
   excerpt: string | null;
+  reviewDecision?: {
+    decision: "accepted" | "corrected";
+    date: string | null;
+    reason: string | null;
+  } | null;
+  sourceDate?: string | null;
 };
 
 type MilestoneComparison = {
@@ -37,6 +43,13 @@ type ProgressObservation = {
   periodLabel: string | null;
   asOfDate: string | null;
   excerpt: string | null;
+  reviewDecision?: {
+    decision: "accepted" | "corrected";
+    percent: number | null;
+    reason: string | null;
+  } | null;
+  /** The extracted percent before a reviewer correction, when one applies. */
+  sourcePercent?: number | null;
 };
 
 type ProgressScopeResult = {
@@ -136,6 +149,23 @@ export function ScheduleProgressPanel({
                 {scope.deltaPercentPoints !== null &&
                   ` · ${scope.deltaPercentPoints >= 0 ? "+" : ""}${scope.deltaPercentPoints} poin`}
               </p>
+              {scope.current?.reviewDecision && (
+                <p className="mt-1 rounded-md bg-status-warn-bg px-2 py-1 text-xs text-status-warn-text">
+                  <span className="font-semibold">
+                    {scope.current.reviewDecision.decision === "corrected"
+                      ? "Dikoreksi peninjau"
+                      : "Diterima peninjau"}
+                    {scope.current.reviewDecision.percent !== null
+                      ? ` menjadi ${formatPercent(scope.current.reviewDecision.percent)}`
+                      : ""}
+                    :
+                  </span>{" "}
+                  {scope.current.reviewDecision.reason ?? "keputusan peninjau tercatat"}.{" "}
+                  {scope.current.reviewDecision.decision === "corrected" &&
+                    scope.current.sourcePercent != null &&
+                    `Nilai sumber tetap ${formatPercent(scope.current.sourcePercent)}.`}
+                </p>
+              )}
               {scope.prior && scope.deltaPercentPoints === null && (
                 <p className="mt-1 text-xs text-ink-muted">
                   Nilai sebelumnya disimpan tetapi tidak dibandingkan (lingkup tidak dapat dibandingkan antarperiode).
@@ -231,6 +261,15 @@ function SourceLines({
           <span className="font-medium text-ink">{line.role}:</span> “{line.observation.excerpt}”
           {line.observation.periodLabel && ` — ${line.observation.periodLabel}`}
           {line.observation.asOfDate && ` (per ${line.observation.asOfDate})`}
+          {line.observation.reviewDecision?.decision === "corrected" && (
+            <span className="mt-1 block rounded-md bg-status-warn-bg px-2 py-1 text-status-warn-text">
+              <span className="font-semibold">
+                Dikoreksi peninjau menjadi {formatDate(line.observation.date)}
+                {line.observation.reviewDecision.reason ? `: ${line.observation.reviewDecision.reason}` : ""}
+              </span>
+              {line.observation.sourceDate && ` — nilai sumber tetap ${formatDate(line.observation.sourceDate)}.`}
+            </span>
+          )}
         </li>
       ))}
     </ul>

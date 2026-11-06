@@ -102,7 +102,7 @@ test("TXT extraction keeps headings and source-linked bounded chunks across long
   for (let index = 1; index <= 24; index += 1) {
     assert.ok(result.chunks.some((chunk) => chunk.chunkText.includes(`PARAGRAPH-${index} `)));
   }
-  assert.equal(result.parserMetadata.parserVersion, "document-parser/9");
+  assert.equal(result.parserMetadata.parserVersion, "document-parser/18");
 });
 test("a single long paragraph is bounded without losing its boundary markers", async () => {
   const paragraph =
@@ -230,6 +230,38 @@ test("XLSX extraction handles UTF-8 BOMs and namespace prefixes with source prov
   assert.ok(chunk.chunkText.includes(rowReference.text));
 });
 
+test("XLSX sheet title metadata excludes ordinary table headers", async () => {
+  const result = await parseDocumentBuffer(
+    "scope-titles.xlsx",
+    await makeZip({
+      "xl/workbook.xml": `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Header" sheetId="1" r:id="rId1"/><sheet name="Titled" sheetId="2" r:id="rId2"/><sheet name="Section" sheetId="3" r:id="rId3"/><sheet name="MergedTitle" sheetId="4" r:id="rId4"/><sheet name="MetadataTitle" sheetId="5" r:id="rId5"/></sheets></workbook>`,
+      "xl/_rels/workbook.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Target="worksheets/sheet3.xml"/><Relationship Id="rId4" Target="worksheets/sheet4.xml"/><Relationship Id="rId5" Target="worksheets/sheet5.xml"/></Relationships>`,
+      "xl/worksheets/sheet1.xml": `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Fire Alarm</t></is></c><c r="B1" t="inlineStr"><is><t>Progress</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Alarm Kebencanaan</t></is></c><c r="B2" t="inlineStr"><is><t>20%</t></is></c></row></sheetData></worksheet>`,
+      "xl/worksheets/sheet2.xml": `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Weekly status for Alarm</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Week</t></is></c><c r="B3" t="inlineStr"><is><t>Progress</t></is></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>W4</t></is></c><c r="B4" t="inlineStr"><is><t>20%</t></is></c></row></sheetData></worksheet>`,
+      "xl/worksheets/sheet3.xml": `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Fire Alarm</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Task</t></is></c><c r="B3" t="inlineStr"><is><t>Progress</t></is></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>Alarm Kebencanaan</t></is></c><c r="B4" t="inlineStr"><is><t>20%</t></is></c></row></sheetData></worksheet>`,
+      "xl/worksheets/sheet4.xml": `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Weekly progress report for Fire Alarm</t></is></c><c r="B1" t="inlineStr"><is><t>Weekly progress report for Fire Alarm</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Week</t></is></c><c r="B3" t="inlineStr"><is><t>Progress</t></is></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>W4</t></is></c><c r="B4" t="inlineStr"><is><t>20%</t></is></c></row></sheetData><mergeCells><mergeCell ref="A1:B1"/></mergeCells></worksheet>`,
+      "xl/worksheets/sheet5.xml": `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Weekly progress report for Fire Alarm</t></is></c><c r="C1" t="inlineStr"><is><t>Report Date: 2026-10-09</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Week</t></is></c><c r="B3" t="inlineStr"><is><t>Progress</t></is></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>W4</t></is></c><c r="B4" t="inlineStr"><is><t>20%</t></is></c></row></sheetData></worksheet>`,
+    }),
+  );
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.parserMetadata.sheetTitles.Header, undefined);
+  assert.equal(result.parserMetadata.sheetTitles.Section, undefined);
+  assert.deepEqual(result.parserMetadata.sheetTitles.Titled, {
+    text: "A: Weekly status for Alarm",
+    cell: "A1",
+  });
+  assert.deepEqual(result.parserMetadata.sheetTitles.MergedTitle, {
+    text: "A: Weekly progress report for Fire Alarm",
+    cell: "A1",
+  });
+  assert.deepEqual(result.parserMetadata.sheetTitles.MetadataTitle, {
+    text: "A: Weekly progress report for Fire Alarm",
+    cell: "A1",
+  });
+});
+
 test("XLSX rows retain merged multirow headers, raw date formats, formula caches, and sheet provenance", async () => {
   const result = await parseDocumentBuffer(
     "synthetic.xlsx",
@@ -289,9 +321,20 @@ test("XLSX normalizes recognized dates using workbook epoch and flags invalid or
   if (!legacy.ok) return;
   const legacyText = legacy.chunks.map((chunk) => chunk.chunkText).join("\n");
   assert.match(legacyText, /raw value: 60; number format: m\/d\/yy; Needs Review: invalid Excel serial 60/);
-  assert.match(legacyText, /A2\+1 \(cached value: 61.*1900-03-01/);
+  // A cached formula date value is still normalized; assert the structured
+  // locator instead of pinning the formula/cache wording.
+  const cachedDateCell = legacy.chunks
+    .flatMap((chunk) => chunk.sourceReferences ?? [])
+    .find((source) => source.sourceLocation?.cellRangeStart === "B2");
+  assert.equal(cachedDateCell?.cell?.dateIso, "1900-03-01");
   assert.match(legacyText, /45292.*number format: 0\.00/);
-  assert.doesNotMatch(legacyText, /45292.*ISO date/);
+  // The custom 0.00 cell is not normalized as a date; assert its own structured
+  // metadata rather than a cross-cell ordering of chunk text.
+  const ambiguousCell = legacy.chunks
+    .flatMap((chunk) => chunk.sourceReferences ?? [])
+    .find((source) => source.sourceLocation?.cellRangeStart === "C2");
+  assert.equal(ambiguousCell?.cell?.dateIso, null);
+  assert.equal(ambiguousCell?.cell?.value, "45292");
 
   const modern = await parseDocumentBuffer(
     "modern.xlsx",
@@ -314,7 +357,7 @@ test("XLSX cell references locate literals exactly and never claim an unresolved
 
   assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
   if (!result.ok) return;
-  assert.equal(result.parserMetadata.parserVersion, "document-parser/9");
+  assert.equal(result.parserMetadata.parserVersion, "document-parser/18");
 
   const chunk = result.chunks[0];
   const references = chunk.sourceReferences ?? [];
@@ -322,7 +365,8 @@ test("XLSX cell references locate literals exactly and never claim an unresolved
     references.find(
       (source) =>
         source.sourceLocation?.cellRangeStart === cell &&
-        source.sourceLocation?.cellRangeEnd === cell,
+        source.sourceLocation?.cellRangeEnd === cell &&
+        source.cell?.cell === cell,
     );
 
   // A literal cell carries its own label context and an exact single-cell locator.
@@ -333,6 +377,11 @@ test("XLSX cell references locate literals exactly and never claim an unresolved
   assert.equal(cable.sourceLocation?.sheetName, "Cost");
   assert.equal(cable.modelText, "Item: Cable");
   assert.ok(chunk.chunkText.includes(cable.text));
+  assert.deepEqual(
+    cable.rowCells?.map(({ cell, label }) => [cell, label]),
+    [["A2", "Item"], ["B2", "Quantity"], ["C2", "Amount"]],
+    "each cell citation retains the exact sibling row structure for validator ambiguity checks",
+  );
 
   // Same-row literal: it shares row 2 with the unresolved formula, but its own
   // reference stays a literal and never contains that formula.

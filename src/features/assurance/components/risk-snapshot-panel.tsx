@@ -27,6 +27,26 @@ type RiskSnapshot = {
   periodLabel: string | null;
   asOfDate: string | null;
   excerpt: string | null;
+  sourceRef?: {
+    documentId?: string;
+    documentTitle: string | null;
+    sourceContentHash: string | null;
+    pageNumber?: number | null;
+    sectionLabel?: string | null;
+    sourceLocation?: Record<string, string | number> | null;
+  } | null;
+  reviewDecision?: {
+    decision: "accepted" | "corrected";
+    status: string | null;
+    ratingLabel: string | null;
+    ratingValue: number | null;
+    reason: string | null;
+    decidedBy?: string;
+    decidedAt?: string;
+  } | null;
+  sourceStatus?: string | null;
+  sourceRatingLabel?: string | null;
+  sourceRatingValue?: number | null;
 };
 
 type RiskChangeType =
@@ -36,20 +56,35 @@ type RiskChangeType =
   | "unchanged"
   | "rating_changed"
   | "rating_not_comparable"
-  | "present"
-  | "resolved";
+  | "period_not_comparable"
+  | "identity_not_comparable"
+  | "closed"
+  | "not_reported"
+  | "present";
 
 type RiskItemFinding = {
   changeType: RiskChangeType;
   canonicalId: string;
-  baseline: RiskSnapshot | null;
+  previous: RiskSnapshot | null;
   current: RiskSnapshot | null;
   ratingDelta: number | null;
+  previousCutoff?: string | null;
+  currentCutoff?: string | null;
 };
 
-type UnidentifiedRisk = { role: "baseline" | "current"; snapshot: RiskSnapshot };
-
-const roleLabels: Record<string, string> = { baseline: "Baseline", current: "Periode Berjalan" };
+type UnidentifiedRisk = { role: "previous" | "current"; snapshot: RiskSnapshot };
+type RiskComparisonProvenance = {
+  contract: string;
+  previousReviewId: string | null;
+  previousReportingPeriod: string | null;
+  previousSourceVersions?: { document_id: string; content_hash: string | null }[];
+  previousSnapshotAvailable: boolean;
+  previousCoverageComplete: boolean;
+  previousCutoffComplete: boolean;
+  previousGapReason: string | null;
+  currentCoverageComplete: boolean;
+};
+const roleLabels: Record<string, string> = { previous: "Potret Sebelumnya", current: "Periode Berjalan" };
 
 export function RiskSnapshotPanel({
   projectId,
@@ -65,10 +100,37 @@ export function RiskSnapshotPanel({
   canApprove: boolean;
 }) {
   const metadata = review?.analysisMetadata ?? {};
-  const items = (metadata.risk_item_findings as RiskItemFinding[] | undefined) ?? [];
-  const unidentified = (metadata.risk_unidentified_items as UnidentifiedRisk[] | undefined) ?? [];
-  const sourceIds = (metadata.risk_source_ids as string[] | undefined) ?? [];
-  const sourceScales = (metadata.risk_source_scales as string[] | undefined) ?? [];
+  const provenance = metadata.risk_comparison_provenance as RiskComparisonProvenance | undefined;
+  const isCurrentComparison = provenance?.contract === "pmo_risk_comparison_v2";
+  const items = isCurrentComparison
+    ? (metadata.risk_item_findings as RiskItemFinding[] | undefined) ?? []
+    : [];
+  const unidentified = isCurrentComparison
+    ? (metadata.risk_unidentified_items as UnidentifiedRisk[] | undefined) ?? []
+    : [];
+  const sourceIds = isCurrentComparison
+    ? (metadata.risk_source_ids as string[] | undefined) ?? []
+    : [];
+  const sourceScales = isCurrentComparison
+    ? (metadata.risk_source_scales as string[] | undefined) ?? []
+    : [];
+  const comparisonGapMessages: string[] = [];
+  if (isCurrentComparison && provenance) {
+    if (!provenance.previousSnapshotAvailable) {
+      comparisonGapMessages.push(provenance.previousReviewId
+        ? "Review sebelumnya tidak menyediakan potret risiko yang dapat digunakan."
+        : "Potret sebelumnya belum tersedia; risiko periode berjalan tidak dinyatakan baru.");
+    }
+    if (provenance.previousSnapshotAvailable && !provenance.previousCutoffComplete) {
+      comparisonGapMessages.push("Cut-off potret sebelumnya tidak lengkap atau tidak dapat dibuktikan; risiko tidak dinyatakan baru.");
+    }
+    if (provenance.previousSnapshotAvailable && !provenance.previousCoverageComplete) {
+      comparisonGapMessages.push("Coverage risiko potret sebelumnya belum lengkap; perubahan lintas waktu tetap menjadi celah.");
+    }
+    if (!provenance.currentCoverageComplete) {
+      comparisonGapMessages.push("Coverage risiko periode berjalan belum lengkap; perubahan lintas waktu tetap menjadi celah.");
+    }
+  }
   const acceptedIdentity = identityMappings.filter((mapping) => mapping.state === "accepted");
   const acceptedScale = scaleMappings.filter((mapping) => mapping.state === "accepted");
 
@@ -76,8 +138,30 @@ export function RiskSnapshotPanel({
     <SectionCard
       icon={ShieldAlert}
       title="Potret risiko — bandingkan item risiko hanya jika identitasnya terpasti"
-      subtitle="Risiko dicocokkan hanya melalui ID yang sama persis atau pemetaan yang disetujui peninjau — nama yang mirip bukan identitas. “Baru” dan “meningkat” hanya muncul bila identitasnya cocok dan ada potret sebelumnya yang dapat dibandingkan. Peringkat hanya dibandingkan dalam skala yang sama atau pemetaan skala yang disetujui. Tidak ada skor Risiko total proyek yang dihasilkan."
+      subtitle="Potret sebelumnya diambil dari sumber berperan Periode Berjalan pada review terdahulu, bukan baseline proyek yang disetujui. Risiko dicocokkan hanya melalui ID yang sama persis atau pemetaan yang disetujui peninjau; nama mirip bukan identitas. “Baru”, “meningkat”, dan “ditutup” hanya dinyatakan bila kedua potret memiliki coverage dan cut-off ISO yang berurutan. Peringkat dibandingkan hanya pada skala sama atau melalui pemetaan yang disetujui. Ketiadaan observasi bukan bukti risiko ditutup. Tidak ada skor Risiko gabungan."
     >
+      {review && !isCurrentComparison && Array.isArray(metadata.risk_item_findings) && (
+        <p className="mb-3 rounded-xl border border-ui-border bg-status-warn-bg p-3 text-sm text-status-warn-text">
+          Hasil perbandingan risiko lama tidak memiliki provenance potret sebelumnya yang dapat diverifikasi. Jalankan ulang analisis sebelum menggunakannya.
+        </p>
+      )}
+      {comparisonGapMessages.length > 0 && (
+        <p className="mb-3 rounded-xl border border-ui-border bg-status-warn-bg p-3 text-sm text-status-warn-text">
+          {comparisonGapMessages.join(" ")}
+        </p>
+      )}
+      {isCurrentComparison && provenance?.previousReviewId && (
+        <p className="mb-3 text-xs text-ink-muted">
+          Potret terpilih: review {provenance.previousReviewId}
+          {provenance.previousReportingPeriod && ` · cut-off review ${provenance.previousReportingPeriod}`}
+          {provenance.previousSourceVersions?.map((source) => (
+            <span key={source.document_id} className="ml-2">
+              · {source.document_id}
+              {source.content_hash && <code className="ml-1 break-all font-mono">#{source.content_hash}</code>}
+            </span>
+          ))}
+        </p>
+      )}
       {/* Item-level risk findings */}
       <h3 className="text-sm font-semibold text-ink">Temuan risiko per item</h3>
       {items.length === 0 ? (
@@ -92,9 +176,9 @@ export function RiskSnapshotPanel({
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <p className="font-semibold text-ink">
                   {item.canonicalId}
-                  {(item.current?.name ?? item.baseline?.name) && (
+                  {(item.current?.name ?? item.previous?.name) && (
                     <span className="ml-2 font-normal text-ink-muted">
-                      {item.current?.name ?? item.baseline?.name}
+                      {item.current?.name ?? item.previous?.name}
                     </span>
                   )}
                 </p>
@@ -103,7 +187,7 @@ export function RiskSnapshotPanel({
                 </span>
               </div>
               <p className="mt-2 text-sm leading-6 text-ink-muted">{describeChange(item)}</p>
-              <RiskSources baseline={item.baseline} current={item.current} />
+              <RiskSources previous={item.previous} current={item.current} />
             </li>
           ))}
         </ul>
@@ -254,48 +338,103 @@ function MappingBlock({
 }
 
 function RiskSources({
-  baseline,
+  previous,
   current,
 }: {
-  baseline: RiskSnapshot | null;
+  previous: RiskSnapshot | null;
   current: RiskSnapshot | null;
 }) {
   const lines = [
-    baseline?.excerpt ? { role: "Baseline", snapshot: baseline } : null,
+    previous?.excerpt ? { role: "Potret Sebelumnya", snapshot: previous } : null,
     current?.excerpt ? { role: "Periode Berjalan", snapshot: current } : null,
   ].filter((line): line is { role: string; snapshot: RiskSnapshot } => line !== null);
   if (lines.length === 0) return null;
   return (
     <ul className="mt-2 space-y-1 border-l-2 border-ui-border pl-3 text-xs text-ink-muted">
-      {lines.map((line) => (
-        <li key={line.role}>
-          <span className="font-medium text-ink">{line.role}:</span> “{line.snapshot.excerpt}”
-          {line.snapshot.periodLabel && ` — ${line.snapshot.periodLabel}`}
-          {line.snapshot.asOfDate && ` (per ${line.snapshot.asOfDate})`}
-        </li>
-      ))}
+      {lines.map((line) => {
+        const sourceLocation = Object.entries(line.snapshot.sourceRef?.sourceLocation ?? {})
+          .map(([key, value]) => `${key}: ${value}`)
+          .join(", ");
+        const decision = line.snapshot.reviewDecision;
+        return (
+          <li key={line.role}>
+            <span className="font-medium text-ink">{line.role}:</span> “{line.snapshot.excerpt}”
+            {line.snapshot.sourceRef?.documentTitle && ` — ${line.snapshot.sourceRef.documentTitle}`}
+            {line.snapshot.sourceRef?.documentId && ` (${line.snapshot.sourceRef.documentId})`}
+            {line.snapshot.sourceRef?.sourceContentHash && (
+              <code className="ml-1 break-all font-mono">
+                #{line.snapshot.sourceRef.sourceContentHash}
+              </code>
+            )}
+            {line.snapshot.periodLabel && ` — ${line.snapshot.periodLabel}`}
+            {line.snapshot.asOfDate && ` (per ${line.snapshot.asOfDate})`}
+            {line.snapshot.sourceRef?.pageNumber && ` · hlm. ${line.snapshot.sourceRef.pageNumber}`}
+            {line.snapshot.sourceRef?.sectionLabel && ` · ${line.snapshot.sourceRef.sectionLabel}`}
+            {sourceLocation && ` · ${sourceLocation}`}
+            {decision && (
+              <span className="mt-1 block rounded-md bg-status-warn-bg px-2 py-1 text-status-warn-text">
+                <span className="font-semibold">
+                  {decision.decision === "corrected" ? "Dikoreksi" : "Diterima"} peninjau
+                  {decision.decidedBy && ` ${decision.decidedBy}`}
+                  {decision.decidedAt && ` · ${decision.decidedAt}`}
+                  {decision.status && ` · status: ${decision.status}`}
+                  {decision.ratingLabel && ` · peringkat: ${decision.ratingLabel}`}
+                  {decision.ratingValue !== null && ` (${decision.ratingValue})`}
+                  {decision.reason ? `: ${decision.reason}` : ""}
+                </span>
+                {decision.decision === "corrected" && (line.snapshot.sourceStatus || line.snapshot.sourceRatingLabel) && (
+                  <span className="mt-0.5 block">
+                    Nilai sumber tetap
+                    {line.snapshot.sourceStatus ? ` status ${line.snapshot.sourceStatus}` : ""}
+                    {line.snapshot.sourceRatingLabel ? ` peringkat ${line.snapshot.sourceRatingLabel}` : ""}
+                    {line.snapshot.sourceRatingValue !== null && line.snapshot.sourceRatingValue !== undefined
+                      ? ` (${line.snapshot.sourceRatingValue})`
+                      : ""}.
+                  </span>
+                )}
+              </span>
+            )}
+          </li>
+        );
+      })}
     </ul>
   );
+}
+
+function cutoffText(cutoff: string | null | undefined) {
+  return cutoff ? ` (per ${cutoff})` : "";
 }
 
 function describeChange(item: RiskItemFinding) {
   const rating = (snapshot: RiskSnapshot | null) =>
     snapshot?.ratingLabel ?? (snapshot?.ratingValue !== null && snapshot?.ratingValue !== undefined ? String(snapshot.ratingValue) : "—");
+  const doc = (snapshot: RiskSnapshot | null) =>
+    snapshot?.sourceRef?.documentTitle ?? null;
+  const statedClosed = (snapshot: RiskSnapshot | null) =>
+    snapshot?.status && snapshot.status.toLocaleLowerCase().match(/\b(?:closed|ditutup|selesai|teratasi|resolved|mitigated)\b/) !== null
+      ? ` Sumber menyatakan status ${snapshot.status}.`
+      : "";
   switch (item.changeType) {
     case "new":
-      return `Pertama dilaporkan pada periode ini di ${rating(item.current)}${scaleSuffix(item.current)}.`;
-    case "resolved":
-      return `Ada di potret sebelumnya (${rating(item.baseline)}${scaleSuffix(item.baseline)}), tidak dilaporkan kini.`;
+      return `Pertama dilaporkan pada periode ini di ${rating(item.current)}${scaleSuffix(item.current)}${doc(item.current) ? ` — ${doc(item.current)}` : ""}${cutoffText(item.currentCutoff)}.`;
+    case "not_reported":
+      return `Ada di potret sebelumnya (${rating(item.previous)}${scaleSuffix(item.previous)}${cutoffText(item.previousCutoff)}), tetapi tidak lagi dilaporkan. Ketiadaan laporan bukan bukti risiko sudah ditutup — butuh konfirmasi dari sumber.${statedClosed(item.previous)}`;
+    case "closed":
+      return `Sumber menyatakan risiko ini closed/tidak lagi terbuka pada periode berjalan${doc(item.current) ? ` — ${doc(item.current)}` : ""}${cutoffText(item.currentCutoff)}.`;
     case "increased":
     case "decreased":
     case "unchanged":
-      return `Peringkat ${rating(item.baseline)} → ${rating(item.current)}${scaleSuffix(item.current)}${item.ratingDelta !== null ? ` (${item.ratingDelta >= 0 ? "+" : ""}${item.ratingDelta})` : ""}.`;
+      return `Peringkat ${rating(item.previous)} → ${rating(item.current)}${scaleSuffix(item.current)}${item.ratingDelta !== null ? ` (${item.ratingDelta >= 0 ? "+" : ""}${item.ratingDelta})` : ""}${cutoffText(item.previousCutoff)} →${cutoffText(item.currentCutoff)}${doc(item.current) ? ` — ${doc(item.current)}` : ""}.`;
     case "rating_changed":
-      return `Peringkat berubah ${rating(item.baseline)} → ${rating(item.current)}; arah tidak dapat dipastikan tanpa nilai numerik.`;
+      return `Peringkat berubah ${rating(item.previous)} → ${rating(item.current)}${scaleSuffix(item.current)}; arah tidak dapat dipastikan tanpa nilai numerik pada skala yang sama.`;
     case "rating_not_comparable":
-      return `Ada di keduanya, tetapi peringkat memakai skala berbeda (${item.baseline?.scaleLabel ?? "—"} vs ${item.current?.scaleLabel ?? "—"}) tanpa pemetaan skala yang disetujui.`;
+      return `Ada di keduanya, tetapi peringkat memakai skala berbeda (${item.previous?.scaleLabel ?? "—"} vs ${item.current?.scaleLabel ?? "—"}) tanpa pemetaan skala yang disetujui.`;
+    case "period_not_comparable":
+      return `Tidak dapat dibandingkan antarwaktu: ${item.previousCutoff && item.currentCutoff ? `cut-off yang terbaca tidak membuktikan urutan (${item.previousCutoff} vs ${item.currentCutoff})` : "salah satu sisi tidak menyatakan tanggal cut-off sendiri"}${item.previousCutoff && item.currentCutoff && item.previousCutoff === item.currentCutoff ? " — kemungkinan potret yang sama" : ""}. Perubahan tidak dinyatakan sebelum dua potret dengan tanggal terbukti berurutan tersedia.`;
+    case "identity_not_comparable":
+      return `Ada ID risiko yang belum dipetakan di sisi lain periode; tanpa pemetaan yang disetujui, item ini belum bisa dinyatakan baru atau sudah tidak dilaporkan.`;
     default:
-      return "Ada di kedua potret; tidak ada peringkat yang dapat dibandingkan.";
+      return "Ada di potret berjalan; tidak ada perbandingan yang dapat dinyatakan.";
   }
 }
 
@@ -310,9 +449,12 @@ function changeLabel(change: RiskChangeType) {
     decreased: "Menurun",
     unchanged: "Tidak berubah",
     rating_changed: "Peringkat berubah",
-    rating_not_comparable: "Tidak dapat dibandingkan",
+    rating_not_comparable: "Skala tidak dapat dibandingkan",
+    period_not_comparable: "Cut-off tidak dapat dibandingkan",
+    identity_not_comparable: "Identitas belum terpetakan",
+    closed: "Ditutup sumber",
+    not_reported: "Tidak lagi dilaporkan",
     present: "Ada",
-    resolved: "Tidak dilaporkan lagi",
   };
   return labels[change];
 }
@@ -320,6 +462,7 @@ function changeLabel(change: RiskChangeType) {
 function changeTone(change: RiskChangeType) {
   if (change === "increased" || change === "new") return "bg-status-critical-bg text-status-critical-text";
   if (change === "rating_changed" || change === "rating_not_comparable") return "bg-status-warn-bg text-status-warn-text";
-  if (change === "decreased" || change === "unchanged" || change === "resolved") return "bg-status-ok-bg text-status-ok-text";
+  if (change === "period_not_comparable" || change === "identity_not_comparable" || change === "not_reported") return "bg-status-warn-bg text-status-warn-text";
+  if (change === "decreased" || change === "unchanged") return "bg-status-ok-bg text-status-ok-text";
   return "bg-plan-track text-ink-muted";
 }

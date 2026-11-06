@@ -5,7 +5,7 @@ import {
   normalizeCostCurrency,
 } from "../../../src/features/assurance/lib/cost-evidence";
 import { documentTypes } from "../../../src/features/documents/lib/constants";
-import type { ParsedChunk, ParsedSourceReference } from "./document-parser";
+import type { ParsedChunk, ParsedSourceCell, ParsedSourceReference } from "./document-parser";
 import { isRecord } from "../types/guards";
 import { citedTextSupportsNumericValue, containsNumericValue } from "../../../src/features/documents/lib/source-value-validation";
 
@@ -79,6 +79,7 @@ export type ExtractedAction = {
 };
 
 export type SourceCitation = {
+  source_id?: string;
   evidence_chunk_index: number;
   excerpt: string;
   source_location?: ParsedSourceReference["sourceLocation"];
@@ -96,6 +97,8 @@ export type ExtractedCostObservation = {
   currency: string | null;
   scope_level: "project" | "wbs";
   scope_label: string | null;
+  scope_source_id?: string;
+  scope_provenance?: ObservationScopeProvenance[];
   // Work-package identity as stated by the source. Null for project scope and
   // for any field the source does not state. A canonical code is never captured
   // here; it is assigned only by a reviewer-accepted mapping.
@@ -115,12 +118,28 @@ export type AssuranceObservationDomain = "budget" | "schedule" | "progress" | "r
 export type AssuranceCoverageState = "processed" | "unprocessed" | "ambiguous_conflicting" | "absent";
 export const ASSURANCE_OBSERVATION_CONTRACT_VERSION = "pmo-assurance-observations/1";
 
+/**
+ * Where a proven work-package scope came from. The cited evidence is the row or
+ * cell the model quoted; a scope proved by another source (a labelled column of
+ * the cited row, the workbook's declared subject, or the cited sheet's title)
+ * carries its own exact locator here so a reviewer can trace it.
+ */
+export type ObservationScopeProvenance = {
+  kind: "cited_row_column" | "declared_subject_key" | "declared_subject" | "sheet_title";
+  source_id: string;
+  sheet_name: string;
+  cell_reference: string;
+  excerpt: string;
+};
+
 export type ExtractedMilestoneObservation = {
   label: string;
   raw_date: string | null;
   date: string | null;
   scope_level: "project" | "wbs" | "unknown";
   scope_label: string | null;
+  scope_provenance?: ObservationScopeProvenance[];
+  scope_source_id?: string;
   period_label: string | null;
   as_of_date: string | null;
   evidence_chunk_index: number;
@@ -133,6 +152,8 @@ export type ExtractedProgressObservation = {
   percent: number;
   scope_level: "project" | "wbs" | "unknown";
   scope_label: string | null;
+  scope_provenance?: ObservationScopeProvenance[];
+  scope_source_id?: string;
   period_label: string | null;
   as_of_date: string | null;
   evidence_chunk_index: number;
@@ -218,7 +239,7 @@ export type ExtractedHealthSnapshot = {
   dimension: "overall" | "schedule" | "cost" | "risk" | "governance" | "audit_readiness";
   score: number | null;
   status: "green" | "amber" | "red" | "insufficient_evidence";
-  evidence_coverage: number;
+  evidence_coverage: number | null;
   status_text: string;
   source_summary: string;
   snapshot_date: string | null;
@@ -323,6 +344,28 @@ type GroupExtraction = {
   sheet_interpretation?: SheetInterpretation;
   quality_warnings: string[];
 };
+type WorkbookSubject = {
+  value: string;
+  key: string;
+  sheetName: string;
+  keyCell: string;
+  valueCell: string;
+};
+type SheetTitle = { text: string; cell: string };
+/**
+ * A parser-authored workbook declaration the model may cite for a work-package
+ * scope. Key, value, and title are separate source references with exact cells.
+ */
+type GroupContextSource = {
+  sourceId: string;
+  chunkIndex: number;
+  kind: "declared_subject_key" | "declared_subject" | "sheet_title";
+  sheetName: string;
+  cellReference: string;
+  text: string;
+  subjectValue: string | null;
+  pairedSourceId?: string;
+};
 type ChunkGroup = {
   groupIndex: number;
   chunkStartIndex: number;
@@ -330,6 +373,7 @@ type ChunkGroup = {
   groupKey: string;
   chunks: ParsedChunk[];
   candidateInterpretation: string[];
+  contextSources: GroupContextSource[];
 };
 type ModelProvider = {
   provider: "ollama" | "ollama_cloud" | "openai-compatible" | "gemini" | "groq";
@@ -347,7 +391,9 @@ type GroupAttemptResult = {
 type GroupAttemptError = Error & { attempts: number; errorCode: string };
 class TransientProviderError extends Error {}
 
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/16";
+// Bump whenever validation semantics change: cached extraction groups are keyed
+// by this version, so rows validated under older rules are never reused.
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/34";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -387,7 +433,10 @@ function costMeasureMatchesCitation(
   citedText: string,
 ): boolean {
   if (!sourceValue.trim()) return false;
-  const text = citedText.toLocaleLowerCase();
+  // Parser-authored raw-value annotations repeat values already present in
+  // the visible cell text; they must not create a second, differently
+  // associated measure claim for row citations.
+  const text = citedText.replace(/\s+\[raw value:[^\]]*\]/giu, "").toLocaleLowerCase();
   const value = sourceValue.toLocaleLowerCase();
   const roles = new Set<string>();
   let valueIndex = text.indexOf(value);
@@ -476,6 +525,21 @@ export async function extractDocumentGroups(
   )) {
     return failure("invalid_parser_output", "The parser returned missing, nonsequential, or oversized source chunks.");
   }
+  const sourceIds = new Set<string>();
+  for (const chunk of chunks) {
+    for (const source of sourceReferencesForChunk(chunk)) {
+      if (
+        typeof source.sourceId !== "string" ||
+        !source.sourceId.trim() ||
+        source.sourceId !== source.sourceId.trim() ||
+        sourceIds.has(source.sourceId)
+      ) {
+        return failure("invalid_parser_output", "The parser returned missing or colliding source IDs.");
+      }
+      sourceIds.add(source.sourceId);
+    }
+  }
+
 
   if (chunks.length > MAX_DOCUMENT_CHUNKS) {
     return failure(
@@ -657,6 +721,11 @@ export async function extractDocumentGroups(
   };
 }
 
+function containsSourcePhrase(text: string, phrase: string) {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped}(?=$|[^\\p{L}\\p{N}_])`, "iu").test(text);
+}
+
 function buildChunkGroups(
   chunks: ParsedChunk[],
   contentHash: string,
@@ -667,6 +736,68 @@ function buildChunkGroups(
   let current: ParsedChunk[] = [];
   let currentLength = 0;
   let currentScope: string | null = null;
+  // Workbook-declared subject labels and per-sheet title blocks, used only to
+  // prove a component scope the source structure already states.
+  const subjects = (Array.isArray(parserMetadata.subjects) ? parserMetadata.subjects : [])
+    .flatMap((subject): WorkbookSubject[] => {
+      if (!isRecord(subject)) return [];
+      const value = subject.value;
+      const key = subject.key;
+      const sheetName = subject.sheetName;
+      const keyCell = subject.keyCell;
+      const valueCell = subject.valueCell;
+      return typeof value === "string" &&
+        value.trim().length > 0 &&
+        typeof key === "string" &&
+        typeof sheetName === "string" &&
+        typeof keyCell === "string" &&
+        typeof valueCell === "string"
+        ? [{ value: value.trim(), key, sheetName, keyCell, valueCell }]
+        : [];
+    });
+  const sheetTitles = Object.fromEntries(
+    Object.entries(isRecord(parserMetadata.sheetTitles) ? parserMetadata.sheetTitles : {})
+      .flatMap(([sheetName, title]): Array<[string, SheetTitle]> => {
+        if (!isRecord(title)) return [];
+        const text = title.text;
+        const cell = title.cell;
+        return typeof text === "string" &&
+          text.trim().length > 0 &&
+          typeof cell === "string"
+          ? [[sheetName, { text, cell }]]
+          : [];
+      }),
+  );
+
+  const allReferences = chunks.flatMap((chunk) => chunk.sourceReferences ?? []);
+  const referenceAt = (sheetName: string, cell: string) =>
+    allReferences.find(
+      (reference) =>
+        reference.sourceLocation?.sheetName === sheetName &&
+        reference.sourceLocation?.cellRangeStart === cell &&
+        reference.sourceLocation?.cellRangeEnd === cell &&
+        reference.cell?.cell === cell,
+    );
+  // Repeated declarations of the same value are equivalent; distinct values
+  // matching the sheet title are ambiguous. Try equivalent pairs in source
+  // order and use the first one with exact, citable key/value cells.
+  const statedSubjects = (groupSheets: Set<string>) => {
+    const associations = new Map<string, WorkbookSubject[]>();
+    for (const subject of subjects) {
+      const statedByGroupTitle = [...groupSheets].some((sheetName) => {
+        const title = sheetTitles[sheetName];
+        const reference = title ? referenceAt(sheetName, title.cell) : undefined;
+        return reference && containsSourcePhrase(reference.modelText, subject.value);
+      });
+      if (!statedByGroupTitle) continue;
+      const key = subject.value.trim().toLocaleLowerCase();
+      const equivalent = associations.get(key) ?? [];
+      equivalent.push(subject);
+      associations.set(key, equivalent);
+    }
+    return associations.size === 1 ? [...associations.values()][0] : [];
+  };
+
 
   const flush = () => {
     if (!current.length) return;
@@ -693,6 +824,81 @@ function buildChunkGroups(
       }))))
       .digest("hex");
     const candidateInterpretation = collectCandidateInterpretation(current, parserMetadata);
+    const groupSheets = new Set(
+      current
+        .map((chunk) => chunk.sourceLocation?.sheetName)
+        .filter((sheetName): sheetName is string => typeof sheetName === "string"),
+    );
+    const titleContexts = [...groupSheets].flatMap((sheetName): GroupContextSource[] => {
+      const title = sheetTitles[sheetName];
+      const reference = title ? referenceAt(sheetName, title.cell) : undefined;
+      return reference && reference.modelText.trim() && reference.modelText.length <= 300
+        ? [{
+            sourceId: reference.sourceId,
+            chunkIndex: reference.chunkIndex,
+            kind: "sheet_title",
+            sheetName,
+            cellReference: title!.cell,
+            text: reference.modelText,
+            subjectValue: null,
+          }]
+        : [];
+    });
+    const contextSources: GroupContextSource[] = [];
+    for (const subject of statedSubjects(groupSheets)) {
+      const keyReference = referenceAt(subject.sheetName, subject.keyCell);
+      const valueReference = referenceAt(subject.sheetName, subject.valueCell);
+      const title = titleContexts.find((context) =>
+        containsSourcePhrase(context.text, subject.value),
+      );
+      if (
+        !keyReference ||
+        !valueReference ||
+        !keyReference.modelText.trim() ||
+        !valueReference.modelText.trim() ||
+        keyReference.modelText.length > 300 ||
+        valueReference.modelText.length > 300 ||
+        !title ||
+        keyReference.cell?.rawValue.trim() !== subject.key.trim() ||
+        valueReference.cell?.rawValue.trim() !== subject.value
+      ) {
+        continue;
+      }
+      const keyContext: GroupContextSource = {
+        sourceId: keyReference.sourceId,
+        chunkIndex: keyReference.chunkIndex,
+        kind: "declared_subject_key",
+        sheetName: subject.sheetName,
+        cellReference: subject.keyCell,
+        text: keyReference.modelText,
+        subjectValue: subject.value,
+        pairedSourceId: valueReference.sourceId,
+      };
+      const valueContext: GroupContextSource = {
+        sourceId: valueReference.sourceId,
+        chunkIndex: valueReference.chunkIndex,
+        kind: "declared_subject",
+        sheetName: subject.sheetName,
+        cellReference: subject.valueCell,
+        text: valueReference.modelText,
+        subjectValue: subject.value,
+        pairedSourceId: keyReference.sourceId,
+      };
+      const additions = [keyContext, valueContext, title].filter(
+        (context) => !contextSources.some((entry) => entry.sourceId === context.sourceId),
+      );
+
+      if (contextSources.length + additions.length <= 6) {
+        contextSources.push(...additions);
+        break;
+      }
+    }
+    for (const title of titleContexts) {
+      if (contextSources.length >= 6) break;
+      if (!contextSources.some((entry) => entry.sourceId === title.sourceId)) {
+        contextSources.push(title);
+      }
+    }
     groups.push({
       groupIndex,
       chunkStartIndex,
@@ -700,6 +906,7 @@ function buildChunkGroups(
       groupKey,
       chunks: current,
       candidateInterpretation,
+      contextSources,
     });
     current = [];
     currentLength = 0;
@@ -835,7 +1042,9 @@ async function extractGroupWithCorrection(
         continue;
       }
       const retryableWarnings = validation.value.quality_warnings.filter(
-        (warning) => !warning.includes("formula_result_unavailable"),
+        (warning) =>
+          !warning.includes("formula_result_unavailable") &&
+          !warning.includes(FORMULA_CACHE_REVIEW_MARKER),
       );
       if (retryableWarnings.length && attempt < MAX_GROUP_ATTEMPTS) {
         corrections = retryableWarnings;
@@ -891,7 +1100,12 @@ function allowedSourceCitations(group: ChunkGroup) {
     group.chunks.flatMap((chunk) =>
       sourceReferencesForChunk(chunk).map((source) => [
         source.sourceId,
-        { evidence_chunk_index: source.chunkIndex, excerpt: source.text, source_location: source.sourceLocation },
+        {
+          source_id: source.sourceId,
+          evidence_chunk_index: source.chunkIndex,
+          excerpt: source.text,
+          source_location: source.sourceLocation,
+        },
       ] as const),
     ),
   );
@@ -958,16 +1172,322 @@ function citationHasUnavailableFormula(
   group: ChunkGroup,
   citation: SourceCitation | null,
 ): boolean {
-  if (!citation) return false;
-  return group.chunks.some((chunk) =>
-    sourceReferencesForChunk(chunk).some((reference) =>
-      reference.chunkIndex === citation.evidence_chunk_index &&
-      reference.text === citation.excerpt &&
-      referenceHasUnavailableFormula(chunk, reference),
-    ),
+  return citation ? sourceHasUnavailableFormula(group, citation.source_id) : false;
+}
+const UNAVAILABLE_FORMULA_STATUSES = ["missing_cache", "cached_empty", "cached_error", "unknown"];
+const FORMULA_CACHE_REVIEW_MARKER = "formula_cache_review_required";
+
+function citedReference(group: ChunkGroup, citation: SourceCitation | null | undefined) {
+  if (!citation?.source_id) return null;
+  for (const chunk of group.chunks) {
+    const reference = sourceReferencesForChunk(chunk).find((source) => source.sourceId === citation.source_id);
+    if (reference) return { chunk, reference };
+  }
+  return null;
+}
+
+function formulaCacheStatusForSourceCell(
+  group: ChunkGroup,
+  citation: SourceCitation | null | undefined,
+  sourceCell: ParsedSourceCell,
+): string | null {
+  const cited = citedReference(group, citation);
+  if (!cited) return null;
+  return cited.chunk.formulaCells?.find(
+    (formula) =>
+      formula.sheetName === sourceCell.sheetName &&
+      formula.cellReference === sourceCell.cell &&
+      formula.rowStart <= sourceCell.row &&
+      formula.rowEnd >= sourceCell.row,
+  )?.formulaCacheStatus ?? null;
+}
+
+function sourceCellMatchesCandidate(sourceCell: ParsedSourceCell, candidate: string): boolean {
+  const normalized = candidate.trim();
+  if (!normalized) return false;
+  if (
+    sourceCell.rawValue.trim().toLocaleLowerCase() === normalized.toLocaleLowerCase() ||
+    sourceCell.dateIso === normalized
+  ) {
+    return true;
+  }
+  return !/^\d{4}-\d{2}-\d{2}$/u.test(normalized) &&
+    containsNumericValue(normalized) &&
+    citedTextSupportsNumericValue(normalized, sourceCell.rawValue);
+}
+
+function citedFormulaCacheStatusForValue(
+  group: ChunkGroup,
+  citation: SourceCitation | null | undefined,
+  candidate: string | null | undefined,
+): string | null {
+  if (!candidate) return null;
+  const cited = citedReference(group, citation);
+  if (!cited) return null;
+  const location = cited.reference.sourceLocation;
+  const exactCell =
+    cited.reference.cell &&
+    location?.kind === "xlsx" &&
+    location.cellRangeStart === cited.reference.cell.cell &&
+    location.cellRangeEnd === cited.reference.cell.cell
+      ? cited.reference.cell
+      : null;
+  const sourceCells = exactCell
+    ? [exactCell]
+    : cited.reference.rowCells?.length
+      ? cited.reference.rowCells
+      : cited.reference.cell
+        ? [cited.reference.cell]
+        : [];
+  const statuses = sourceCells
+    .filter((sourceCell) => sourceCellMatchesCandidate(sourceCell, candidate))
+    .map((sourceCell) => formulaCacheStatusForSourceCell(group, citation, sourceCell))
+    .filter((status): status is string => status !== null);
+  if (statuses.includes("cached_value")) return "cached_value";
+  return statuses.find((status) => UNAVAILABLE_FORMULA_STATUSES.includes(status)) ?? null;
+}
+
+function sourceValueNeedsFormulaReview(status: string | null): boolean {
+  return status === "cached_value";
+}
+
+function formulaCandidateReviewError(
+  group: ChunkGroup,
+  citation: SourceCitation | null,
+  candidate: string | null | undefined,
+  path: string,
+): string | null {
+  return candidate &&
+    sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, candidate))
+    ? `${path} cites a stored formula result whose freshness is not established; it remains source-reported evidence for review (${FORMULA_CACHE_REVIEW_MARKER})`
+    : null;
+}
+function citationIsCachedFormulaCell(
+  group: ChunkGroup,
+  citation: SourceCitation | null,
+): boolean {
+  const cited = citedReference(group, citation);
+  const cell = cited?.reference.cell;
+  const location = cited?.reference.sourceLocation;
+  return Boolean(
+    cell &&
+    location?.kind === "xlsx" &&
+    location.cellRangeStart === cell.cell &&
+    location.cellRangeEnd === cell.cell &&
+    formulaCacheStatusForSourceCell(group, citation, cell) === "cached_value",
   );
 }
 
+
+function citedPercentCellForClaim(
+  group: ChunkGroup,
+  citation: SourceCitation | null | undefined,
+  rawValue: string | null | undefined,
+  percentValue: number,
+): ParsedSourceCell | null {
+  if (!rawValue) return null;
+  const cited = citedReference(group, citation);
+  if (cited?.reference.sourceLocation?.kind !== "xlsx") return null;
+  const sourceCells = cited.reference.cell
+    ? [cited.reference.cell]
+    : cited.reference.rowCells ?? [];
+  const percentHeader = /(?:%|\bpercent(?:age)?\b|\bpersen\b)/iu;
+  const progressHeader = /\b(?:actual|progress|complete|completed|completion|realisasi|kemajuan)\b/iu;
+  const nonProgressHeader = /\b(?:risk|likelihood|probability|rating|impact|severity)\b/iu;
+  const matches = sourceCells.filter(
+    (cell) =>
+      percentHeader.test(cell.label ?? "") &&
+      progressHeader.test(cell.label ?? "") &&
+      !nonProgressHeader.test(cell.label ?? "") &&
+      cell.rawValue.trim() === rawValue.trim() &&
+      citedTextSupportsNumericValue(String(percentValue), cell.rawValue),
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
+const NARRATIVE_PROGRESS_TERM_PATTERN =
+  "(?:progress|progres|kemajuan|completion|complete|completed|actual|aktual|realisasi|penyelesaian|selesai|tercapai)";
+const NARRATIVE_QUALIFIER_PATTERN =
+  "(?:project|proyek|overall|physical|fisik|total|reported|cumulative|kumulatif|work|pekerjaan|package|paket|kontrak|contract)";
+const NARRATIVE_CONNECTOR_PATTERN =
+  "(?:is|was|are|were|at|of|reached|reaches|stand|stands|mencapai|sebesar|adalah|ialah|telah|sudah|dari|untuk|khususnya)";
+// Non-metric filler allowed between a progress term and its percentage, so
+// ordinary wording like "Physical progress of the works: 25%" or
+// "Kemajuan fisik telah mencapai 25%" still counts as linked.
+const NARRATIVE_GAP_PATTERN = "(?:\\s|[\\p{L}\\p{N}%-]){1,24}?";
+
+function percentTokenMatchesValue(token: string, percentValue: number): boolean {
+  const numeric = token.match(/\d+(?:[.,]\d+)?/u)?.[0];
+  if (!numeric) return false;
+  const value = Number(numeric.replace(",", "."));
+  return Number.isFinite(value) && Math.abs(value - percentValue) < 1e-9;
+}
+
+const NARRATIVE_METRIC_WORD_PATTERN =
+  "(?:likelihood|likelihoods|probability|probabilities|probabilitas|rating|ratings|impact|impacts|dampak|severity|risk|risks|risked|risiko|utilization|utilizations|spent|budget|budgets|budgeted|anggaran|invoice|invoices|payment|payments|pembayaran|pembayarans|termin|termins|paid|dibayar|penyerapan|absorption|absorptions|cost|costs|biaya|expenditure|expenditures|slippage|slippages|delay|delays|keterlambatan|penyimpangan|contract value|contract price|contract amount|nilai kontrak|harga kontrak)";
+// A negation word inside the value's own field means the progress claim is
+// denied, not observed; negation in a separately delimited field may belong
+// to another claim and does not veto this one.
+const NARRATIVE_NEGATION_PATTERN =
+  "(?:not|never|no|nothing|neither|nor|cannot|isn't|aren't|wasn't|weren't|hasn't|haven't|didn't|doesn't|don't|won't|can't|couldn't|belum|tidak|bukan|tanpa|gagal|failed)";
+
+function clauseIsNegated(clause: string): boolean {
+  return new RegExp(
+    `(?:^|[^\\p{L}\\p{N}])(?:${NARRATIVE_NEGATION_PATTERN})(?=$|[^\\p{L}\\p{N}])`,
+    "iu",
+  ).test(clause);
+}
+
+// True when the negation sits in the same comma-delimited field as the
+// value ("Progress not reached 25%", "25% belum tercapai") and false when
+// it belongs to another field ("Risk: not started, Project progress: 25%").
+function occurrenceIsNegated(clause: string, start: number, end: number): boolean {
+  const before = clause.slice(0, start);
+  const fieldStart = Math.max(before.lastIndexOf(","), 0);
+  const nextComma = clause.indexOf(",", end);
+  const field = clause.slice(fieldStart, nextComma >= 0 ? nextComma : clause.length);
+  return clauseIsNegated(field);
+}
+
+// Clause/field-level negative linkage: when the clause holding the
+// percentage names a risk or financial metric anywhere, the value stays a
+// gap unless it sits in its own structurally delimited progress field
+// (`Label: value`) whose label words and field content (up to the next
+// comma delimiter) are metric-free. There are deliberately no word-count
+// windows, so `Pembayaran dari penyedia proyek yang sudah selesai 80% dari
+// nilai kontrak` stays a gap however far the metric sits from the progress
+// word, while `Risk: high, Project progress: 25%` keeps its separated
+// progress field.
+// ponytail: safety rests on the metric word list plus `,` field delimiters;
+// synonyms outside the list slip through — extend the list when a report
+// misclassifies, or move to structural field parsing if that proves
+// insufficient.
+function occurrenceIsClaimedByConflictingMetric(clause: string, start: number, end: number): boolean {
+  const metricWord = new RegExp(
+    `(?:^|[^\\p{L}\\p{N}])(?:${NARRATIVE_METRIC_WORD_PATTERN})\\b`,
+    "iu",
+  );
+  if (!metricWord.test(clause)) return false;
+  const before = clause.slice(0, start);
+  const after = clause.slice(end);
+  // Clauses are already split on `;`, `|`, and newlines; a comma is the
+  // remaining in-clause field delimiter.
+  const labelPart = before.slice(Math.max(before.lastIndexOf(","), 0));
+  const marker = Math.max(labelPart.lastIndexOf(":"), labelPart.lastIndexOf("="));
+  if (marker < 0) return true;
+  const labelWords = labelPart.slice(0, marker);
+  // Words between the delimiter and the value belong to the value, not the
+  // label: "Progress: paid 30%" must gap even though the label is clean.
+  const valueSegment = labelPart.slice(marker + 1);
+  const progressTermWord = new RegExp(
+    `(?:^|[^\\p{L}\\p{N}])(?:${NARRATIVE_PROGRESS_TERM_PATTERN})(?=$|[^\\p{L}\\p{N}])`,
+    "iu",
+  );
+  const contentEnd = after.indexOf(",") >= 0 ? after.indexOf(",") : after.length;
+  return (
+    !progressTermWord.test(labelWords) ||
+    metricWord.test(labelWords) ||
+    metricWord.test(valueSegment) ||
+    metricWord.test(after.slice(0, contentEnd))
+  );
+}
+
+function narrativeProgressPercentIsSourceLinked(
+  excerpt: string,
+  rawValue: string,
+  percentValue: number,
+): boolean {
+  const candidate = rawValue.trim().toLocaleLowerCase();
+  if (!candidate) return false;
+  const percentTokens = [...candidate.matchAll(/\d+(?:[.,]\d+)?\s*(?:%|percent(?:age)?|persen)/giu)]
+    .filter((token) => percentTokenMatchesValue(token[0], percentValue));
+  if (!percentTokens.length) return false;
+  // Narrative progress needs a progress/completion/actual word tied to this
+  // percentage. A risk or other word elsewhere in the field or excerpt is not
+  // enough, so only a short plain-word gap, listed qualifiers, and narrow
+  // connectors may sit between the term and the value.
+  const progressBefore = new RegExp(
+    `(?:^|[^\\p{L}\\p{N}])(?:(?:${NARRATIVE_QUALIFIER_PATTERN})\\s+)?${NARRATIVE_PROGRESS_TERM_PATTERN}\\s*(?:(?:${NARRATIVE_CONNECTOR_PATTERN})\\s+)*(?:%|percent(?:age)?|persen)?\\s*[:=]?\\s*$`,
+    "iu",
+  );
+  const progressAfter = new RegExp(
+    `^\\s*(?:(?:${NARRATIVE_QUALIFIER_PATTERN}|is|was)\\s+)*${NARRATIVE_PROGRESS_TERM_PATTERN}\\b`,
+    "iu",
+  );
+  // Same association across a bounded plain-word window, for word orders the
+  // strict patterns above cannot cover ("Progress has reached 25%",
+  // "Kemajuan fisik telah mencapai 25%"). The window still fails when the gap
+  // carries a metric of its own ("progress of invoice payments").
+  const progressLinked = new RegExp(
+    `${NARRATIVE_PROGRESS_TERM_PATTERN}${NARRATIVE_GAP_PATTERN}(?:(?:${NARRATIVE_QUALIFIER_PATTERN})${NARRATIVE_GAP_PATTERN})?(?:(?:${NARRATIVE_CONNECTOR_PATTERN})${NARRATIVE_GAP_PATTERN})?(?:%|percent(?:age)?|persen)?\\s*[:=]?\\s*$`,
+    "iu",
+  );
+  for (const clause of excerpt.split(/[;|\n]+|[.!?]\s+/u)) {
+    const text = clause.toLocaleLowerCase();
+    let valueIndex = text.indexOf(candidate);
+    while (valueIndex >= 0) {
+      for (const token of percentTokens) {
+        const start = valueIndex + (token.index ?? 0);
+        const end = start + token[0].length;
+        if (occurrenceIsNegated(text, start, end)) continue;
+        if (occurrenceIsClaimedByConflictingMetric(text, start, end)) continue;
+        if (
+          progressBefore.test(text.slice(0, start)) ||
+          progressAfter.test(text.slice(end)) ||
+          progressLinked.test(text.slice(0, start))
+        ) {
+          return true;
+        }
+      }
+      valueIndex = text.indexOf(candidate, valueIndex + candidate.length);
+    }
+  }
+  return false;
+}
+
+function citedProgressPercentSemanticsError(
+  group: ChunkGroup,
+  citation: SourceCitation | null,
+  rawValue: string,
+  percentValue: number,
+  path: string,
+): string | null {
+  if (!citation) return null;
+  const cited = citedReference(group, citation);
+  if (!cited) return null;
+  const location = cited.reference.sourceLocation;
+  if (location?.kind === "xlsx") {
+    const exactCell =
+      cited.reference.cell &&
+      location.cellRangeStart === cited.reference.cell.cell &&
+      location.cellRangeEnd === cited.reference.cell.cell
+        ? cited.reference.cell
+        : null;
+    const sourceCells = exactCell
+      ? [exactCell]
+      : cited.reference.rowCells?.length
+        ? cited.reference.rowCells
+        : cited.reference.cell
+          ? [cited.reference.cell]
+          : [];
+    const riskMetricLabel = /\b(?:risk|likelihood|probability|rating|impact|severity)\b/iu;
+    const progressMetricLabel =
+      /\b(?:actual|progress|completion|completed|complete|realisasi|kemajuan)\b/iu;
+    const candidate = rawValue.trim().toLocaleLowerCase();
+    const matchingCells = sourceCells.filter((cell) =>
+      [cell.rawValue, cell.value].some((value) => value.trim().toLocaleLowerCase() === candidate),
+    );
+    const riskCellCount = matchingCells.filter((cell) => riskMetricLabel.test(cell.label ?? "")).length;
+    const progressCellCount = matchingCells.filter(
+      (cell) => progressMetricLabel.test(cell.label ?? "") && !riskMetricLabel.test(cell.label ?? ""),
+    ).length;
+    return progressCellCount > 1 || (riskCellCount > 0 && progressCellCount !== 1)
+      ? `${path}.percent is a risk likelihood or rating, not progress evidence`
+      : null;
+  }
+  return narrativeProgressPercentIsSourceLinked(citation.excerpt, rawValue, percentValue)
+    ? null
+    : `${path}.percent is not linked to explicit progress, completion, or actual-reported wording; risk likelihood or rating, not progress evidence`;
+}
 function resolveSheetSourceLocations(
   group: ChunkGroup,
   sourceIds: string[],
@@ -1247,12 +1767,12 @@ Rules:
 - This group may suggest document date, reporting period, and workstream only. Artifact type and evidence role are classified once from the document-level preview.
 - Use insufficient_evidence when a health dimension lacks direct evidence; absence of a negative statement is not evidence of green status.
 - A source-group health assessment is not a document comparison. Do not claim change or variance unless both values appear in these sources.
-- Formula expressions are not evaluated. Only cached values explicitly labeled as stored cache may be described. Missing, empty, or error cache yields formula_result_unavailable and must not generate numeric values, statuses, variances, progress, or facts. Do not recalculate, interpolate, or infer any formula result.
+- Formula expressions are never evaluated. A stored cached formula result is only a source-reported candidate whose freshness is not established; never treat it as a current date/status or comparable cost/progress value, and do not derive alerts, actions, or risk snapshot/register status from it. Preserve an explicitly reported cost source_value as review-only raw text, but do not normalize it. Do not accept formula-derived report dates or health statuses as current. Missing, empty, or error cache yields formula_result_unavailable and must not generate numeric values, statuses, variances, progress, or facts. Do not recalculate, interpolate, or infer any formula result.
 - cost_observations collect project cost evidence found anywhere in these sources, whatever the artifact's primary type. Report one entry per stated cost value, copying source_value exactly as written in its cited source, including its currency wording and digit separators. Never convert, total, or restate a value.
 - Choose the cost measure from what the source says: approved_baseline (an approved or controlled budget reference), actual_to_date (cost already incurred), committed (contractually committed or ordered cost), eac (an explicitly reported total forecast or estimate at completion). Never record an actual or committed value as eac, and never record a value whose meaning the source does not state. Return [] only after processing this complete group and finding no cost values.
 - assurance_observations collect every source-backed milestone date, explicitly reported progress value, and item-level risk snapshot in this group, whatever the artifact's primary type. Do not infer baseline/current role; reviewer selection assigns that role later. Keep source scope, period, raw wording, and exact excerpt. Return [] for each array only when this complete group contains no such observation.
 - Milestones: keep the source label and raw date text. Normalize date only when the source explicitly gives an ISO YYYY-MM-DD date; do not convert locale dates. Set scope_level to project, wbs, or unknown from the source; WBS requires its exact scope_label.
-- Progress: report one entry per stated percentage, preserving 0 and the stated project/WBS scope. raw_value must be exact source wording; percent is the same percentage-point value (0–100), never a fraction, sum, average, or forecast. Omit non-numeric or unclear values; use unknown only when the scope is unclear.
+- Progress: report one entry per stated percentage, preserving 0 and the stated project/WBS scope. raw_value must be exact source wording; percent is the same percentage-point value (0–100), never a fraction, sum, average, or forecast. A General-formatted numeric cell requires a unique progress-semantics percent header (for example, Actual %); risk likelihood/probability percentages are not progress. For narrative sources, the percentage needs explicit progress/completion/actual wording in the same statement (for example, progress, completion, actual, realisasi, kemajuan); an unclear percentage or one belonging to a risk likelihood/rating is not progress. Omit non-numeric or unclear values; use unknown only when the scope is unclear.
 - Risk: report each item separately with its source risk ID, status, source rating label/value/scale, owner, mitigation, mitigation due date, WBS, and period when stated. raw_value and excerpt must be verbatim source text. A register statement may say no_open_high_or_critical only when it explicitly states that no open high or critical risks exist; otherwise use open_risk_reported only for an explicit open-risk statement.
 - Never derive risk counts, conditions, changes, or dates. Do not turn no extracted rows into a claim that no risks exist. Unsupported values are omitted; the application validates the raw value and computes comparisons.
 - The application decides which cost values are comparable, normalizes amounts, and accepts baselines. Do not compare, calculate a variance, or claim that any value is approved for comparison.
@@ -1269,17 +1789,26 @@ ${group.candidateInterpretation.length ? `\nCandidate sheet interpretation (pars
 
 SOURCE_REFERENCES_JSON=${JSON.stringify(sourceReferences)}
 
+${group.contextSources.length ? `DOCUMENT_CONTEXT_REFERENCES_JSON=${JSON.stringify(group.contextSources.map((context) => ({
+  source_id: context.sourceId,
+  kind: context.kind,
+  sheet_name: context.sheetName,
+  cell: context.cellReference,
+  text: context.text,
+  paired_source_id: context.pairedSourceId ?? null,
+})))}
+` : ""}
 Required JSON schema:
 {
   "facts": [{"fact_type":"risk|issue|milestone|decision|owner_action","extracted_text":"...","original_value":"...","confidence":0.0,"source_id":"..."}],
   "summary": {"summary_text":"...","confidence":0.0,"quality_warning":null,"sources":[{"source_id":"..."}]},
-  "health_snapshots": [{"dimension":"overall|schedule|cost|risk|governance|audit_readiness","score":null,"status":"green|amber|red|insufficient_evidence","evidence_coverage":0.0,"status_text":"...","source_summary":"...","snapshot_date":null,"source_id":null}],
+  "health_snapshots": [{"dimension":"overall|schedule|cost|risk|governance|audit_readiness","score":null,"status":"green|amber|red|insufficient_evidence","evidence_coverage":null,"status_text":"exact source-reported status phrase or neutral gap","source_summary":"exact cited source phrase or neutral gap","snapshot_date":null,"source_id":null}],
   "alerts": [{"severity":"low|medium|high|critical","impacted_area":"...","explanation":"...","evidence_count":1,"recommended_action":"...","source_id":"..."}],
   "actions": [{"title":"...","owner_name":null,"priority":"low|medium|high","status":"open","source_id":"..."}],
-  "cost_observations": [{"measure":"approved_baseline|actual_to_date|committed|eac","source_value":"exact source text of the amount","scope_level":"project|wbs","scope_label":null,"wbs_code":null,"wbs_parent_code":null,"wbs_name":null,"scope_description":null,"period_label":null,"as_of_date":null,"status_label":null,"source_id":"..."}],
+  "cost_observations": [{"measure":"approved_baseline|actual_to_date|committed|eac","source_value":"exact source text of the amount","scope_level":"project|wbs","scope_label":null,"scope_source_id":null,"wbs_code":null,"wbs_parent_code":null,"wbs_name":null,"scope_description":null,"period_label":null,"as_of_date":null,"status_label":null,"source_id":"..."}],
   "assurance_observations": {
-    "milestones": [{"label":"exact event label","raw_date":null,"date":null,"scope_level":"project|wbs|unknown","scope_label":null,"period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}],
-    "progress": [{"raw_value":"exact percentage wording","percent":0,"scope_level":"project|wbs|unknown","scope_label":null,"period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}],
+    "milestones": [{"label":"exact event label","raw_date":null,"date":null,"scope_level":"project|wbs|unknown","scope_label":null,"scope_source_id":null,"period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}],
+    "progress": [{"raw_value":"exact percentage wording","percent":0,"scope_level":"project|wbs|unknown","scope_label":null,"scope_source_id":null,"period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}],
     "risk_snapshots": [{"risk_id":null,"name":null,"description":null,"status":null,"rating_label":null,"rating_value":null,"scale_label":null,"owner":null,"mitigation":null,"mitigation_due_date":null,"raw_mitigation_due_date":null,"wbs":null,"period_label":null,"as_of_date":null,"raw_value":"verbatim source text","excerpt":"verbatim source excerpt","source_id":"..."}],
     "risk_register_statements": [{"state":"no_open_high_or_critical|open_risk_reported","raw_value":"verbatim source text","period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}]
   },
@@ -1287,12 +1816,11 @@ Required JSON schema:
   "sheet_interpretation": {"interpretation_status":"resolved|ambiguous|unknown","structure_type":"table|key_value|timeline_gantt|narrative|instructions_template|mixed|unknown","sheet_name":"...","source_ids":["..."],"header_candidates":[{"label":"exact source header text","source_ids":["..."]}],"column_roles":[{"column":"A","role":"...","source_ids":["..."]}],"candidate_observations":[{"raw_value":"exact source value","normalized_value":null,"value_type":null,"unit":null,"period":null,"source_ids":["..."]}],"warnings":["..."]}
 }
 
-For health snapshots, return exactly one entry for every listed dimension. Use exactly one of these status strings: "green", "amber", "red", "insufficient_evidence" (exact spelling). For "insufficient_evidence", set "score" and "source_id" to null and "evidence_coverage" to exactly 0.
-Other statuses require a matching source_id and a score within green 80-100, amber 50-79, or red 0-49.
-Health status_text and source_summary fields must each be nonempty strings no longer than 500 characters.
+For health snapshots, return exactly one entry per dimension. Use green, amber, or red only when that dimension has a literal source-reported status field in the cited excerpt (for example, Schedule Status: Green); do not infer a RAG status from narrative, progress, or sentiment. Copy the exact source phrase into status_text and source_summary, and cite it with source_id. Always set score and evidence_coverage to null; no score or evidence coverage is inferred. snapshot_date must be an explicitly cited record/cut-off date, never a due date or document hint. Without an explicit dimension status, use insufficient_evidence, null score/coverage/date/source ID, and a neutral explanation.
 Group metadata suggestions are limited to document date, reporting period, and workstream. Every non-null suggestion requires a valid source_id.
-For cost observations, source_value must be text present in the cited source and scope_level "wbs" requires the work-package code or name in scope_label. For a WBS value, also capture the work package's stated identity from the source: wbs_code (its own code), wbs_parent_code (its parent's code), wbs_name (its name), and scope_description (its stated deliverable or scope). Leave any of these null when the source does not state it, and never invent a code or a canonical identity. For a project-total value leave all four null. Report as_of_date as YYYY-MM-DD and leave period_label as the source's own wording. Return [] when these sources state no cost value.
+For cost observations, source_value must be text present in the cited source. WBS scope requires a parser-labelled scope column in the cited row, an explicitly marked WBS/work-package scope in the cited text, or the unique declared-subject context; a task mention alone is not scope proof. For a declared subject, set scope_source_id to its value-cell source_id. Also capture the work package's stated identity from the source: wbs_code (its own code), wbs_parent_code (its parent's code), wbs_name (its name), and scope_description (its stated deliverable or scope). Leave any of these null when the source does not state it, and never invent a code or canonical identity. For a project-total value leave all four null. Report as_of_date as YYYY-MM-DD and leave period_label as the source's own wording. Return [] when these sources state no cost value.
 - Every assurance observation requires an excerpt and citation source_id from this group. Each non-null raw value, label, status, rating, owner, mitigation, WBS, and normalized date/number must be supported by that excerpt. Use null rather than interpreting a formula without a stored cache. Return all four arrays even when empty.
+- DOCUMENT_CONTEXT_REFERENCES_JSON exposes parser-authored key and value cells separately, each with its own source_id, exact cell, and verbatim model-visible text. Their reciprocal paired_source_id fields link only the parser-authored key/value pair. Use them only to establish a work-package scope. For a declared subject, set scope_source_id to the declared_subject value-cell source_id; the paired declared_subject_key cell and the cited sheet_title cell prove the association. Never concatenate key/value text into a citation or use context references for values, dates, facts, or summaries.
 Report document dates as YYYY-MM-DD and reporting periods as their first day YYYY-MM-01.
 sheet_interpretation is candidate-only and may appear only for parser-flagged ambiguous XLSX groups. Never invent cells, sheets, headers, cached values, dates, owners, or formula results. Cite each header, column role, and observation with source_ids from this group. The worker resolves those IDs to parser-authored sheet/cell/range locators; never provide locators yourself. Each header label and observation raw_value must be exact text present in its cited source. Normalized values remain candidates and must not replace raw evidence. If the group is not flagged ambiguous, omit the field.${correction}`;
 }
@@ -1544,6 +2072,514 @@ function validateGroupExtraction(
     observationWarnings[domain].push(warning);
   };
   const allowedSources = allowedSourceCitations(group);
+  // An `as_of_date` is the row's record date, so it must come from a cut-off/
+  // period column or an explicitly labelled narrative date. A milestone date
+  // may instead come from a due/target/plan/actual field; neighbouring dates
+  // never prove a different field.
+  const RECORD_DATE_CUE = /\b(?:cut[\s-]?off|as[\s-]?of|report(?:ing|ed)?\s*(?:date|period)|period|periode)\b/i;
+  const DUE_DATE_CUE = /\b(?:due|target|start|finish|milestone|planned|actual|baseline|mitigation|submission|delivery|approval)\b/i;
+  const APPROVAL_DATE_CUE = /\b(?:approved|approval)\b/i;
+  const SCOPE_COLUMN_CUE = /\b(?:sub[\s-]?system|component|work\s*package|discipline|package|scope|wbs)\b/i;
+  const PERIOD_COLUMN_CUE = /^(?:(?:report(?:ing)?|current|this|last|previous|next|fiscal)\s+)?(?:week(?:ly)?|month(?:ly)?|period|periode|minggu|pekan|bulan|sprint|cycle|quarter)(?:\s*(?:no\.?|number|label|end(?:ing|ed)?|start(?:ing)?))?$/i;
+  const referenceForCitation = (citation: SourceCitation | null | undefined) => {
+    return citation?.source_id ? findSourceReference(group, citation.source_id) : undefined;
+  };
+  const cellLabel = (cell: ParsedSourceCell) => cell.label ?? "";
+  const isPeriodValue = (value: string) =>
+    /^(?:w(?:eek)?\s*[-#]?\s*\d{1,2}(?:\s+(?:19|20)\d{2})?|(?:19|20)\d{2}(?:[-/]\d{1,2}){0,2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:[.,]?\s+\d{2,4})?|q[1-4](?:\s+(?:fy\s*)?\d{2,4})?|fy\s*\d{2,4}|(?:sprint|cycle)\s*\d{1,3})$/iu.test(value.trim());
+  const narrativeClauses = (excerpt: string) => excerpt.split(/[;|\n]+|[.!?]\s+/u);
+  const narrativeDateValues = (excerpt: string) =>
+    narrativeClauses(excerpt).flatMap((clause) => {
+      const cues = [
+        ...[...clause.matchAll(new RegExp(RECORD_DATE_CUE.source, "giu"))].map((match) => ({
+          index: match.index ?? 0,
+          end: (match.index ?? 0) + match[0].length,
+          role: "record" as const,
+        })),
+        ...[...clause.matchAll(new RegExp(DUE_DATE_CUE.source, "giu"))].map((match) => ({
+          index: match.index ?? 0,
+          end: (match.index ?? 0) + match[0].length,
+          role: "due" as const,
+        })),
+        ...[...clause.matchAll(new RegExp(APPROVAL_DATE_CUE.source, "giu"))].map((match) => ({
+          index: match.index ?? 0,
+          end: (match.index ?? 0) + match[0].length,
+          role: "approval" as const,
+        })),
+      ].sort((left, right) => left.index - right.index);
+      return [...clause.matchAll(/\b\d{4}-\d{2}-\d{2}\b/gu)].flatMap((match) => {
+        const value = match[0];
+        if (!isIsoDate(value)) return [];
+        const dateIndex = match.index ?? 0;
+        const preceding = cues.filter((cue) => cue.end <= dateIndex);
+        const cue = preceding.length
+          ? preceding[preceding.length - 1]
+          : cues.find((candidate) => candidate.index > dateIndex);
+        return [{ value, role: cue?.role ?? null, clause }];
+      });
+    });
+  const narrativePeriodValues = (excerpt: string) =>
+    narrativeClauses(excerpt).flatMap((clause) => {
+      const fieldPattern =
+        /\b(?:(?:report(?:ing)?|current|this|last|previous|next|fiscal)\s+)?(?:week(?:ly)?|month(?:ly)?|period|periode|minggu|pekan|bulan|sprint|cycle|quarter)(?:\s*(?:no\.?|number|label))?\s*[:#=]\s*([^,;|]+)/giu;
+      return [...clause.matchAll(fieldPattern)]
+        .map((match) => match[1].trim())
+        .filter((value) => isPeriodValue(value));
+    });
+  const contextualNarrativePeriodValues = (
+    excerpt: string,
+    evidenceAnchor: string | null | undefined,
+  ) => {
+    if (!evidenceAnchor?.trim()) return [];
+    const anchor = evidenceAnchor.trim().toLocaleLowerCase();
+    return narrativeClauses(excerpt).flatMap((clause) => {
+      const text = clause.toLocaleLowerCase();
+      const values: string[] = [];
+      let anchorIndex = -1;
+      while ((anchorIndex = text.indexOf(anchor, anchorIndex + 1)) !== -1) {
+        const suffix = clause.slice(anchorIndex + anchor.length);
+        const relation = suffix.match(/^\s*(?:[-–—,]\s*|\bfor\s+|\bduring\s+)/iu);
+        if (!relation) continue;
+        const value = suffix.slice(relation[0].length).trim().replace(/[.!?]+$/u, "");
+        if (isPeriodValue(value) && !isIsoDate(value)) values.push(value);
+      }
+      return values;
+    });
+  };
+  const HEALTH_STATUS_DIMENSION_CUES: Record<GroupHealthSnapshot["dimension"], string> = {
+    overall: "(?:overall(?:\\s+(?:project|health|status))?|project(?:\\s+(?:health|status))?|health\\s+status|rag(?:\\s+status)?)",
+    schedule: "(?:schedule|programme?|program|progress)(?:\\s+(?:health|status))?",
+    cost: "(?:cost|budget)(?:\\s+(?:health|status))?",
+    risk: "risk(?:\\s+(?:health|status))?",
+    governance: "governance(?:\\s+(?:health|status))?",
+    audit_readiness: "audit(?:\\s+readiness)?(?:\\s+(?:health|status))?",
+  };
+  const DIMENSION_HEADER_VALUES: Record<GroupHealthSnapshot["dimension"], RegExp> = {
+    overall: /^(?:overall|project)(?:\s+health)?$/iu,
+    schedule: /^(?:schedule|programme?|program|progress)$/iu,
+    cost: /^(?:cost|budget)$/iu,
+    risk: /^risk$/iu,
+    governance: /^governance$/iu,
+    audit_readiness: /^audit(?:\s+readiness)?$/iu,
+  };
+  const healthStatusFromCitation = (
+    citation: SourceCitation | null | undefined,
+    dimension: GroupHealthSnapshot["dimension"],
+  ): { status: "green" | "amber" | "red"; text: string; sourceCell?: ParsedSourceCell } | null => {
+    const reference = referenceForCitation(citation);
+    if (!citation || !reference) return null;
+    const cells = reference.rowCells?.length
+      ? reference.rowCells
+      : reference.cell
+        ? [reference.cell]
+        : [];
+    if (cells.length) {
+      const dimensionLabel = new RegExp(`^(?:${HEALTH_STATUS_DIMENSION_CUES[dimension]})$`, "iu");
+      const dimensionCells = cells.filter(
+        (cell) =>
+          /^(?:health\s+)?(?:assurance\s+)?dimension$/iu.test(cellLabel(cell).trim()) &&
+          DIMENSION_HEADER_VALUES[dimension].test(cell.value.trim()),
+      );
+      const isDimensionScopedLabel = (label: string) =>
+        dimensionLabel.test(label.trim()) ||
+        (dimension === "overall" && /^(?:health\s+status|rag(?:\s+status)?)$/iu.test(label.trim()));
+      const statusText = (cell: ParsedSourceCell) =>
+        /^(green|amber|red)$/iu.test(cell.rawValue.trim())
+          ? cell.rawValue.trim()
+          : cell.value.trim();
+      const statusCells = cells.filter((cell) => {
+        if (reference.cell && cell.cell !== reference.cell.cell) return false;
+        if (!/^(green|amber|red)$/iu.test(statusText(cell))) return false;
+        const label = cellLabel(cell).trim();
+        return isDimensionScopedLabel(label) ||
+          (/^(?:status|rag(?:\s+status)?)$/iu.test(label) && dimensionCells.length === 1);
+      });
+      if (statusCells.length !== 1) return null;
+      const cell = statusCells[0];
+      const text = statusText(cell);
+      if (!citation.excerpt.toLocaleLowerCase().includes(text.trim().toLocaleLowerCase())) return null;
+      return {
+        status: text.trim().toLocaleLowerCase() as "green" | "amber" | "red",
+        text,
+        sourceCell: cell,
+      };
+    }
+    if (reference.sourceLocation?.kind === "xlsx") return null;
+    const pattern = new RegExp(
+      `\\b(${HEALTH_STATUS_DIMENSION_CUES[dimension]})\\s*(?:[:#=-]\\s*|\\s+is\\s+)(green|amber|red)\\b`,
+      "giu",
+    );
+    const matches = [...citation.excerpt.matchAll(pattern)];
+    if (matches.length !== 1) return null;
+    return {
+      status: matches[0][2].toLocaleLowerCase() as "green" | "amber" | "red",
+      text: matches[0][0].trim(),
+    };
+  };
+  const cellDateValue = (cell: ParsedSourceCell) =>
+    cell.dateIso ??
+    (isIsoDate(cell.rawValue.trim())
+      ? cell.rawValue.trim()
+      : isIsoDate(cell.value.trim())
+        ? cell.value.trim()
+        : null);
+  const isRecordColumn = (cell: ParsedSourceCell) =>
+    RECORD_DATE_CUE.test(cellLabel(cell)) && !DUE_DATE_CUE.test(cellLabel(cell));
+  const isDueColumn = (cell: ParsedSourceCell) =>
+    DUE_DATE_CUE.test(cellLabel(cell)) && !RECORD_DATE_CUE.test(cellLabel(cell));
+  const formulaDateReviewError = (
+    citation: SourceCitation | null | undefined,
+    cell: ParsedSourceCell,
+    path: string,
+  ) =>
+    formulaCacheStatusForSourceCell(group, citation, cell) === "cached_value"
+      ? `${path} cites a stored formula result whose freshness is not established; it remains a source-reported candidate for review (${FORMULA_CACHE_REVIEW_MARKER})`
+      : null;
+  // Returns an error string when the cited source cannot support the claimed
+  // record date, or null when it can (or carries no column metadata).
+  const asOfDateError = (
+    citation: SourceCitation | null | undefined,
+    claimed: string,
+    path: string,
+    allowApprovalDate = false,
+    evidenceAnchor?: string | null,
+  ): string | null => {
+    const reference = referenceForCitation(citation);
+    const rowCells = reference?.rowCells;
+    if (rowCells?.length) {
+      const dateCells = rowCells.filter((cell) => cellDateValue(cell));
+      const recordColumns = dateCells.filter(isRecordColumn);
+      if (recordColumns.length > 1) {
+        return `${path} is ambiguous: the cited row has more than one cut-off or period date column (${recordColumns.map(cellLabel).join(", ")})`;
+      }
+      if (recordColumns.length === 1) {
+        const column = recordColumns[0];
+        const dateValue = cellDateValue(column);
+        if (dateValue === claimed) return formulaDateReviewError(citation, column, path);
+        return `${path} is ${claimed}, but the cited row's "${cellLabel(column)}" column states ${dateValue}`;
+      }
+      if (allowApprovalDate) {
+        const approvalColumns = dateCells.filter((cell) => APPROVAL_DATE_CUE.test(cellLabel(cell)));
+        if (approvalColumns.length > 1) {
+          return `${path} is ambiguous: the cited row has more than one approval date column`;
+        }
+        if (approvalColumns.length === 1) {
+          const column = approvalColumns[0];
+          const dateValue = cellDateValue(column);
+          if (dateValue === claimed) return formulaDateReviewError(citation, column, path);
+          return `${path} is ${claimed}, but the cited row's "${cellLabel(column)}" column states ${dateValue}`;
+        }
+      }
+      const unrelated = dateCells.find((cell) => isDueColumn(cell) && cellDateValue(cell) === claimed);
+      if (unrelated) {
+        return `${path} is the value of the cited row's "${cellLabel(unrelated)}" column, not a cut-off or period date`;
+      }
+      return `${path} cannot be attributed to a cut-off or period column in the cited row`;
+    }
+    const cell = reference?.cell;
+    if (cell) {
+      if (isRecordColumn(cell)) return formulaDateReviewError(citation, cell, path);
+      if (allowApprovalDate && APPROVAL_DATE_CUE.test(cellLabel(cell))) {
+        return formulaDateReviewError(citation, cell, path);
+      }
+      if (isDueColumn(cell)) {
+        return `${path} is the value of the cited source's "${cellLabel(cell)}" column, not a cut-off or period date`;
+      }
+      return `${path} cannot be attributed to a cut-off or period column in the cited source`;
+    }
+    if (reference?.sourceLocation?.kind === "xlsx") {
+      return `${path} cannot be attributed to a cut-off or period column in the cited source`;
+    }
+    const dates = narrativeDateValues(citation?.excerpt ?? "");
+    const recordDates = dates.filter((date) => date.role === "record");
+    if (recordDates.length > 1) {
+      return `${path} is ambiguous: the cited narrative has more than one explicitly labelled record date`;
+    }
+    if (recordDates.length === 1) {
+      if (recordDates[0].value === claimed) return null;
+      if (dates.some((date) => date.role === "due" && date.value === claimed)) {
+        return `${path} is the cited narrative's due or event date, not a record date`;
+      }
+      if (dates.some((date) => date.role === "approval" && date.value === claimed)) {
+        return `${path} is the cited narrative's approval date, not a record date`;
+      }
+      return `${path} is ${claimed}, but the cited narrative's record date is ${recordDates[0].value}`;
+    }
+    if (allowApprovalDate) {
+      const anchor = evidenceAnchor?.trim().toLocaleLowerCase();
+      const approvalDates = dates.filter(
+        (date) =>
+          date.role === "approval" &&
+          (!anchor || date.clause.toLocaleLowerCase().includes(anchor)),
+      );
+      if (approvalDates.length > 1) {
+        return `${path} is ambiguous: the cited narrative has more than one approval date for this value`;
+      }
+      if (approvalDates.length === 1) {
+        return approvalDates[0].value === claimed
+          ? null
+          : `${path} is ${claimed}, but the cited narrative's approval date is ${approvalDates[0].value}`;
+      }
+    }
+    if (dates.some((date) => date.role === "due" && date.value === claimed)) {
+      return `${path} is the cited narrative's due or event date, not a record date`;
+    }
+    if (dates.some((date) => date.role === "approval" && date.value === claimed)) {
+      return `${path} is the cited narrative's approval date, not a record date`;
+    }
+    return `${path} cannot be attributed to an explicitly labelled record date in the cited text`;
+  };
+  const dueDateError = (
+    citation: SourceCitation | null,
+    claimed: string,
+    path: string,
+  ): string | null => {
+    const reference = referenceForCitation(citation);
+    const rowCells = reference?.rowCells;
+    if (rowCells?.length) {
+      const dateCells = rowCells.filter((cell) => cellDateValue(cell));
+      if (dateCells.some((cell) => isDueColumn(cell) && cellDateValue(cell) === claimed)) return null;
+      const record = dateCells.find((cell) => isRecordColumn(cell) && cellDateValue(cell) === claimed);
+      return record
+        ? `${path} is the cited row's "${cellLabel(record)}" value, not a due or event date`
+        : `${path} cannot be attributed to a due or event date column in the cited row`;
+    }
+    const cell = reference?.cell;
+    if (cell) {
+      if (isDueColumn(cell)) return null;
+      return isRecordColumn(cell)
+        ? `${path} is the cited source's "${cellLabel(cell)}" value, not a due or event date`
+        : `${path} cannot be attributed to a due or event date column in the cited source`;
+    }
+    if (reference?.sourceLocation?.kind === "xlsx") {
+      return `${path} cannot be attributed to a due or event date column in the cited source`;
+    }
+    const dates = narrativeDateValues(citation?.excerpt ?? "");
+    const dueDates = dates.filter((date) => date.role === "due" || date.role === "approval");
+    if (dueDates.length > 1) {
+      return `${path} is ambiguous: the cited narrative has more than one explicitly labelled due or event date`;
+    }
+    if (dueDates.length === 1) {
+      return dueDates[0].value === claimed
+        ? null
+        : `${path} is ${claimed}, but the cited narrative's due or event date is ${dueDates[0].value}`;
+    }
+    return dates.some((date) => date.role === "record" && date.value === claimed)
+      ? `${path} is the cited narrative's record date, not a due or event date`
+      : `${path} cannot be attributed to an explicitly labelled due or event date in the cited text`;
+  };
+  const checkDate = (
+    citation: SourceCitation | null,
+    date: string | null | undefined,
+    path: string,
+    rowErrors: string[],
+    field: "record" | "due",
+    allowApprovalDate = false,
+    evidenceAnchor?: string | null,
+  ) => {
+    if (!date) return;
+    const error = field === "record"
+      ? asOfDateError(citation, date, path, allowApprovalDate, evidenceAnchor)
+      : dueDateError(citation, date, path);
+    if (error) rowErrors.push(error);
+  };
+  const periodLabelError = (
+    citation: SourceCitation | null,
+    claimed: string,
+    path: string,
+    evidenceAnchor?: string | null,
+  ): string | null => {
+    const reference = referenceForCitation(citation);
+    const rowCells = reference?.rowCells;
+    if (rowCells?.length) {
+      const periodColumns = rowCells.filter(
+        (cell) => PERIOD_COLUMN_CUE.test(cellLabel(cell).trim()) && isPeriodValue(cell.value),
+      );
+      if (periodColumns.length > 1) {
+        return `${path} is ambiguous: the cited row has more than one period column (${periodColumns.map(cellLabel).join(", ")})`;
+      }
+      const periodCell = periodColumns[0];
+      return periodCell?.value.trim().toLocaleLowerCase() === claimed.trim().toLocaleLowerCase()
+        ? null
+        : `${path} cannot be attributed to a matching period column in the cited row`;
+    }
+    const cell = reference?.cell;
+    if (cell) {
+      return (
+        PERIOD_COLUMN_CUE.test(cellLabel(cell)) &&
+        isPeriodValue(cell.value) &&
+        cell.value.trim().toLocaleLowerCase() === claimed.trim().toLocaleLowerCase()
+      )
+        ? null
+        : `${path} cannot be attributed to a matching period column in the cited source`;
+    }
+    if (reference?.sourceLocation?.kind === "xlsx") {
+      return `${path} cannot be attributed to a period column in the cited source`;
+    }
+    const excerpt = citation?.excerpt ?? "";
+    const explicitValues = narrativePeriodValues(excerpt);
+    const contextualValues = contextualNarrativePeriodValues(excerpt, evidenceAnchor);
+    const values = [...new Set(
+      [...explicitValues, ...contextualValues].map((value) => value.toLocaleLowerCase()),
+    )];
+    if (explicitValues.length > 1) {
+      return `${path} is ambiguous: the cited narrative has more than one explicitly labelled period value (${explicitValues.join(", ")})`;
+    }
+    if (values.length > 1) {
+      return `${path} is ambiguous: the cited field has more than one associated period value (${values.join(", ")})`;
+    }
+    return values.length === 1 &&
+        values[0] === claimed.trim().toLocaleLowerCase()
+      ? null
+      : `${path} cannot be attributed to a matching explicitly labelled or adjacent period in the cited text`;
+  };
+  const checkPeriodLabel = (
+    citation: SourceCitation | null,
+    periodLabel: string | null,
+    path: string,
+    rowErrors: string[],
+    evidenceAnchor?: string | null,
+  ) => {
+    if (!periodLabel) return;
+    const error = periodLabelError(citation, periodLabel, path, evidenceAnchor);
+    if (error) {
+      rowErrors.push(error);
+    } else if (citation && !citation.excerpt.toLocaleLowerCase().includes(periodLabel.toLocaleLowerCase())) {
+      rowErrors.push(`${path} is not present in the cited source`);
+    }
+  };
+  const hasExplicitTextScope = (
+    citation: SourceCitation | null,
+    scopeLabel: string,
+    evidenceAnchor: string | null | undefined,
+  ) => {
+    const reference = referenceForCitation(citation);
+    if (!reference || reference.sourceLocation?.kind === "xlsx" || !evidenceAnchor?.trim()) {
+      return false;
+    }
+    const escaped = scopeLabel.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const scopeValuePattern = new RegExp(`^\\s*${escaped}`, "iu");
+    const labelledFieldBoundary =
+      /^\s*[,，]\s*[\p{L}\p{N}_][\p{L}\p{N}_\s().%/_-]{0,79}\s*[:=]\s*$/u;
+    const narrativeFieldBoundary =
+      /^\s*[,，–—-]?\s*(?:actual\b(?:\s*%|\s+percent(?:age)?|\s+progress|\s+to\s+date)?|progress\b|realisasi\b|kemajuan\b|completed\b|completion\b|forecast\b|ramalan\b|estimate(?:\s+at\s+completion)?\b|estimasi\b|eac\b|baseline\b|approved\b|disetujui\b|budget\b|anggaran\b|cost\b|biaya\b|currency\b|mata\s+uang\b|amount\b|nilai\b|report(?:ed|ing)?\s+(?:date|period)\b|as[\s-]?of\b|cut[\s-]?off(?:\s+date)?\b|due(?:\s+date)?\b|target(?:\s+date)?\b|week\b|minggu\b|month\b|bulan\b|period(?:e)?\b)\s*[:#=-]?\s*$/iu;
+    const separatorBoundary = /^\s*[,;|:–—-]?\s*$/u;
+    const grammaticalValueBoundary = /^\s+is\s*$/iu;
+    const scopeCuePattern =
+      /\b(?:wbs|work[\s-]?package|sub[\s-]?system|component|discipline|package|scope)\b\s*(?:name|code)?\s*[:#-]?\s*/giu;
+    const anchor = evidenceAnchor.trim().toLocaleLowerCase();
+    for (const clause of narrativeClauses(citation?.excerpt ?? "")) {
+      const text = clause.toLocaleLowerCase();
+      let anchorIndex = -1;
+      while ((anchorIndex = text.indexOf(anchor, anchorIndex + 1)) !== -1) {
+        const precedingCues = [...clause.matchAll(scopeCuePattern)].filter(
+          (match) => (match.index ?? 0) + match[0].length <= anchorIndex,
+        );
+        const scopeCue = precedingCues[precedingCues.length - 1];
+        if (!scopeCue) continue;
+        const scopeValueStart = (scopeCue.index ?? 0) + scopeCue[0].length;
+        const prefix = clause.slice(scopeValueStart, anchorIndex);
+        const scopeMatch = scopeValuePattern.exec(prefix);
+        if (!scopeMatch) continue;
+        const afterScope = prefix.slice(scopeMatch[0].length);
+        if (
+          labelledFieldBoundary.test(afterScope) ||
+          narrativeFieldBoundary.test(afterScope) ||
+          separatorBoundary.test(afterScope) ||
+          grammaticalValueBoundary.test(afterScope)
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  // Scope provenance resolves through the exact source IDs and canonical texts
+  // shown to the model, including both cells of a declared subject.
+  const scopeProvenance = (
+    citation: SourceCitation | null,
+    scopeLabel: string,
+    scopeSourceId: string | null,
+  ): ObservationScopeProvenance[] | null => {
+    const reference = referenceForCitation(citation);
+    const rowColumn = reference?.rowCells?.find(
+      (cell) =>
+        cell.label !== null &&
+        SCOPE_COLUMN_CUE.test(cell.label) &&
+        cell.value.trim().toLocaleLowerCase() === scopeLabel.toLocaleLowerCase(),
+    );
+    const rowColumnReference = rowColumn
+      ? group.chunks.flatMap((chunk) => sourceReferencesForChunk(chunk)).find(
+          (source) =>
+            source.cell?.cell === rowColumn.cell &&
+            source.sourceLocation?.sheetName === rowColumn.sheetName &&
+            source.sourceLocation.cellRangeStart === rowColumn.cell &&
+            source.sourceLocation.cellRangeEnd === rowColumn.cell,
+        )
+      : undefined;
+    if (rowColumn && rowColumnReference) {
+      return [{
+        kind: "cited_row_column",
+        source_id: rowColumnReference.sourceId,
+        sheet_name: rowColumn.sheetName,
+        cell_reference: rowColumn.cell,
+        excerpt: rowColumnReference.modelText,
+      }];
+    }
+    const subject = scopeSourceId
+      ? group.contextSources.find((context) => context.sourceId === scopeSourceId)
+      : undefined;
+    const subjectKey = subject?.pairedSourceId
+      ? group.contextSources.find(
+          (context) =>
+            context.sourceId === subject.pairedSourceId &&
+            context.pairedSourceId === subject.sourceId &&
+            context.kind === "declared_subject_key",
+        )
+      : undefined;
+    if (
+      !subject ||
+      subject.kind !== "declared_subject" ||
+      !subjectKey ||
+      subject.subjectValue === null ||
+      subject.subjectValue.toLocaleLowerCase() !== scopeLabel.toLocaleLowerCase()
+    ) {
+      return null;
+    }
+    const subjectValue = subject.subjectValue;
+    const sheetName = reference?.sourceLocation?.sheetName;
+    if (typeof sheetName !== "string") return null;
+    const title = group.contextSources.find(
+      (context) =>
+        context.kind === "sheet_title" &&
+        context.sheetName === sheetName &&
+        containsSourcePhrase(context.text, subjectValue),
+    );
+    if (!title) return null;
+    return [
+      {
+        kind: "declared_subject_key",
+        source_id: subjectKey.sourceId,
+        sheet_name: subjectKey.sheetName,
+        cell_reference: subjectKey.cellReference,
+        excerpt: subjectKey.text,
+      },
+      {
+        kind: "declared_subject",
+        source_id: subject.sourceId,
+        sheet_name: subject.sheetName,
+        cell_reference: subject.cellReference,
+        excerpt: subject.text,
+      },
+      {
+        kind: "sheet_title",
+        source_id: title.sourceId,
+        sheet_name: title.sheetName,
+        cell_reference: title.cellReference,
+        excerpt: title.text,
+      },
+    ];
+  };
 
   const facts: ExtractedFact[] = [];
   if (!Array.isArray(value.facts) || value.facts.length > MAX_FACTS_PER_GROUP) {
@@ -1563,6 +2599,20 @@ function validateGroupExtraction(
       const citation = requiredCitation(fact, allowedSources, path, rowErrors, fromCache);
       if (citation && citationHasUnavailableFormula(group, citation)) {
         rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support an extracted fact.`);
+      }
+      if (
+        citation &&
+        [originalValue, extractedText].some(
+          (candidate) =>
+            candidate !== null &&
+            sourceValueNeedsFormulaReview(
+              citedFormulaCacheStatusForValue(group, citation, candidate),
+            ),
+        )
+      ) {
+        rowErrors.push(
+          `${path} cites a stored formula result whose freshness is not established; the source-reported candidate requires review (${FORMULA_CACHE_REVIEW_MARKER}).`,
+        );
       }
       if (
         citation &&
@@ -1624,6 +2674,19 @@ function validateGroupExtraction(
     }
   }
 
+  const insufficientHealthSnapshot = (
+    dimension: GroupHealthSnapshot["dimension"],
+  ): GroupHealthSnapshot => ({
+    dimension,
+    score: null,
+    status: "insufficient_evidence",
+    evidence_coverage: null,
+    status_text: "No source-reported health status was validated for this dimension.",
+    source_summary: "No source-reported health status was validated for this dimension.",
+    snapshot_date: null,
+    evidence_chunk_index: null,
+    excerpt: null,
+  });
   const snapshotsByDimension = new Map<string, GroupHealthSnapshot>();
   const invalidDimensions = new Set<string>();
   if (!Array.isArray(value.health_snapshots)) {
@@ -1631,7 +2694,6 @@ function validateGroupExtraction(
   } else {
     value.health_snapshots.forEach((snapshot, index) => {
       const path = `health_snapshots[${index}]`;
-      const rowErrors: string[] = [];
       if (!isRecord(snapshot)) {
         warnInvalidRow(path, [`${path} must be an object`]);
         return;
@@ -1647,49 +2709,115 @@ function validateGroupExtraction(
         qualityWarnings.push(`${path}.dimension is duplicated; ${dimension} is marked insufficient_evidence.`);
         return;
       }
-      const status = stringField(snapshot.status);
-      const validStatus = ["green", "amber", "red", "insufficient_evidence"].includes(status);
-      if (!validStatus) rowErrors.push(`${path}.status is invalid`);
-      const score = snapshot.score === null ? null : boundedScore(snapshot.score, `${path}.score`, rowErrors);
-      const evidenceCoverage = boundedNumber(snapshot.evidence_coverage, 0, 1, `${path}.evidence_coverage`, rowErrors);
-      const statusText = boundedString(snapshot.status_text, `${path}.status_text`, rowErrors, 1000);
-      const sourceSummary = boundedString(snapshot.source_summary, `${path}.source_summary`, rowErrors, MAX_MODEL_STRING_LENGTH);
-      const snapshotDate = nullableIsoDate(snapshot.snapshot_date, `${path}.snapshot_date`, rowErrors);
-      const citation = status === "insufficient_evidence"
-        ? optionalCitation(snapshot, allowedSources, path, rowErrors, fromCache)
-        : requiredCitation(snapshot, allowedSources, path, rowErrors, fromCache);
+
+      const suppliedStatus = stringField(snapshot.status).toLocaleLowerCase();
+      const citationErrors: string[] = [];
+      const citation = optionalCitation(snapshot, allowedSources, path, citationErrors, fromCache);
       if (citation && citationHasUnavailableFormula(group, citation)) {
-        rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support a health status.`);
+        citationErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support a health status.`);
       }
-      if (status === "insufficient_evidence" && score !== null) rowErrors.push(`${path}.score must be null for insufficient_evidence`);
-      if (status === "green" && (score === null || score < 80 || score > 100)) rowErrors.push(`${path}.score must be 80-100 for green`);
-      if (status === "amber" && (score === null || score < 50 || score > 79)) rowErrors.push(`${path}.score must be 50-79 for amber`);
-      if (status === "red" && (score === null || score < 0 || score > 49)) rowErrors.push(`${path}.score must be 0-49 for red`);
-      if (status === "insufficient_evidence" && evidenceCoverage !== 0) rowErrors.push(`${path}.evidence_coverage must be zero for insufficient_evidence`);
+      const sourceStatus = healthStatusFromCitation(
+        citation,
+        dimension as GroupHealthSnapshot["dimension"],
+      );
       if (
-        rowErrors.length ||
-        !validStatus ||
-        score === undefined ||
-        evidenceCoverage === null ||
-        !statusText ||
-        !sourceSummary ||
-        snapshotDate === undefined ||
-        (status === "insufficient_evidence" ? citation !== null : !citation)
+        citation &&
+        sourceStatus?.sourceCell &&
+        formulaCacheStatusForSourceCell(group, citation, sourceStatus.sourceCell) === "cached_value"
       ) {
+        citationErrors.push(
+          `${path}.source_id reports ${sourceStatus.text} from a stored formula result whose freshness is not established; it remains a source-reported candidate for review (${FORMULA_CACHE_REVIEW_MARKER}).`,
+        );
+      }
+      const reportedStatus = citationErrors.length ? null : sourceStatus;
+      if (!reportedStatus) {
         invalidDimensions.add(dimension);
-        warnInvalidRow(path, rowErrors.length ? rowErrors : [`${path} is incomplete`]);
+        const warnings = [
+          ...citationErrors,
+          ...(suppliedStatus && suppliedStatus !== "insufficient_evidence" && !citationErrors.length
+            ? [`${path}.status is not supported by an explicit dimension-specific source field`]
+            : []),
+        ];
+        if (warnings.length) warnInvalidRow(path, warnings);
+        if (citation && citationErrors.some((error) => error.includes(FORMULA_CACHE_REVIEW_MARKER))) {
+          snapshotsByDimension.set(dimension, {
+            ...insufficientHealthSnapshot(dimension as GroupHealthSnapshot["dimension"]),
+            source_summary: citation.excerpt,
+            evidence_chunk_index: citation.evidence_chunk_index,
+            excerpt: citation.excerpt,
+          });
+        }
         return;
       }
+      if (suppliedStatus !== reportedStatus.status) {
+        qualityWarnings.push(
+          `${path}.status was replaced with the source-reported ${reportedStatus.status} status.`,
+        );
+      }
+      if (snapshot.score !== null && snapshot.score !== undefined) {
+        qualityWarnings.push(`${path}.score was ignored; health scores are not inferred.`);
+      }
+      if (snapshot.evidence_coverage !== null && snapshot.evidence_coverage !== undefined) {
+        qualityWarnings.push(`${path}.evidence_coverage was ignored; evidence coverage is not inferred.`);
+      }
+
+      let snapshotDate: string | null = null;
+      const sourceReference = referenceForCitation(citation);
+      const citedCells = sourceReference?.rowCells?.length
+        ? sourceReference.rowCells
+        : sourceReference?.cell
+          ? [sourceReference.cell]
+          : [];
+      let formulaDateNeedsReview = citedCells.some(
+        (cell) =>
+          isRecordColumn(cell) &&
+          cellDateValue(cell) !== null &&
+          formulaCacheStatusForSourceCell(group, citation, cell) === "cached_value",
+      );
+      const dateErrors: string[] = [];
+      const candidateDate = snapshot.snapshot_date === null
+        ? null
+        : nullableIsoDate(snapshot.snapshot_date, `${path}.snapshot_date`, dateErrors);
+      if (candidateDate === undefined) {
+        warnInvalidRow(path, dateErrors);
+      } else if (candidateDate !== null) {
+        if (!citation!.excerpt.includes(candidateDate)) {
+          warnInvalidRow(path, [`${path}.snapshot_date is not present in the cited source`]);
+        } else {
+          const dateError = asOfDateError(citation, candidateDate, `${path}.snapshot_date`);
+          if (dateError) {
+            warnInvalidRow(path, [dateError]);
+            if (dateError.includes(FORMULA_CACHE_REVIEW_MARKER)) formulaDateNeedsReview = true;
+          } else snapshotDate = candidateDate;
+        }
+      } else if (formulaDateNeedsReview) {
+        qualityWarnings.push(
+          `${path}.snapshot_date cites a stored formula result whose freshness is not established; the date candidate requires review (${FORMULA_CACHE_REVIEW_MARKER}).`,
+        );
+      }
+      if (formulaDateNeedsReview) {
+        qualityWarnings.push(
+          `${path}.status ${reportedStatus.status} is retained only as source-reported evidence because its record date is a stored formula result with freshness not established; it is not accepted as current (${FORMULA_CACHE_REVIEW_MARKER}).`,
+        );
+        snapshotsByDimension.set(dimension, {
+          ...insufficientHealthSnapshot(dimension as GroupHealthSnapshot["dimension"]),
+          source_summary: citation!.excerpt,
+          evidence_chunk_index: citation!.evidence_chunk_index,
+          excerpt: citation!.excerpt,
+        });
+        return;
+      }
+
       snapshotsByDimension.set(dimension, {
         dimension: dimension as GroupHealthSnapshot["dimension"],
-        score: score ?? null,
-        status: status as GroupHealthSnapshot["status"],
-        evidence_coverage: evidenceCoverage,
-        status_text: statusText,
-        source_summary: sourceSummary,
+        score: null,
+        status: reportedStatus.status,
+        evidence_coverage: null,
+        status_text: reportedStatus.text,
+        source_summary: citation!.excerpt,
         snapshot_date: snapshotDate,
-        evidence_chunk_index: citation?.evidence_chunk_index ?? null,
-        excerpt: citation?.excerpt ?? null,
+        evidence_chunk_index: citation!.evidence_chunk_index,
+        excerpt: citation!.excerpt,
       });
     });
   }
@@ -1699,17 +2827,7 @@ function validateGroupExtraction(
     if (!invalidDimensions.has(dimension)) {
       qualityWarnings.push(`health_snapshots is missing valid ${dimension}; it is marked insufficient_evidence.`);
     }
-    return {
-      dimension,
-      score: null,
-      status: "insufficient_evidence",
-      evidence_coverage: 0,
-      status_text: "No validated health status is available for this dimension.",
-      source_summary: "Health evidence was not validated for this dimension.",
-      snapshot_date: null,
-      evidence_chunk_index: null,
-      excerpt: null,
-    };
+    return insufficientHealthSnapshot(dimension);
   });
 
   const alerts: ExtractedAlert[] = [];
@@ -1731,6 +2849,18 @@ function validateGroupExtraction(
       const citation = requiredCitation(alert, allowedSources, path, rowErrors, fromCache);
       if (citation && citationHasUnavailableFormula(group, citation)) {
         rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support an alert.`);
+      }
+      if (citation && citationIsCachedFormulaCell(group, citation)) {
+        rowErrors.push(`${path}.source_id cites a stored formula result whose freshness is not established; the alert requires review (${FORMULA_CACHE_REVIEW_MARKER}).`);
+      }
+      for (const [field, candidate] of [
+        ["severity", severity],
+        ["impacted_area", impactedArea],
+        ["explanation", explanation],
+        ["recommended_action", recommendedAction],
+      ] as const) {
+        const formulaError = formulaCandidateReviewError(group, citation, candidate, `${path}.${field}`);
+        if (formulaError) rowErrors.push(formulaError);
       }
       if (!["low", "medium", "high", "critical"].includes(severity)) rowErrors.push(`${path}.severity is invalid`);
       if (rowErrors.length) {
@@ -1766,6 +2896,18 @@ function validateGroupExtraction(
       const citation = requiredCitation(action, allowedSources, path, rowErrors, fromCache);
       if (citation && citationHasUnavailableFormula(group, citation)) {
         rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support an action.`);
+      }
+      if (citation && citationIsCachedFormulaCell(group, citation)) {
+        rowErrors.push(`${path}.source_id cites a stored formula result whose freshness is not established; the action requires review (${FORMULA_CACHE_REVIEW_MARKER}).`);
+      }
+      for (const [field, candidate] of [
+        ["title", title],
+        ["owner_name", ownerName],
+        ["priority", priority],
+        ["status", status],
+      ] as const) {
+        const formulaError = formulaCandidateReviewError(group, citation, candidate, `${path}.${field}`);
+        if (formulaError) rowErrors.push(formulaError);
       }
       if (!["low", "medium", "high"].includes(priority)) rowErrors.push(`${path}.priority is invalid`);
       if (status !== "open") rowErrors.push(`${path}.status must be open for a recommended action`);
@@ -1806,10 +2948,54 @@ function validateGroupExtraction(
         const wbsParentCode = nullableBoundedString(observation.wbs_parent_code ?? null, `${path}.wbs_parent_code`, rowErrors, 200);
         const wbsName = nullableBoundedString(observation.wbs_name ?? null, `${path}.wbs_name`, rowErrors, 500);
         const scopeDescription = nullableBoundedString(observation.scope_description ?? null, `${path}.scope_description`, rowErrors, 2000);
-        const periodLabel = nullableBoundedString(observation.period_label, `${path}.period_label`, rowErrors, 200);
+        let periodLabel = nullableBoundedString(observation.period_label, `${path}.period_label`, rowErrors, 200);
         const statusLabel = nullableBoundedString(observation.status_label, `${path}.status_label`, rowErrors, 200);
-        const asOfDate = nullableIsoDate(observation.as_of_date ?? null, `${path}.as_of_date`, rowErrors);
+        let asOfDate = nullableIsoDate(observation.as_of_date ?? null, `${path}.as_of_date`, rowErrors);
         const citation = requiredCitation(observation, allowedSources, path, rowErrors, fromCache);
+        const cachedCostValue = Boolean(
+          citation &&
+          sourceValue &&
+          sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, sourceValue)),
+        );
+        if (cachedCostValue) {
+          qualityWarnings.push(
+            `${path}.source_value is a stored formula result whose freshness is not established; its source-reported candidate was preserved for review (${FORMULA_CACHE_REVIEW_MARKER}).`,
+          );
+        }
+        let cachedCostMetadata = false;
+        if (
+          citation &&
+          periodLabel &&
+          sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, periodLabel))
+        ) {
+          qualityWarnings.push(
+            `${path}.period_label is a stored formula result whose freshness is not established; the period was excluded and retained for review in the cited source (${FORMULA_CACHE_REVIEW_MARKER}).`,
+          );
+          periodLabel = null;
+          cachedCostMetadata = true;
+        }
+        if (
+          citation &&
+          asOfDate &&
+          sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, asOfDate))
+        ) {
+          qualityWarnings.push(
+            `${path}.as_of_date is a stored formula result whose freshness is not established; the date was excluded and retained for review in the cited source (${FORMULA_CACHE_REVIEW_MARKER}).`,
+          );
+          asOfDate = null;
+          cachedCostMetadata = true;
+        }
+        const costNeedsFormulaReview = cachedCostValue || cachedCostMetadata;
+        const scopeSourceId = nullableBoundedString(
+          observation.scope_source_id ?? null,
+          `${path}.scope_source_id`,
+          rowErrors,
+          200,
+        );
+        const scopeEvidence = scopeLabel
+          ? scopeProvenance(citation, scopeLabel, scopeSourceId)
+          : null;
+        const explicitTextScope = scopeLabel ? hasExplicitTextScope(citation, scopeLabel, sourceValue) : false;
         const measureCue = COST_MEASURE_SOURCE_CUES[measure as ExtractedCostObservation["measure"]];
         if (
           citation &&
@@ -1829,12 +3015,43 @@ function validateGroupExtraction(
           rowErrors.push(`${path}.scope_label is required for a work-package cost value`);
         }
         if (
+          scopeSourceId &&
+          !scopeEvidence?.some(
+            (entry) => entry.kind === "declared_subject" && entry.source_id === scopeSourceId,
+          )
+        ) {
+          rowErrors.push(`${path}.scope_source_id must cite the matching declared subject value cell`);
+        }
+        if (scopeLevel === "wbs" && !scopeEvidence && !explicitTextScope) {
+          rowErrors.push(`${path}.scope_label must be supported by a structural scope source`);
+        }
+        if (
           citation &&
           scopeLevel === "wbs" &&
           scopeLabel &&
-          !citation.excerpt.toLocaleLowerCase().includes(scopeLabel.toLocaleLowerCase())
+          !citation.excerpt.toLocaleLowerCase().includes(scopeLabel.toLocaleLowerCase()) &&
+          !scopeEvidence &&
+          !explicitTextScope
         ) {
           rowErrors.push(`${path}.scope_label is not present in the cited source`);
+        }
+        // A cost period and cut-off are only provenance when the cited source
+        // states them. A date or period copied from another cell or snapshot is
+        // not traceable, so it is excluded instead of being trusted.
+        if (citation) {
+          checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors, sourceValue);
+          if (asOfDate && !citation.excerpt.includes(asOfDate)) {
+            rowErrors.push(`${path}.as_of_date is not present in the cited source`);
+          }
+          checkDate(
+            citation,
+            asOfDate,
+            `${path}.as_of_date`,
+            rowErrors,
+            "record",
+            measure === "approved_baseline",
+            sourceValue,
+          );
         }
         if (citation && citationHasUnavailableFormula(group, citation)) {
           rowErrors.push(`${path}.source_id cites formula_result_unavailable and cannot support a cost value`);
@@ -1856,13 +3073,15 @@ function validateGroupExtraction(
         costObservations.push({
           measure: measure as ExtractedCostObservation["measure"],
           source_value: sourceValue!,
-          normalized_amount: normalizeCostAmount(sourceValue!),
-          currency: normalizeCostCurrency(sourceValue!),
+          normalized_amount: costNeedsFormulaReview ? null : normalizeCostAmount(sourceValue!),
+          currency: costNeedsFormulaReview ? null : normalizeCostCurrency(sourceValue!),
           scope_level: scopeLevel as ExtractedCostObservation["scope_level"],
           // A project total has one scope, so a label and any work-package
           // identity there carry no comparison meaning and are dropped to keep
           // selection unambiguous.
           scope_label: scopeLevel === "project" ? null : scopeLabel!,
+          ...(scopeEvidence ? { scope_provenance: scopeEvidence } : {}),
+          ...(scopeEvidence && scopeSourceId ? { scope_source_id: scopeSourceId } : {}),
           wbs_code: scopeLevel === "project" ? null : wbsCode,
           wbs_parent_code: scopeLevel === "project" ? null : wbsParentCode,
           wbs_name: scopeLevel === "project" ? null : wbsName,
@@ -1919,9 +3138,19 @@ function validateGroupExtraction(
     excerpt: string | null,
     path: string,
     rowErrors: string[],
+    citation: SourceCitation | null,
   ) => {
     const date = nullableIsoDate(value ?? null, path, rowErrors);
     if (date && !excerpt?.includes(date)) rowErrors.push(`${path} is not present as an ISO date in the cited excerpt`);
+    if (
+      date &&
+      sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, date))
+    ) {
+      qualityWarnings.push(
+        `${path} is a stored formula result whose freshness is not established; the date was excluded and retained for review in the cited source (${FORMULA_CACHE_REVIEW_MARKER}).`,
+      );
+      return null;
+    }
     return date;
   };
   const milestones = rowsFor("milestones");
@@ -1940,20 +3169,49 @@ function validateGroupExtraction(
     const citation = requiredCitation(item, allowedSources, path, rowErrors, fromCache);
     const excerpt = excerptFor(item, citation, path, rowErrors);
     // `date` is never taken from the model: it is derived deterministically
-    // from `raw_date` below, once raw_date's own citation check (next line)
-    // has passed. Asking the model to also normalize the date independently
-    // made `date` practically unfillable (it had to appear verbatim as an
-    // ISO string inside a human-written excerpt, and be byte-identical to
-    // raw_date), even for cleanly formatted source dates.
-    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    // from `raw_date` below, once raw_date's own citation check has passed.
+    // Asking the model to also normalize the date independently made `date`
+    // practically unfillable (it had to appear verbatim as an ISO string
+    // inside a human-written excerpt, and be byte-identical to raw_date),
+    // even for cleanly formatted source dates.
+    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors, citation);
+    checkDate(citation, asOfDate, `${path}.as_of_date`, rowErrors, "record");
     if (!["project", "wbs", "unknown"].includes(scopeLevel)) rowErrors.push(`${path}.scope_level is invalid`);
     if (scopeLevel === "wbs" && !scopeLabel) rowErrors.push(`${path}.scope_label is required for WBS scope`);
     if (scopeLevel !== "wbs" && scopeLabel) rowErrors.push(`${path}.scope_label is only valid for WBS scope`);
     if (rawDate && !excerpt?.includes(rawDate)) rowErrors.push(`${path}.raw_date is not present in the cited excerpt`);
     const date = rawDate ? parseCitedRawDate(rawDate) : null;
     if (!textIsCited(label, excerpt)) rowErrors.push(`${path}.label is not present in the cited excerpt`);
-    if (!textIsCited(scopeLabel, excerpt)) rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
-    if (!textIsCited(periodLabel, excerpt)) rowErrors.push(`${path}.period_label is not present in the cited excerpt`);
+    const scopeSourceId = nullableBoundedString(
+      item.scope_source_id ?? null,
+      `${path}.scope_source_id`,
+      rowErrors,
+      200,
+    );
+    const scopeEvidence = scopeLabel
+      ? scopeProvenance(citation, scopeLabel, scopeSourceId)
+      : null;
+    if (
+      scopeSourceId &&
+      !scopeEvidence?.some(
+        (entry) => entry.kind === "declared_subject" && entry.source_id === scopeSourceId,
+      )
+    ) {
+      rowErrors.push(`${path}.scope_source_id must cite the matching declared subject value cell`);
+    }
+    const explicitTextScope = scopeLabel ? hasExplicitTextScope(citation, scopeLabel, rawDate ?? date) : false;
+    if (scopeLevel === "wbs" && !scopeEvidence && !explicitTextScope) {
+      rowErrors.push(`${path}.scope_label must be supported by a structural scope source`);
+    }
+    if (
+      scopeLabel &&
+      !textIsCited(scopeLabel, excerpt) &&
+      !scopeEvidence &&
+      !explicitTextScope
+    ) {
+      rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
+    }
+    checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors, rawDate ?? date ?? label);
     if (!rawDate && !date) rowErrors.push(`${path} must contain a source-reported date`);
     if (rowErrors.length) {
       warnObservationInvalidRow("schedule", path, rowErrors);
@@ -1965,6 +3223,8 @@ function validateGroupExtraction(
       date: date ?? null,
       scope_level: scopeLevel as ExtractedMilestoneObservation["scope_level"],
       scope_label: scopeLabel!,
+      ...(scopeEvidence ? { scope_provenance: scopeEvidence } : {}),
+      ...(scopeEvidence && scopeSourceId ? { scope_source_id: scopeSourceId } : {}),
       period_label: periodLabel!,
       as_of_date: asOfDate ?? null,
       evidence_chunk_index: citation!.evidence_chunk_index,
@@ -1993,13 +3253,65 @@ function validateGroupExtraction(
     if (scopeLevel !== "wbs" && scopeLabel) rowErrors.push(`${path}.scope_label is only valid for WBS scope`);
     if (percentValue === null || percentValue === undefined) rowErrors.push(`${path}.percent must be a source-backed percentage`);
     if (rawValue && !excerpt?.includes(rawValue)) rowErrors.push(`${path}.raw_value is not present in the cited excerpt`);
+    const citedPercentCell = percentValue === null || percentValue === undefined
+      ? null
+      : citedPercentCellForClaim(group, citation, rawValue, percentValue);
+    if (percentValue !== null && percentValue !== undefined && citation && rawValue) {
+      const progressSemanticsError = citedProgressPercentSemanticsError(
+        group,
+        citation,
+        rawValue,
+        percentValue,
+        path,
+      );
+      if (progressSemanticsError) rowErrors.push(progressSemanticsError);
+    }
     if (percentValue !== null && percentValue !== undefined && excerpt &&
-      !citedTextSupportsNumericValue(`${percentValue}%`, rawValue ?? "")) {
+      !citedTextSupportsNumericValue(`${percentValue}%`, rawValue ?? "") &&
+      !citedPercentCell) {
       rowErrors.push(`${path}.percent does not match a percentage in the cited excerpt`);
     }
-    if (!textIsCited(scopeLabel, excerpt)) rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
-    if (!textIsCited(periodLabel, excerpt)) rowErrors.push(`${path}.period_label is not present in the cited excerpt`);
-    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    if (
+      citation &&
+      rawValue &&
+      sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, rawValue))
+    ) {
+      rowErrors.push(
+        `${path}.raw_value is a stored formula result whose freshness is not established; it remains a source-reported candidate for review (${FORMULA_CACHE_REVIEW_MARKER})`,
+      );
+    }
+    const scopeSourceId = nullableBoundedString(
+      item.scope_source_id ?? null,
+      `${path}.scope_source_id`,
+      rowErrors,
+      200,
+    );
+    const scopeEvidence = scopeLabel
+      ? scopeProvenance(citation, scopeLabel, scopeSourceId)
+      : null;
+    if (
+      scopeSourceId &&
+      !scopeEvidence?.some(
+        (entry) => entry.kind === "declared_subject" && entry.source_id === scopeSourceId,
+      )
+    ) {
+      rowErrors.push(`${path}.scope_source_id must cite the matching declared subject value cell`);
+    }
+    const explicitTextScope = scopeLabel ? hasExplicitTextScope(citation, scopeLabel, rawValue) : false;
+    if (scopeLevel === "wbs" && !scopeEvidence && !explicitTextScope) {
+      rowErrors.push(`${path}.scope_label must be supported by a structural scope source`);
+    }
+    if (
+      scopeLabel &&
+      !textIsCited(scopeLabel, excerpt) &&
+      !scopeEvidence &&
+      !explicitTextScope
+    ) {
+      rowErrors.push(`${path}.scope_label is not present in the cited excerpt`);
+    }
+    checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors, rawValue);
+    let asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors, citation);
+    checkDate(citation, asOfDate, `${path}.as_of_date`, rowErrors, "record");
     if (rowErrors.length) {
       warnObservationInvalidRow("progress", path, rowErrors);
       return;
@@ -2009,6 +3321,8 @@ function validateGroupExtraction(
       percent: percentValue as number,
       scope_level: scopeLevel as ExtractedProgressObservation["scope_level"],
       scope_label: scopeLabel!,
+      ...(scopeEvidence ? { scope_provenance: scopeEvidence } : {}),
+      ...(scopeEvidence && scopeSourceId ? { scope_source_id: scopeSourceId } : {}),
       period_label: periodLabel!,
       as_of_date: asOfDate ?? null,
       evidence_chunk_index: citation!.evidence_chunk_index,
@@ -2040,15 +3354,25 @@ function validateGroupExtraction(
     const rawValue = boundedString(item.raw_value, `${path}.raw_value`, rowErrors, 1200);
     const citation = requiredCitation(item, allowedSources, path, rowErrors, fromCache);
     const excerpt = excerptFor(item, citation, path, rowErrors);
-    const mitigationDueDate = checkedDate(item.mitigation_due_date ?? null, excerpt, `${path}.mitigation_due_date`, rowErrors);
-    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    if (citation && citationIsCachedFormulaCell(group, citation)) {
+      rowErrors.push(`${path}.source_id cites a stored formula result whose freshness is not established; the risk snapshot requires review (${FORMULA_CACHE_REVIEW_MARKER}).`);
+    }
+    const mitigationDueDate = checkedDate(item.mitigation_due_date ?? null, excerpt, `${path}.mitigation_due_date`, rowErrors, citation);
+    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors, citation);
+    checkDate(citation, mitigationDueDate, `${path}.mitigation_due_date`, rowErrors, "due");
+    checkDate(citation, asOfDate, `${path}.as_of_date`, rowErrors, "record");
+    checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors, rawValue);
     for (const [field, candidate] of [
       ["risk_id", riskId], ["name", name], ["description", description], ["status", status],
-      ["rating_label", ratingLabel], ["scale_label", scaleLabel], ["owner", owner],
-      ["mitigation", mitigation], ["wbs", wbs], ["period_label", periodLabel],
+      ["rating_label", ratingLabel],
+      ["rating_value", ratingValue === null || ratingValue === undefined ? null : String(ratingValue)],
+      ["scale_label", scaleLabel], ["owner", owner], ["mitigation", mitigation],
+      ["wbs", wbs], ["period_label", periodLabel],
       ["raw_mitigation_due_date", rawMitigationDueDate], ["raw_value", rawValue],
     ] as const) {
       if (!textIsCited(candidate, excerpt)) rowErrors.push(`${path}.${field} is not present in the cited excerpt`);
+      const formulaError = formulaCandidateReviewError(group, citation, candidate, `${path}.${field}`);
+      if (formulaError) rowErrors.push(formulaError);
     }
     if (mitigationDueDate && rawMitigationDueDate !== mitigationDueDate) {
       rowErrors.push(`${path}.mitigation_due_date can only normalize an exact ISO raw_mitigation_due_date`);
@@ -2096,14 +3420,21 @@ function validateGroupExtraction(
     const periodLabel = nullableBoundedString(item.period_label ?? null, `${path}.period_label`, rowErrors, 200);
     const citation = requiredCitation(item, allowedSources, path, rowErrors, fromCache);
     const excerpt = excerptFor(item, citation, path, rowErrors);
-    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors);
+    if (
+      (citation && citationIsCachedFormulaCell(group, citation)) ||
+      formulaCandidateReviewError(group, citation, rawValue, `${path}.raw_value`)
+    ) {
+      rowErrors.push(`${path} cites a stored formula result whose freshness is not established; the risk statement requires review (${FORMULA_CACHE_REVIEW_MARKER}).`);
+    }
+    const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors, citation);
+    checkDate(citation, asOfDate, `${path}.as_of_date`, rowErrors, "record");
     if (!["no_open_high_or_critical", "open_risk_reported"].includes(state)) {
       rowErrors.push(`${path}.state is invalid`);
     } else if (!riskRegisterStatementMatches(state as ExtractedRiskRegisterStatement["state"], excerpt ?? "")) {
       rowErrors.push(`${path}.state is not supported by its cited wording`);
     }
     if (rawValue && !excerpt?.includes(rawValue)) rowErrors.push(`${path}.raw_value is not present in the cited excerpt`);
-    if (!textIsCited(periodLabel, excerpt)) rowErrors.push(`${path}.period_label is not present in the cited excerpt`);
+    checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors, rawValue);
     if (rowErrors.length) {
       warnObservationInvalidRow("risk", path, rowErrors);
       return;
@@ -2487,6 +3818,26 @@ function validateGroupMetadataSuggestions(
     qualityWarnings.push("Group metadata was excluded because its source has formula_result_unavailable.");
     return empty;
   }
+  if (
+    citation &&
+    suggestedDocumentDate &&
+    sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, suggestedDocumentDate))
+  ) {
+    qualityWarnings.push(
+      `group_metadata_suggestions.suggested_document_date is a stored formula result whose freshness is not established; the source-reported date candidate was excluded pending review (${FORMULA_CACHE_REVIEW_MARKER}).`,
+    );
+    suggestedDocumentDate = null;
+  }
+  if (
+    citation &&
+    detectedReportingPeriod &&
+    sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, detectedReportingPeriod))
+  ) {
+    qualityWarnings.push(
+      `group_metadata_suggestions.detected_reporting_period is based on a stored formula result whose freshness is not established; the period candidate was excluded pending review (${FORMULA_CACHE_REVIEW_MARKER}).`,
+    );
+    detectedReportingPeriod = null;
+  }
   return {
     suggested_document_date: suggestedDocumentDate,
     detected_reporting_period: detectedReportingPeriod,
@@ -2575,17 +3926,21 @@ function requiredCitation(
   fromCache = false,
 ): SourceCitation | null {
   if (fromCache && value.source_id === undefined) {
-    for (const citation of allowedSources.values()) {
-      if (
+    const matches = [...allowedSources.values()].filter(
+      (citation) =>
         citation.evidence_chunk_index === value.evidence_chunk_index &&
-        typeof value.excerpt === "string" && value.excerpt.length > 0 && citation.excerpt.includes(value.excerpt) &&
+        typeof value.excerpt === "string" &&
+        value.excerpt.length > 0 &&
+        citation.excerpt.includes(value.excerpt) &&
         (value.source_location === undefined ||
-          JSON.stringify(citation.source_location) === JSON.stringify(value.source_location))
-      ) {
-        return citation;
-      }
-    }
-    errors.push(`${path}.cached citation does not match a supplied source reference`);
+          JSON.stringify(citation.source_location) === JSON.stringify(value.source_location)),
+    );
+    if (matches.length === 1) return matches[0];
+    errors.push(
+      matches.length
+        ? `${path}.cached citation is ambiguous across supplied source references`
+        : `${path}.cached citation does not match a supplied source reference`,
+    );
     return null;
   }
   const sourceId = value.source_id;
@@ -2633,19 +3988,23 @@ function aggregateGroups(
   const assuranceObservations: DocumentExtraction["assurance_observations"] = {
     milestones: uniqueBy(
       groups.flatMap((group) => group.value.assurance_observations.milestones),
-      (item) => `${item.evidence_chunk_index}\0${item.label}\0${item.raw_date}\0${item.scope_level}\0${item.scope_label ?? ""}`,
+      (item) =>
+        `${item.evidence_chunk_index}\0${JSON.stringify(item.source_location)}\0${item.excerpt}\0${item.label}\0${item.raw_date}\0${item.scope_level}\0${item.scope_label ?? ""}\0${item.scope_source_id ?? ""}\0${item.period_label}\0${item.as_of_date}`,
     ),
     progress: uniqueBy(
       groups.flatMap((group) => group.value.assurance_observations.progress),
-      (item) => `${item.evidence_chunk_index}\0${item.raw_value}\0${item.scope_level}\0${item.scope_label ?? ""}`,
+      (item) =>
+        `${item.evidence_chunk_index}\0${JSON.stringify(item.source_location)}\0${item.excerpt}\0${item.raw_value}\0${item.scope_level}\0${item.scope_label ?? ""}\0${item.scope_source_id ?? ""}\0${item.period_label}\0${item.as_of_date}`,
     ),
     risk_snapshots: uniqueBy(
       groups.flatMap((group) => group.value.assurance_observations.risk_snapshots),
-      (item) => `${item.evidence_chunk_index}\0${item.risk_id ?? ""}\0${item.name ?? ""}\0${item.raw_value}`,
+      (item) =>
+        `${item.evidence_chunk_index}\0${JSON.stringify(item.source_location)}\0${item.excerpt}\0${item.risk_id ?? ""}\0${item.name ?? ""}\0${item.raw_value}\0${item.wbs ?? ""}\0${item.status ?? ""}\0${item.rating_label ?? ""}\0${item.rating_value ?? ""}\0${item.period_label}\0${item.as_of_date}`,
     ),
     risk_register_statements: uniqueBy(
       groups.flatMap((group) => group.value.assurance_observations.risk_register_statements),
-      (item) => `${item.evidence_chunk_index}\0${item.state}\0${item.raw_value}`,
+      (item) =>
+        `${item.evidence_chunk_index}\0${JSON.stringify(item.source_location)}\0${item.excerpt}\0${item.state}\0${item.raw_value}\0${item.period_label}\0${item.as_of_date}`,
     ),
   };
   const crossGroupConflicts = assuranceObservationConflictDomains(
@@ -2702,7 +4061,7 @@ function aggregateGroups(
     cost_observations: uniqueBy(
       groups.flatMap((group) => group.value.cost_observations),
       (observation) =>
-        `${observation.measure}\0${observation.scope_level}\0${observation.scope_label ?? ""}\0${observation.source_value}\0${observation.evidence_chunk_index}`,
+        `${observation.evidence_chunk_index}\0${JSON.stringify(observation.source_location)}\0${observation.excerpt}\0${observation.measure}\0${observation.scope_level}\0${observation.scope_label ?? ""}\0${observation.scope_source_id ?? ""}\0${observation.wbs_code ?? ""}\0${observation.wbs_parent_code ?? ""}\0${observation.wbs_name ?? ""}\0${observation.scope_description ?? ""}\0${observation.status_label ?? ""}\0${observation.source_value}\0${observation.period_label}\0${observation.as_of_date}`,
     ),
     document_suggestions: suggestionAggregation.suggestions,
     sheet_interpretations: groups.flatMap((group, index) => {
@@ -2936,32 +4295,41 @@ function aggregateHealthSnapshots(
   groups: Array<{ value: GroupExtraction }>,
   chunkGroups: ChunkGroup[],
 ): ExtractedHealthSnapshot[] {
-  const totalChunks = chunkGroups.reduce((count, group) => count + group.chunks.length, 0);
   return DIMENSIONS.map((dimension) => {
     const snapshots = groups.map((group) => group.value.health_snapshots.find((snapshot) => snapshot.dimension === dimension)!);
     const evidenceSnapshots = snapshots.filter((snapshot) => snapshot.status !== "insufficient_evidence");
-    const status = evidenceSnapshots.some((snapshot) => snapshot.status === "red")
-      ? "red"
-      : evidenceSnapshots.some((snapshot) => snapshot.status === "amber")
-        ? "amber"
-        : evidenceSnapshots.length
-          ? "green"
-          : "insufficient_evidence";
+    const statuses = new Set(evidenceSnapshots.map((snapshot) => snapshot.status));
+    const status = statuses.size === 1
+      ? evidenceSnapshots[0].status
+      : "insufficient_evidence";
     const selected = status === "insufficient_evidence"
       ? snapshots
       : evidenceSnapshots.filter((snapshot) => snapshot.status === status);
     const scores = selected.map((snapshot) => snapshot.score).filter((score): score is number => score !== null);
     const dates = [...new Set(snapshots.map((snapshot) => snapshot.snapshot_date).filter((date): date is string => Boolean(date)))];
-    const weightedCoverage = snapshots.reduce((total, snapshot, index) =>
-      total + snapshot.evidence_coverage * chunkGroups[index].chunks.length,
-    0) / totalChunks;
+    let weightedCoverageTotal = 0;
+    let weightedCoverageChunks = 0;
+    snapshots.forEach((snapshot, index) => {
+      if (snapshot.evidence_coverage === null) return;
+      const weight = chunkGroups[index]?.chunks.length ?? 0;
+      weightedCoverageTotal += snapshot.evidence_coverage * weight;
+      weightedCoverageChunks += weight;
+    });
+    const weightedCoverage = weightedCoverageChunks
+      ? weightedCoverageTotal / weightedCoverageChunks
+      : null;
+    const statusTexts = uniqueText(selected.map((snapshot) => snapshot.status_text));
+    const sourceSummaries = uniqueText(selected.map((snapshot) => snapshot.source_summary));
     return {
       dimension,
-      score: status === "insufficient_evidence" ? null : Math.min(...scores),
+      score: status === "insufficient_evidence" || scores.length === 0 ? null : Math.min(...scores),
       status,
       evidence_coverage: weightedCoverage,
-      status_text: uniqueText(selected.map((snapshot) => snapshot.status_text)).join(" "),
-      source_summary: uniqueText(selected.map((snapshot) => snapshot.source_summary)).join(" "),
+      status_text:
+        statusTexts.length === 1
+          ? statusTexts[0]
+          : "Multiple source-reported status fields; see the cited source summaries.",
+      source_summary: sourceSummaries.join(" "),
       snapshot_date: dates.length === 1 ? dates[0] : null,
       sources: uniqueCitations(
         evidenceSnapshots.flatMap((snapshot) =>
@@ -3026,7 +4394,10 @@ function aggregateSuggestions(
 }
 
 function uniqueCitations<T extends SourceCitation>(citations: T[]): T[] {
-  return uniqueBy(citations, (citation) => `${citation.evidence_chunk_index}\0${citation.excerpt}`);
+  return uniqueBy(
+    citations,
+    (citation) => citation.source_id ?? `${citation.evidence_chunk_index}\0${citation.excerpt}`,
+  );
 }
 
 function uniqueBy<T>(values: T[], keyFor: (value: T) => string): T[] {
@@ -3146,9 +4517,6 @@ function boundedConfidence(value: unknown, path: string, errors: string[]) {
   return boundedNumber(value, 0, 1, path, errors);
 }
 
-function boundedScore(value: unknown, path: string, errors: string[]) {
-  return boundedNumber(value, 0, 100, path, errors);
-}
 
 function boundedNumber(value: unknown, min: number, max: number, path: string, errors: string[]) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {

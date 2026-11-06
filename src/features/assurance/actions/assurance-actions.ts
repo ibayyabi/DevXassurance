@@ -45,8 +45,11 @@ import {
 } from "@/features/assurance/lib/schedule-comparison";
 import {
   buildRiskComparison,
+  riskRatingClass,
   riskSourceIds,
   riskSourceScales,
+  riskStatusIsOpen,
+  type RiskComparison,
 } from "@/features/assurance/lib/risk-comparison";
 import {
   formatReportingPeriod,
@@ -68,6 +71,19 @@ type ObservationCoverageByRole = Record<
   "baseline" | "current",
   Record<ObservationCoverageDomain, AssuranceCoverageRow>
 >;
+type ObservationDecision = {
+  id: string;
+  target_type: "assurance" | "cost";
+  document_id: string;
+  observation_fingerprint: string;
+  decision: "accepted" | "corrected" | "rejected";
+  corrected_observation: Record<string, unknown> | null;
+  reason: string;
+  decided_by: string;
+  decided_at: string;
+  observation_ids: string[];
+  cost_observation_ids?: string[];
+};
 type AssuranceObservationRow = {
   id: string;
   domain: "schedule" | "progress" | "risk";
@@ -92,11 +108,36 @@ type AssuranceSource = {
   assurance_observations: AssuranceObservationRow[];
   assurance_observation_coverage: AssuranceCoverageRow[];
 };
+type PreviousRiskReview = {
+  id: string;
+  reporting_period: string;
+  cutoff_precision: "month" | "date";
+  status: string;
+};
+type PreviousRiskSelection = {
+  review: PreviousRiskReview | null;
+  sources: AssuranceSource[];
+  decisions: ObservationDecision[];
+  snapshots: RiskSnapshot[];
+  coverageComplete: boolean;
+  cutoffComplete: boolean;
+  gapReason: string | null;
+};
+type PriorRiskSnapshotClaim = {
+  current_cutoff: string | null;
+  review: PreviousRiskReview | null;
+  sources: AssuranceSource[];
+  observation_decisions: ObservationDecision[];
+  gap_reason: string | null;
+};
 type AssuranceAnalysisClaim = {
   attempt_id: string;
   sources: AssuranceSource[];
+  observation_decisions?: ObservationDecision[];
+  reference_fingerprint?: string;
+  reference_versions?: Record<string, unknown>;
+  prior_risk_snapshot?: PriorRiskSnapshotClaim;
 };
-
 
 export async function createAssuranceReview(formData: FormData): Promise<void> {
   const projectId = String(formData.get("projectId") ?? "");
@@ -183,20 +224,13 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
   const { attempt_id: attemptId, sources } = claim;
 
   try {
-    const { data: review, error: reviewLookupError } = await supabase
-      .from("assurance_reviews")
-      .select("reporting_period, cutoff_precision")
-      .eq("id", reviewId)
-      .eq("project_id", projectId)
-      .maybeSingle();
-    if (reviewLookupError) throw new Error(reviewLookupError.message);
-    if (!review) throw new Error("Assurance review is required.");
-    // The review's cut-off date, or the legacy month's last day for month-scoped
-    // reviews: baselines effective after it do not apply.
-    const reportingPeriod = reportingPeriodEnd(
-      review.reporting_period,
-      review.cutoff_precision,
-    );
+    const priorSnapshot = claim.prior_risk_snapshot;
+    const reportingPeriod = priorSnapshot?.current_cutoff;
+    if (!reportingPeriod || !validRiskCutoff(reportingPeriod)) {
+      await setAnalysisFailure(supabase, projectId, reviewId, attemptId,
+        "The review cut-off is not provable. Set a valid reporting cut-off and run analysis again.");
+      return;
+    }
 
     if (!sources.length) {
       await setAnalysisFailure(supabase, projectId, reviewId, attemptId,
@@ -204,27 +238,40 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
       return;
     }
 
+    const decisions = (claim.observation_decisions ?? []) as ObservationDecision[];
     const coverage = summarizeObservationCoverage(sources);
-    const reviewData = buildReviewExtraction(sources);
+    const reviewData = buildReviewExtraction(sources, decisions);
+    const previousRisk = buildPreviousRiskSnapshot(priorSnapshot);
+    const currentRiskCoverageComplete = coverage.byRole.current.risk.state === "processed";
     const currentCostObservations = mapSelectedCostObservations(sources, "current");
     const baselineCostObservations = mapSelectedCostObservations(sources, "baseline");
+    const costDecisions = applyCostObservationDecisions(
+      decisions, sources, currentCostObservations, baselineCostObservations,
+    );
     const budgetFinding = await buildProjectBudgetFinding(
-      supabase, projectId, reportingPeriod, currentCostObservations,
+      supabase, projectId, reportingPeriod, costDecisions.current,
     );
     const wbs = await buildWbsComparison(
-      supabase, projectId, reportingPeriod, baselineCostObservations, currentCostObservations,
+      supabase, projectId, reportingPeriod, costDecisions.baseline, costDecisions.current,
     );
     const schedule = await buildScheduleComparison(supabase, projectId, reviewData.extraction);
-    const risk = await buildRiskSnapshotComparison(supabase, projectId, reviewData.extraction);
-    reviewData.extraction.risk = buildRiskAssessment(
-      reviewData.extraction, risk.comparison, sources, coverage.byRole, reportingPeriod,
+    const risk = await buildRiskSnapshotComparison(
+      supabase, projectId, reviewData.extraction, previousRisk, currentRiskCoverageComplete,
     );
-    const findings = applyCoverageGaps(
-      evaluateAssuranceReview(reviewData.extraction, budgetFinding, schedule.finding),
-      coverage.byRole,
+    reviewData.extraction.risk = buildRiskAssessment(
+      reviewData.extraction, risk.comparison, reviewData.riskStatements,
+      coverage.byRole, reportingPeriod,
+    );
+    const findings = applyObservationDecisions(
+      applyCoverageGaps(
+        evaluateAssuranceReview(reviewData.extraction, budgetFinding, schedule.finding),
+        coverage.byRole,
+      ),
+      decisions,
+      sources,
     );
     const { data: published, error: publicationError } = await supabase.rpc(
-      "finish_assurance_analysis_with_results",
+      "finish_assurance_analysis_with_decision_fingerprint",
       {
         p_project_id: projectId,
         p_review_id: reviewId,
@@ -241,10 +288,11 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
             sources.map((source) => source.source_version.contract_version).filter(Boolean),
           )],
           observation_coverage: coverage,
+          observation_review_summary: summarizeObservationDecisions(sources, decisions),
           comparison_engine: {
             budget: "pmo_cost_contract_v1",
             schedule: "pmo_schedule_observations_v1",
-            risk: "pmo_risk_observations_v1",
+            risk: "pmo_risk_observations_v2",
           },
           thresholds: {
             budget: "pmo_budget_variance_v1",
@@ -252,6 +300,31 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
             risk: "phase_3_usable_mvp_defaults",
           },
           budget_evidence_source: "versioned_cost_observations_and_accepted_baseline",
+          risk_comparison_provenance: {
+            contract: "pmo_risk_comparison_v2",
+            referenceFingerprint: claim.reference_fingerprint ?? null,
+            referenceVersions: claim.reference_versions ?? null,
+            previousReviewId: previousRisk.review?.id ?? null,
+            previousReportingPeriod: previousRisk.review
+              ? reportingPeriodEnd(
+                  previousRisk.review.reporting_period,
+                  previousRisk.review.cutoff_precision,
+                )
+              : null,
+            previousSourceVersions: previousRisk.sources.map((source) => ({
+              document_id: source.document_id,
+              role: "current",
+              ...source.source_version,
+            })),
+            previousSnapshotAvailable: previousRisk.snapshots.length > 0,
+            previousCoverageComplete: previousRisk.coverageComplete,
+            previousCutoffComplete: previousRisk.cutoffComplete,
+            previousDecisionSummary: summarizeObservationDecisions(
+              previousRisk.sources, previousRisk.decisions,
+            ),
+            currentCoverageComplete: currentRiskCoverageComplete,
+            previousGapReason: previousRisk.gapReason,
+          },
         },
         p_result_metadata: {
           wbs_budget_findings: wbs.findings,
@@ -317,52 +390,16 @@ export async function approveCostBaseline(formData: FormData): Promise<void> {
     throw new Error("Enter the baseline effective date as YYYY-MM-DD.");
   }
 
-  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanApproveBaseline(membership.role);
 
-  const { data: observation, error: observationError } = await supabase
-    .from("cost_observations")
-    .select(
-      "id, document_id, measure, source_value, normalized_amount, currency, scope_level, scope_label",
-    )
-    .eq("id", observationId)
-    .eq("project_id", projectId)
-    .maybeSingle();
-  if (observationError) throw new Error(observationError.message);
-  if (!observation) throw new Error("That baseline candidate is not in this project.");
-  if (observation.measure !== "approved_baseline") {
-    throw new Error("Only an approved-baseline cost observation can be accepted as a baseline.");
-  }
-  if (observation.normalized_amount === null || !observation.currency) {
-    throw new Error(
-      "That candidate's amount or currency could not be read safely from the source. It stays a source value and cannot be accepted.",
-    );
-  }
-
-  const activeScope = supabase
-    .from("cost_baselines")
-    .update({ state: "superseded", superseded_at: new Date().toISOString() })
-    .eq("project_id", projectId)
-    .eq("scope_level", observation.scope_level)
-    .eq("state", "accepted");
-  const { error: supersedeError } = await (observation.scope_label === null
-    ? activeScope.is("scope_label", null)
-    : activeScope.eq("scope_label", observation.scope_label));
-  if (supersedeError) throw new Error(supersedeError.message);
-
-  const { error: insertError } = await supabase.from("cost_baselines").insert({
-    project_id: projectId,
-    scope_level: observation.scope_level,
-    scope_label: observation.scope_label,
-    amount: observation.normalized_amount,
-    currency: observation.currency,
-    effective_date: effectiveDate,
-    observation_id: observation.id,
-    source_document_id: observation.document_id,
-    approved_by: user.id,
-    approval_note: note || null,
+  const { error } = await supabase.rpc("accept_cost_baseline", {
+    p_project_id: projectId,
+    p_observation_id: observationId,
+    p_effective_date: effectiveDate,
+    p_note: note || null,
   });
-  if (insertError) throw new Error(insertError.message);
+  if (error) throw new Error(error.message);
 
   revalidateAssurance(projectId);
 }
@@ -386,30 +423,18 @@ export async function acceptWbsMapping(formData: FormData): Promise<void> {
     throw new Error("A label mapped to itself is not a mapping; identical labels already match.");
   }
 
-  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanApproveBaseline(membership.role);
 
-  // One accepted canonical target per source label: replace any prior one.
-  const { error: clearError } = await supabase
-    .from("wbs_mappings")
-    .delete()
-    .eq("project_id", projectId)
-    .eq("source_label", sourceLabel)
-    .eq("state", "accepted");
-  if (clearError) throw new Error(clearError.message);
-
-  const { error: insertError } = await supabase.from("wbs_mappings").insert({
-    project_id: projectId,
-    source_label: sourceLabel,
-    canonical_label: canonicalLabel,
-    state: "accepted",
-    proposed_by_model: false,
-    note: note || null,
-    created_by: user.id,
-    accepted_by: user.id,
-    accepted_at: new Date().toISOString(),
+  const { data: mappingId, error } = await supabase.rpc("replace_assurance_mapping", {
+    p_project_id: projectId,
+    p_mapping_kind: "wbs",
+    p_source_label: sourceLabel,
+    p_canonical_label: canonicalLabel,
+    p_note: note || null,
   });
-  if (insertError) throw new Error(insertError.message);
+  if (error) throw new Error(error.message);
+  if (!mappingId) throw new Error("The mapping could not be saved.");
 
   revalidateAssurance(projectId);
 }
@@ -426,12 +451,13 @@ export async function removeWbsMapping(formData: FormData): Promise<void> {
   const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanApproveBaseline(membership.role);
 
-  const { error } = await supabase
-    .from("wbs_mappings")
-    .delete()
-    .eq("project_id", projectId)
-    .eq("id", mappingId);
+  const { data: removed, error } = await supabase.rpc("remove_assurance_mapping", {
+    p_project_id: projectId,
+    p_mapping_kind: "wbs",
+    p_mapping_id: mappingId,
+  });
   if (error) throw new Error(error.message);
+  if (removed === false) return;
 
   revalidateAssurance(projectId);
 }
@@ -454,30 +480,18 @@ export async function acceptMilestoneMapping(formData: FormData): Promise<void> 
     throw new Error("A label mapped to itself is not a mapping; identical labels already match.");
   }
 
-  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanApproveBaseline(membership.role);
 
-  // One accepted canonical target per source label: replace any prior one.
-  const { error: clearError } = await supabase
-    .from("milestone_mappings")
-    .delete()
-    .eq("project_id", projectId)
-    .eq("source_label", sourceLabel)
-    .eq("state", "accepted");
-  if (clearError) throw new Error(clearError.message);
-
-  const { error: insertError } = await supabase.from("milestone_mappings").insert({
-    project_id: projectId,
-    source_label: sourceLabel,
-    canonical_label: canonicalLabel,
-    state: "accepted",
-    proposed_by_model: false,
-    note: note || null,
-    created_by: user.id,
-    accepted_by: user.id,
-    accepted_at: new Date().toISOString(),
+  const { data: mappingId, error } = await supabase.rpc("replace_assurance_mapping", {
+    p_project_id: projectId,
+    p_mapping_kind: "milestone",
+    p_source_label: sourceLabel,
+    p_canonical_label: canonicalLabel,
+    p_note: note || null,
   });
-  if (insertError) throw new Error(insertError.message);
+  if (error) throw new Error(error.message);
+  if (!mappingId) throw new Error("The mapping could not be saved.");
 
   revalidateAssurance(projectId);
 }
@@ -494,12 +508,13 @@ export async function removeMilestoneMapping(formData: FormData): Promise<void> 
   const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanApproveBaseline(membership.role);
 
-  const { error } = await supabase
-    .from("milestone_mappings")
-    .delete()
-    .eq("project_id", projectId)
-    .eq("id", mappingId);
+  const { data: removed, error } = await supabase.rpc("remove_assurance_mapping", {
+    p_project_id: projectId,
+    p_mapping_kind: "milestone",
+    p_mapping_id: mappingId,
+  });
   if (error) throw new Error(error.message);
+  if (removed === false) return;
 
   revalidateAssurance(projectId);
 }
@@ -520,30 +535,22 @@ async function acceptRiskMapping(
     throw new Error("A label mapped to itself is not a mapping; identical labels already match.");
   }
 
-  const { supabase, user, membership } = await requireProjectMembership(projectId);
+  const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanApproveBaseline(membership.role);
 
-  // One accepted canonical target per source label: replace any prior one.
-  const { error: clearError } = await supabase
-    .from(table)
-    .delete()
-    .eq("project_id", projectId)
-    .eq("source_label", sourceLabel)
-    .eq("state", "accepted");
-  if (clearError) throw new Error(clearError.message);
-
-  const { error: insertError } = await supabase.from(table).insert({
-    project_id: projectId,
-    source_label: sourceLabel,
-    canonical_label: canonicalLabel,
-    state: "accepted",
-    proposed_by_model: false,
-    note: note || null,
-    created_by: user.id,
-    accepted_by: user.id,
-    accepted_at: new Date().toISOString(),
+  // One accepted canonical target per source label: the RPC supersedes any
+  // prior mapping and inserts the replacement in one transaction, invalidating
+  // affected analyses on the same commit.
+  const mappingKind = table === "risk_identity_mappings" ? "risk_identity" : "risk_scale";
+  const { data: mappingId, error } = await supabase.rpc("replace_assurance_mapping", {
+    p_project_id: projectId,
+    p_mapping_kind: mappingKind,
+    p_source_label: sourceLabel,
+    p_canonical_label: canonicalLabel,
+    p_note: note || null,
   });
-  if (insertError) throw new Error(insertError.message);
+  if (error) throw new Error(error.message);
+  if (!mappingId) throw new Error("The mapping could not be saved.");
 
   revalidateAssurance(projectId);
 }
@@ -559,12 +566,16 @@ async function removeRiskMapping(
   const { supabase, membership } = await requireProjectMembership(projectId);
   assertCanApproveBaseline(membership.role);
 
-  const { error } = await supabase
-    .from(table)
-    .delete()
-    .eq("project_id", projectId)
-    .eq("id", mappingId);
+  // Supersede rather than delete: the mapping history and its attribution stay,
+  // and analyses built on it are invalidated on the same commit.
+  const mappingKind = table === "risk_identity_mappings" ? "risk_identity" : "risk_scale";
+  const { data: removed, error } = await supabase.rpc("remove_assurance_mapping", {
+    p_project_id: projectId,
+    p_mapping_kind: mappingKind,
+    p_mapping_id: mappingId,
+  });
   if (error) throw new Error(error.message);
+  if (removed === false) return;
 
   revalidateAssurance(projectId);
 }
@@ -695,6 +706,103 @@ export async function correctBudgetFinding(formData: FormData): Promise<void> {
     .eq("review_id", reviewId)
     .eq("project_id", projectId);
   if (updateError) throw new Error(updateError.message);
+
+  revalidateAssurance(projectId);
+}
+
+/**
+ * Records one reviewer decision (accept / correct / reject) on a single
+ * supported observation — assurance observations (progress percent, milestone
+ * date, risk status/rating) or cost observations (amount, currency, WBS scope
+ * label). The fingerprint of the displayed observation is re-checked
+ * server-side so a stale page cannot write a decision over changed evidence.
+ * The stored observation is never modified; the decision carries its own
+ * reason and attribution and invalidates analyses built over it.
+ */
+export async function reviewAssuranceObservation(formData: FormData): Promise<void> {
+  const projectId = String(formData.get("projectId") ?? "");
+  const targetType = String(formData.get("targetType") ?? "assurance");
+  const observationId = String(formData.get("observationId") ?? "");
+  const fingerprint = String(formData.get("observationFingerprint") ?? "");
+  const decision = String(formData.get("decision") ?? "");
+  const reason = String(formData.get("reason") ?? "").trim();
+  const correction: Record<string, unknown> = {};
+  if (targetType === "assurance") {
+    const correctedPercent = String(formData.get("correctedPercent") ?? "").trim();
+    const correctedDate = String(formData.get("correctedDate") ?? "").trim();
+    const correctedStatus = String(formData.get("correctedStatus") ?? "").trim();
+    const correctedRatingLabel = String(formData.get("correctedRatingLabel") ?? "").trim();
+    const correctedRatingValue = String(formData.get("correctedRatingValue") ?? "").trim();
+    if (correctedPercent) {
+      const percent = Number(correctedPercent.replace(",", "."));
+      if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
+        throw new Error("Enter the corrected progress percentage as a number between 0 and 100.");
+      }
+      correction.percent = percent;
+    }
+    if (correctedDate) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(correctedDate)) {
+        throw new Error("Enter the corrected milestone date as YYYY-MM-DD.");
+      }
+      correction.date = correctedDate;
+    }
+    if (correctedStatus) correction.status = correctedStatus;
+    if (correctedRatingLabel) correction.rating_label = correctedRatingLabel;
+    if (correctedRatingValue) {
+      const rating = Number(correctedRatingValue.replace(",", "."));
+      if (!Number.isFinite(rating)) throw new Error("Enter the corrected rating value as a number.");
+      correction.rating_value = rating;
+    }
+  } else {
+    const correctedAmount = String(formData.get("correctedAmount") ?? "").trim();
+    const correctedCurrency = String(formData.get("correctedCurrency") ?? "").trim().toUpperCase();
+    const correctedScopeLabel = String(formData.get("correctedScopeLabel") ?? "").trim();
+    if (correctedAmount) {
+      // Accept "1250000", "1,250,000", and Indonesian "1.250.000": dots act as
+      // thousand separators only when no comma decimal remains.
+      const normalized = correctedAmount.replace(/\s/g, "");
+      const amount = Number(
+        /^-?\d{1,3}(\.\d{3})+$/.test(normalized)
+          ? normalized.replace(/\./g, "")
+          : normalized.replace(/,/g, ""),
+      );
+      if (!Number.isFinite(amount)) throw new Error("Enter the corrected amount as a number.");
+      correction.normalized_amount = amount;
+    }
+    if (correctedCurrency) {
+      if (!/^[A-Z]{3}$/.test(correctedCurrency)) {
+        throw new Error("Enter the corrected currency as a three-letter code.");
+      }
+      correction.currency = correctedCurrency;
+    }
+    if (correctedScopeLabel) correction.scope_label = correctedScopeLabel;
+  }
+
+  if (!projectId || !observationId) throw new Error("Choose an observation to review.");
+  if (!["accepted", "corrected", "rejected"].includes(decision)) {
+    throw new Error("Choose accept, correct, or reject for this observation.");
+  }
+  if (!reason) throw new Error("Record why this observation is accepted, corrected, or rejected.");
+  if (!/^[0-9a-f]{64}$/.test(fingerprint)) {
+    throw new Error("The observation version is missing; refresh the page and review again.");
+  }
+  if (decision === "corrected" && Object.keys(correction).length === 0) {
+    throw new Error("Enter the corrected value for this observation.");
+  }
+
+  const { supabase, membership } = await requireProjectMembership(projectId);
+  assertCanApproveBaseline(membership.role);
+
+  const { error } = await supabase.rpc("save_assurance_observation_decision", {
+    p_project_id: projectId,
+    p_target_type: targetType,
+    p_observation_id: observationId,
+    p_observation_fingerprint: fingerprint,
+    p_decision: decision,
+    p_reason: reason.slice(0, 1000),
+    p_corrected: decision === "corrected" ? correction : null,
+  });
+  if (error) throw new Error(error.message);
 
   revalidateAssurance(projectId);
 }
@@ -888,6 +996,8 @@ async function buildRiskSnapshotComparison(
   supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
   projectId: string,
   extraction: ReviewExtraction,
+  previous: PreviousRiskSelection,
+  currentCoverageComplete: boolean,
 ) {
   const [identityResult, scaleResult] = await Promise.all([
     supabase
@@ -906,16 +1016,73 @@ async function buildRiskSnapshotComparison(
 
   const identityMappings = ((identityResult.data ?? []) as RiskMappingRow[]).map(mapRiskMappingRow);
   const scaleMappings = ((scaleResult.data ?? []) as RiskMappingRow[]).map(mapRiskMappingRow);
-
+  const currentSnapshots = extraction.riskItems.currentSnapshots;
   const comparison = buildRiskComparison({
-    baselineSnapshots: extraction.riskItems.baselineSnapshots,
-    currentSnapshots: extraction.riskItems.currentSnapshots,
+    previousSnapshots: previous.snapshots,
+    currentSnapshots,
     identityMappings,
     scaleMappings,
+    previousCoverageComplete: previous.coverageComplete,
+    previousCutoffComplete: previous.cutoffComplete,
+    currentCoverageComplete,
   });
-  const sourceIds = riskSourceIds(extraction.riskItems);
-  const sourceScales = riskSourceScales(extraction.riskItems);
-  return { comparison, sourceIds, sourceScales };
+  const riskSnapshots = {
+    previousSnapshots: previous.snapshots,
+    currentSnapshots,
+  };
+  return {
+    comparison,
+    sourceIds: riskSourceIds(riskSnapshots),
+    sourceScales: riskSourceScales(riskSnapshots),
+  };
+}
+
+function validRiskCutoff(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function buildPreviousRiskSnapshot(snapshot?: PriorRiskSnapshotClaim): PreviousRiskSelection {
+  const noSnapshot: PreviousRiskSelection = {
+    review: null, sources: [], decisions: [], snapshots: [],
+    coverageComplete: false, cutoffComplete: false,
+    gapReason: "current_review_cutoff_not_provable",
+  };
+  if (!snapshot || !snapshot.current_cutoff || !validRiskCutoff(snapshot.current_cutoff)) return noSnapshot;
+
+  const review = snapshot.review;
+  const sources = snapshot.sources ?? [];
+  const decisions = snapshot.observation_decisions ?? [];
+  if (!review || !sources.length) {
+    return {
+      review, sources, decisions, snapshots: [],
+      coverageComplete: false, cutoffComplete: false,
+      gapReason: snapshot.gap_reason ?? "no_prior_current_review",
+    };
+  }
+  const coverageComplete = sources.every((source) =>
+    source.assurance_observation_coverage.length > 0 &&
+    source.assurance_observation_coverage.every((row) => row.state === "processed"));
+  const snapshots = buildReviewExtraction(sources, decisions).extraction.riskItems.currentSnapshots;
+  const sourceDocumentsWithRisk = new Set(snapshots
+    .map((risk) => risk.sourceRef?.documentId)
+    .filter((documentId): documentId is string => Boolean(documentId)));
+  const statedCutoffs = snapshots.map((risk) =>
+    risk.asOfDate?.trim() || risk.periodLabel?.trim() || "");
+  const cutoffComplete = coverageComplete &&
+    sources.every((source) => sourceDocumentsWithRisk.has(source.document_id)) &&
+    snapshots.length > 0 &&
+    statedCutoffs.every(validRiskCutoff) &&
+    new Set(statedCutoffs).size === 1;
+  const gapReason = snapshot.gap_reason ?? (!coverageComplete
+    ? "prior_risk_coverage_incomplete"
+    : !snapshots.length
+      ? "prior_review_has_no_risk_snapshots"
+      : !cutoffComplete
+        ? "prior_risk_cutoff_not_provable"
+        : null);
+  return { review, sources, decisions, snapshots, coverageComplete, cutoffComplete, gapReason };
 }
 
 function mapSelectedCostObservations(
@@ -988,10 +1155,28 @@ function summarizeObservationCoverage(sources: AssuranceSource[]) {
   return { byRole };
 }
 
-function buildReviewExtraction(sources: AssuranceSource[]): {
+function buildReviewExtraction(
+  sources: AssuranceSource[],
+  decisions: ObservationDecision[] = [],
+): {
   extraction: ReviewExtraction;
   progressSourceObservations: Record<string, unknown>[];
+  riskStatements: {
+    current: { source: AssuranceSource; row: AssuranceObservationRow }[];
+    baseline: { source: AssuranceSource; row: AssuranceObservationRow }[];
+  };
 } {
+  // Rejected observations stay in storage untouched; they are simply excluded
+  // from this analysis. A corrected progress value replaces the percent used
+  // by comparisons while the observation's original percent stays stored.
+  const excluded = new Set(
+    decisions.filter((item) => item.decision === "rejected")
+      .flatMap((item) => item.observation_ids),
+  );
+  const corrections = new Map(
+    decisions.filter((item) => item.decision === "corrected")
+      .flatMap((item) => item.observation_ids.map((observationId) => [observationId, item])),
+  );
   const rowsFor = (
     role: "baseline" | "current",
     domain: AssuranceObservationRow["domain"],
@@ -999,22 +1184,35 @@ function buildReviewExtraction(sources: AssuranceSource[]): {
   ) => sources
     .filter((source) => source.role === role)
     .flatMap((source) => source.assurance_observations
-      .filter((row) => row.domain === domain && row.observation_type === observationType)
+      .filter((row) => row.domain === domain && row.observation_type === observationType
+        && !excluded.has(row.id))
       .map((row) => ({ source, row })));
 
   const mapMilestones = (role: "baseline" | "current"): MilestoneObservation[] =>
     rowsFor(role, "schedule", "milestone").map(({ source, row }) => {
       const observation = row.observation;
       const scopeLevel = observation.scope_level;
+      const correction = corrections.get(row.id);
+      const correctedDate = snapshotText(correction?.corrected_observation?.date);
+      const accepted = decisions.some((item) =>
+        item.decision === "accepted" && item.observation_ids.includes(row.id));
       return {
         label: snapshotText(observation.label) ?? "",
-        date: snapshotText(observation.date),
+        // A reviewer-corrected date drives the comparison; the extracted date
+        // stays in sourceDate for display and audit.
+        date: correctedDate ?? snapshotText(observation.date),
+        sourceDate: snapshotText(observation.date),
         periodLabel: snapshotText(observation.period_label),
         asOfDate: snapshotText(observation.as_of_date),
         scopeLevel: scopeLevel === "project" || scopeLevel === "wbs" ? scopeLevel : "unknown",
         scopeLabel: snapshotText(observation.scope_label),
         excerpt: row.excerpt,
         sourceRef: assuranceEvidenceReference(source, row),
+        reviewDecision: correction
+          ? { decision: "corrected" as const, date: correctedDate, reason: correction.reason }
+          : accepted
+            ? { decision: "accepted" as const, date: null, reason: null }
+            : null,
       };
     });
   const progressRows = (["baseline", "current"] as const).flatMap((role) =>
@@ -1024,27 +1222,60 @@ function buildReviewExtraction(sources: AssuranceSource[]): {
     const observation = row.observation;
     const scopeLevel = observation.scope_level;
     if (scopeLevel !== "project" && scopeLevel !== "wbs" && scopeLevel !== "unknown") return [];
+    const correction = corrections.get(row.id);
+    const correctedPercent = typeof correction?.corrected_observation?.percent === "number"
+      ? correction.corrected_observation.percent
+      : null;
     return [{
       role: source.role,
       scopeLevel,
       scopeLabel: snapshotText(observation.scope_label),
-      percent: typeof observation.percent === "number" ? observation.percent : null,
+      percent: correctedPercent ??
+        (typeof observation.percent === "number" ? observation.percent : null),
+      sourcePercent: typeof observation.percent === "number" ? observation.percent : null,
       periodLabel: snapshotText(observation.period_label),
       asOfDate: snapshotText(observation.as_of_date),
       excerpt: row.excerpt,
       sourceRef: assuranceEvidenceReference(source, row),
+      reviewDecision: correction
+        ? { decision: "corrected" as const, percent: correctedPercent, reason: correction.reason }
+        : decisions.some((item) =>
+            item.decision === "accepted" && item.observation_ids.includes(row.id))
+          ? { decision: "accepted" as const, percent: null, reason: null }
+          : null,
     }];
   });
+  const riskStatements = (role: "baseline" | "current") =>
+    sources
+      .filter((source) => source.role === role)
+      .flatMap((source) => source.assurance_observations
+        .filter((row) => row.domain === "risk" && row.observation_type === "risk_register_statement"
+          && !excluded.has(row.id))
+        .map((row) => ({ source, row })));
+  const currentStatements = riskStatements("current");
+  const baselineStatements = riskStatements("baseline");
   const riskSnapshots = (role: "baseline" | "current"): RiskSnapshot[] =>
     rowsFor(role, "risk", "risk_snapshot").map(({ source, row }) => {
       const observation = row.observation;
+      const correction = corrections.get(row.id);
+      const corrected = correction?.corrected_observation;
+      const correctedStatus = snapshotText(corrected?.status);
+      const correctedRatingLabel = snapshotText(corrected?.rating_label);
+      const correctedRatingValue = typeof corrected?.rating_value === "number"
+        ? corrected.rating_value
+        : null;
+      const accepted = decisions.find((item) =>
+        item.decision === "accepted" && item.observation_ids.includes(row.id));
       return {
         sourceId: snapshotText(observation.risk_id),
         name: snapshotText(observation.name),
         description: snapshotText(observation.description),
-        status: snapshotText(observation.status),
-        ratingLabel: snapshotText(observation.rating_label),
-        ratingValue: typeof observation.rating_value === "number" ? observation.rating_value : null,
+        // Corrected status/rating drive the comparison; the extracted values
+        // stay in sourceStatus/sourceRating* for display and audit.
+        status: correctedStatus ?? snapshotText(observation.status),
+        ratingLabel: correctedRatingLabel ?? snapshotText(observation.rating_label),
+        ratingValue: correctedRatingValue ??
+          (typeof observation.rating_value === "number" ? observation.rating_value : null),
         scaleLabel: snapshotText(observation.scale_label),
         owner: snapshotText(observation.owner),
         mitigation: snapshotText(observation.mitigation),
@@ -1054,6 +1285,30 @@ function buildReviewExtraction(sources: AssuranceSource[]): {
         asOfDate: snapshotText(observation.as_of_date),
         excerpt: row.excerpt,
         sourceRef: assuranceEvidenceReference(source, row),
+        reviewDecision: correction
+          ? {
+              decision: "corrected" as const,
+              status: correctedStatus,
+              ratingLabel: correctedRatingLabel,
+              ratingValue: correctedRatingValue,
+              reason: correction.reason,
+              decidedBy: correction.decided_by,
+              decidedAt: correction.decided_at,
+            }
+          : accepted
+            ? {
+                decision: "accepted" as const,
+                status: null,
+                ratingLabel: null,
+                ratingValue: null,
+                reason: accepted.reason,
+                decidedBy: accepted.decided_by,
+                decidedAt: accepted.decided_at,
+              }
+            : null,
+        sourceStatus: snapshotText(observation.status),
+        sourceRatingLabel: snapshotText(observation.rating_label),
+        sourceRatingValue: typeof observation.rating_value === "number" ? observation.rating_value : null,
       };
     });
   const progressSourceObservations = progressRows.map(({ source, row }) => ({
@@ -1099,27 +1354,29 @@ function buildReviewExtraction(sources: AssuranceSource[]): {
       },
     },
     progressSourceObservations,
+    // Decision-filtered register statements: the risk assessment must read the
+    // same effective evidence as every other comparison, so a rejected
+    // no_open_high_or_critical claim can never produce on_track.
+    riskStatements: {
+      current: currentStatements,
+      baseline: baselineStatements,
+    },
   };
 }
 
 function buildRiskAssessment(
   extraction: ReviewExtraction,
-  comparison: ReturnType<typeof buildRiskComparison>,
-  sources: AssuranceSource[],
+  comparison: RiskComparison,
+  riskStatements: {
+    current: { source: AssuranceSource; row: AssuranceObservationRow }[];
+    baseline: { source: AssuranceSource; row: AssuranceObservationRow }[];
+  },
   coverage: ObservationCoverageByRole,
   reportingPeriodEndDate: string,
 ): ReviewExtraction["risk"] {
   const currentSnapshots = extraction.riskItems.currentSnapshots;
-  const currentStatements = sources
-    .filter((source) => source.role === "current")
-    .flatMap((source) => source.assurance_observations
-      .filter((row) => row.domain === "risk" && row.observation_type === "risk_register_statement")
-      .map((row) => ({ source, row })));
-  const baselineStatements = sources
-    .filter((source) => source.role === "baseline")
-    .flatMap((source) => source.assurance_observations
-      .filter((row) => row.domain === "risk" && row.observation_type === "risk_register_statement")
-      .map((row) => ({ source, row })));
+  const currentStatements = riskStatements.current;
+  const baselineStatements = riskStatements.baseline;
   const explicitlyNoOpenHighRisk = currentStatements.some(
     ({ row }) => row.observation.state === "no_open_high_or_critical",
   );
@@ -1212,6 +1469,104 @@ function applyCoverageGaps(
   });
 }
 
+/**
+ * Reviewer decisions never touch the stored observation; this annotates the
+ * published findings with what a reviewer decided so reports and UI show
+ * reviewed versus unreviewed evidence instead of silently merging them.
+ */
+function applyObservationDecisions(
+  findings: ReturnType<typeof evaluateAssuranceReview>,
+  decisions: ObservationDecision[],
+  sources: AssuranceSource[],
+) {
+  if (!decisions.length) return findings;
+  const domainByDecision = new Map(decisions.map((decision) => {
+    const source = sources.find((item) => item.document_id === decision.document_id);
+    const observation = source?.assurance_observations.find((row) =>
+      decision.observation_ids.includes(row.id));
+    return [decision.id, { decision, domain: observation?.domain ?? null }];
+  }));
+  const decisionLabels = { accepted: "accepted", corrected: "corrected", rejected: "rejected" };
+  return findings.map((finding) => {
+    const relevant = [...domainByDecision.values()].filter((item) =>
+      item.domain !== null &&
+      (item.domain === finding.domain ||
+        (finding.domain === "schedule" && item.domain === "progress")));
+    if (!relevant.length) return finding;
+    const summary = relevant
+      .map(({ decision }) =>
+        `Reviewer ${decisionLabels[decision.decision]} an observation${decision.reason ? `: ${decision.reason}` : ""}.`)
+      .join(" ");
+    return { ...finding, explanation: `${finding.explanation} Reviewer decisions: ${summary}` };
+  });
+}
+
+/**
+ * Applies cost-observation reviewer decisions to the rows the Budget and WBS
+ * comparisons consume. A rejected cost observation is excluded; a correction
+ * replaces the normalized amount, currency, or WBS scope label used by the
+ * comparison while every stored row keeps its original values. Unreviewed
+ * observations pass through unchanged.
+ */
+function applyCostObservationDecisions(
+  decisions: ObservationDecision[],
+  sources: AssuranceSource[],
+  currentRows: CostObservationRow[],
+  baselineRows: CostObservationRow[],
+): { current: CostObservationRow[]; baseline: CostObservationRow[]; changed: boolean } {
+  const costDecisions = decisions.filter((item) => item.target_type === "cost");
+  if (!costDecisions.length) return { current: currentRows, baseline: baselineRows, changed: false };
+  const excluded = new Set(
+    costDecisions.filter((item) => item.decision === "rejected")
+      .flatMap((item) => item.cost_observation_ids ?? []),
+  );
+  const corrections = new Map(
+    costDecisions.filter((item) => item.decision === "corrected")
+      .flatMap((item) => (item.cost_observation_ids ?? []).map((id) => [id, item])),
+  );
+  const apply = (rows: CostObservationRow[]) => rows
+    .filter((row) => !excluded.has(row.id))
+    .map((row) => {
+      const correction = corrections.get(row.id);
+      if (!correction?.corrected_observation) return row;
+      const corrected = correction.corrected_observation;
+      return {
+        ...row,
+        normalized_amount: typeof corrected.normalized_amount === "number"
+          ? String(corrected.normalized_amount)
+          : row.normalized_amount,
+        currency: typeof corrected.currency === "string" ? corrected.currency : row.currency,
+        scope_label: typeof corrected.scope_label === "string" ? corrected.scope_label : row.scope_label,
+        documents: row.documents,
+      };
+    });
+  const decisionSources = new Set(costDecisions.map((item) => item.document_id));
+  return {
+    current: apply(currentRows),
+    baseline: apply(baselineRows),
+    changed: sources.some((source) => decisionSources.has(source.document_id)),
+  };
+}
+
+function summarizeObservationDecisions(
+  sources: AssuranceSource[],
+  decisions: ObservationDecision[],
+) {
+  const counts = { accepted: 0, corrected: 0, rejected: 0 };
+  const countFor = (decision: ObservationDecision) =>
+    (decision.observation_ids?.length ?? 0) + (decision.cost_observation_ids?.length ?? 0);
+  for (const decision of decisions) counts[decision.decision] += countFor(decision);
+  const totalObservations = sources.reduce(
+    (total, source) =>
+      total + source.assurance_observations.length + source.cost_observations.length, 0,
+  );
+  return {
+    total_observations: totalObservations,
+    reviewed: counts.accepted + counts.corrected + counts.rejected,
+    ...counts,
+  };
+}
+
 function snapshotText(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
@@ -1244,23 +1599,6 @@ function assuranceEvidenceReference(
   };
 }
 
-function riskStatusIsOpen(status: string | null): boolean | null {
-  if (!status) return null;
-  const normalized = status.toLocaleLowerCase();
-  const closed = /\b(?:not|no longer|never)\s+open\b|\b(?:closed|resolved|mitigated|complete|completed|cancelled|inactive|ditutup|selesai|teratasi)\b/iu.test(normalized);
-  const open = /\b(?:open|active|ongoing|unmitigated|terbuka|aktif|berjalan)\b/iu.test(normalized);
-  return closed === open ? null : open;
-}
-
-function riskRatingClass(label: string | null): "critical" | "high" | "other" | "unknown" {
-  if (!label) return "unknown";
-  const normalized = label.toLocaleLowerCase();
-  if (/\b(?:not|non|below)\s+(?:high|critical)\b/iu.test(normalized)) return "other";
-  if (/\b(?:critical|extreme|very high|kritis|sangat tinggi)\b/iu.test(normalized)) return "critical";
-  if (/\b(?:high|tinggi)\b/iu.test(normalized)) return "high";
-  if (/\b(?:medium|moderate|low|sedang|rendah)\b/iu.test(normalized)) return "other";
-  return "unknown";
-}
 function buildActionRows(findings: ReturnType<typeof evaluateAssuranceReview>) {
   const titles = {
     budget:

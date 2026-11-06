@@ -29,6 +29,14 @@ export type MilestoneObservation = {
   scopeLabel: string | null;
   excerpt: string | null;
   sourceRef: AssuranceEvidenceReference | null;
+  /** Reviewer decision on this observation; null means still unreviewed. */
+  reviewDecision?: {
+    decision: "accepted" | "corrected";
+    date: string | null;
+    reason: string | null;
+  } | null;
+  /** The extracted date before a reviewer correction, when one applies. */
+  sourceDate?: string | null;
 };
 
 /**
@@ -47,6 +55,14 @@ export type ProgressObservation = {
   asOfDate: string | null;
   excerpt: string | null;
   sourceRef: AssuranceEvidenceReference | null;
+  /** Reviewer decision on this observation; null means still unreviewed. */
+  reviewDecision?: {
+    decision: "accepted" | "corrected";
+    percent: number | null;
+    reason: string | null;
+  } | null;
+  /** The extracted percent before a reviewer correction, when one applies. */
+  sourcePercent?: number | null;
 };
 
 /**
@@ -72,6 +88,20 @@ export type RiskSnapshot = {
   asOfDate: string | null;
   excerpt: string | null;
   sourceRef: AssuranceEvidenceReference | null;
+  /** Reviewer decision on this observation; null means still unreviewed. */
+  reviewDecision?: {
+    decision: "accepted" | "corrected";
+    status: string | null;
+    ratingLabel: string | null;
+    ratingValue: number | null;
+    reason: string | null;
+    decidedBy?: string;
+    decidedAt?: string;
+  } | null;
+  /** The extracted status/rating before a reviewer correction. */
+  sourceStatus?: string | null;
+  sourceRatingLabel?: string | null;
+  sourceRatingValue?: number | null;
 };
 
 /**

@@ -266,12 +266,29 @@ const execFileAsync = promisify(execFileCallback);
 
 export type ParsedSourceLocation = Record<string, string | number>;
 
+// One spreadsheet cell's structural identity: its exact cell, the column label
+// from the table header, the readable value, and the normalized date when the
+// cell is date-formatted. The worker proves a value's or date's column from this
+// metadata instead of trusting where a fragment sits in row text.
+export type ParsedSourceCell = {
+  sheetName: string;
+  row: number;
+  column: string;
+  cell: string;
+  label: string | null;
+  value: string;
+  rawValue: string;
+  dateIso: string | null;
+};
+
 export type ParsedSourceReference = {
   sourceId: string;
   chunkIndex: number;
   text: string;
   modelText: string;
   sourceLocation?: ParsedSourceLocation;
+  cell?: ParsedSourceCell;
+  rowCells?: ParsedSourceCell[];
 };
 
 export type ParsedChunk = {
@@ -303,6 +320,7 @@ type SourceCellReference = {
   text: string;
   modelText: string;
   location: ParsedSourceLocation;
+  cell?: ParsedSourceCell;
 };
 
 type SourceBlock = {
@@ -315,6 +333,7 @@ type SourceBlock = {
   modelText?: string;
   formulaCells?: FormulaCell[];
   cellReferences?: SourceCellReference[];
+  rowCells?: ParsedSourceCell[];
 };
 
 type FormulaCell = {
@@ -329,12 +348,23 @@ type FormulaCell = {
   rowEnd: number;
 };
 
+// A key-value row whose key names the artifact's own subject (for example
+// "Subsystem" or "Work Package"). Read only as a document-level fallback when
+// the workbook declares exactly one such value.
+const SUBJECT_KEY_CUE = /\b(?:sub[\s-]?system|component|work\s*package|discipline|package|scope)\b/i;
+const SHEET_TITLE_CUE =
+  /\b(?:project|program(?:me)?|progress|weekly|monthly|periodic|report|status|subcontractor|contractor|work\s*package|scope|overview|dashboard|schedule|plan|minutes)\b/i;
+const TITLE_METADATA_VALUE_CUE =
+  /^(?:(?:as[\s-]?of|(?:report|cut[\s-]?off|document|issued|effective)\s+date|(?:reporting\s+)?period|week|month|revision|version|prepared\s+by|project|workstream)\s*(?:[:#=-]\s*|\s+)\S.*|w(?:eek)?\s*[-#]?\s*\d{1,2}|(?:19|20)\d{2}(?:[-/]\d{1,2}){0,2})$/iu;
+
 type ZipTextReader = {
   file(path: string): { async(type: "text"): Promise<string> } | null;
   files: Record<string, unknown>;
 };
 
-const PARSER_VERSION = "document-parser/9";
+// Bump whenever parsed chunk/source-reference output changes: cached extraction
+// groups are keyed by this version, so older rows are never reused.
+const PARSER_VERSION = "document-parser/18";
 const MAX_CHUNK_LENGTH = 4000;
 // Growth ceiling per chunk: retained row references always fit, then cell
 // references are added row by row. Cells left uncovered stay citable through
@@ -610,6 +640,17 @@ async function parseXlsxDocument(
     const { sheets, date1904 } = await readWorkbookSheets(zip, parser);
     const blocks: SourceBlock[] = [];
     const warnings: string[] = [];
+    // Workbook-declared subject labels and each sheet's own title block: the
+    // worker's fallback proof for a component scope when the cited row has no
+    // scope column and the workbook declares exactly one subject.
+    const workbookSubjects: Array<{
+      value: string;
+      key: string;
+      sheetName: string;
+      keyCell: string;
+      valueCell: string;
+    }> = [];
+    const sheetTitles: Record<string, { text: string; cell: string }> = {};
 
     for (const sheet of sheets) {
       const xml = await zip.file(sheet.path)?.async("text");
@@ -693,11 +734,103 @@ async function parseXlsxDocument(
             }
           }
         }
+        const headerText = [...headers.entries()]
+          .sort(([left], [right]) => left - right)
+          .map(([column, label]) => `${columnLetters(column)}: ${label}`)
+          .join(" | ");
+        // A sheet title must be a title-like literal in a structurally separate
+        // pre-table row, never the first label in an ordinary table header.
+        const firstRow = tableRows[0];
+        const firstCell = firstRow.cells[0];
+        const repeatedMergedTitle = firstRow.cells.length > 1 && merges.some((merge) => {
+          const [start, end] = merge.split(":");
+          const startRow = Number(start?.match(/\d+$/)?.[0]);
+          const endRow = Number(end?.match(/\d+$/)?.[0]);
+          const startColumn = columnNumber(start ?? "");
+          const endColumn = columnNumber(end ?? "");
+          return start === firstCell.reference &&
+            startRow === firstRow.number &&
+            endRow === firstRow.number &&
+            endColumn > startColumn &&
+            firstRow.cells.every((cell) => {
+              const column = columnNumber(cell.reference);
+              return column >= startColumn &&
+                column <= endColumn &&
+                cell.textual &&
+                !cell.formula &&
+                cell.value.trim() === firstCell.value.trim();
+            });
+        });
+        const hasExplicitTitleMetadata = firstRow.cells.length > 1 &&
+          firstRow.cells.slice(1).every((cell) =>
+            !cell.formula && (
+              (cell.textual && TITLE_METADATA_VALUE_CUE.test(cell.value.trim())) ||
+              (cell.dateFormat && Boolean(excelSerialToIsoDate(cell.value, date1904)))
+            )
+          );
+        const titleCellCandidate =
+          firstRow.cells.length === 1 || repeatedMergedTitle || hasExplicitTitleMetadata
+            ? firstCell
+            : undefined;
+        const standaloneTitle =
+          tableIndex === 0 &&
+          titleCellCandidate !== undefined &&
+          titleCellCandidate.textual &&
+          !titleCellCandidate.formula &&
+          SHEET_TITLE_CUE.test(titleCellCandidate.value) &&
+          (
+            hasExplicitTitleMetadata ||
+            (tableRows.length === 1 && tables.length > 1) ||
+            (
+              tableRows.length >= 3 &&
+              tableRows[1].cells.length > 1 &&
+              tableRows[1].cells.every((cell) => cell.textual) &&
+              tableRows[2].cells.some((cell) => !cell.textual)
+            )
+          )
+            ? { row: firstRow, cell: titleCellCandidate }
+            : undefined;
+        const titleCell = tableRows
+          .slice(0, headerCount)
+          .flatMap((row) => row.cells.map((cell) => ({ row, cell })))
+          .find(({ cell }) => cell.textual && !cell.formula && cell.value.trim());
+        const titleCellText = titleCell
+          ? `${columnLetters(columnNumber(titleCell.cell.reference) ?? 0) || "Cell"}: ${titleCell.cell.value}`
+          : null;
+        const sheetTitleText = standaloneTitle
+          ? `${columnLetters(columnNumber(standaloneTitle.cell.reference) ?? 0) || "Cell"}: ${standaloneTitle.cell.value}`
+          : null;
+        if (!(sheet.name in sheetTitles) && standaloneTitle && sheetTitleText) {
+          sheetTitles[sheet.name] = { text: sheetTitleText, cell: standaloneTitle.cell.reference };
+        }
+        const titleCellReferences: SourceCellReference[] =
+          titleCell && titleCellText
+            ? [{
+                text: titleCellText,
+                modelText: titleCellText,
+                location: {
+                  kind: "xlsx",
+                  sheetName: sheet.name,
+                  tableNumber: tableIndex,
+                  rowStart: titleCell.row.number,
+                  rowEnd: titleCell.row.number,
+                  cellRangeStart: titleCell.cell.reference,
+                  cellRangeEnd: titleCell.cell.reference,
+                },
+                cell: {
+                  sheetName: sheet.name,
+                  row: titleCell.row.number,
+                  column: columnLetters(columnNumber(titleCell.cell.reference) ?? 0),
+                  cell: titleCell.cell.reference,
+                  label: null,
+                  value: titleCell.cell.value,
+                  rawValue: titleCell.cell.value,
+                  dateIso: null,
+                },
+              }]
+            : [];
         blocks.push({
-          text: [...headers.entries()]
-            .sort(([left], [right]) => left - right)
-            .map(([column, label]) => `${columnLetters(column)}: ${label}`)
-            .join(" | "),
+          text: headerText,
           kind: "table-header",
           formulaCells: tableRows.slice(0, headerCount).flatMap(formulaCellsForRow),
           location: {
@@ -709,6 +842,7 @@ async function parseXlsxDocument(
             cellRangeStart: headerCells[0].reference,
             cellRangeEnd: headerCells[headerCells.length - 1].reference,
           },
+          cellReferences: titleCellReferences,
           groupKey: `sheet:${sheet.name}:table:${tableIndex}`,
           sectionLabel: sheet.name,
         });
@@ -739,13 +873,18 @@ async function parseXlsxDocument(
                     : formulaStatus === "cached_value"
                       ? ` (stored cached result: ${cell.value}; freshness not established)`
                       : "";
-            const value = cell.formula ? `${cell.formula}${formulaValueText}${formulaCacheTag}` : cell.value;
-            const format = cell.numberFormat || isFormula
+            const displayValue = percentFormattedDisplayValue(cell, isoDate) ?? cell.value;
+            // The raw value, number format, and cache disclaimer stay in an
+            // annotation appended after the readable text. The readable cell text
+            // the model is shown (modelText) is therefore always a contiguous
+            // substring of the canonical cell/row text a citation must match, so
+            // a model can cite exactly what it was given.
+            const annotation = cell.numberFormat || isFormula
               ? ` [raw value: ${cell.value}; number format: ${cell.numberFormat ?? "none"}${isoDate ? `; ISO date: ${isoDate}` : invalidDate ? `; Needs Review: invalid Excel serial ${cell.value}` : cell.dateFormat ? "; Needs Review: no cached date value" : ""}${formulaCacheTag}]`
               : "";
             const compactValue = cell.formula
               ? `${cell.formula}${formulaValueText}${formulaCacheTag}`
-              : isoDate ?? cell.value;
+              : isoDate ?? displayValue;
             const compactFormat = cell.dateFormat
               ? isoDate
                 ? ""
@@ -755,13 +894,60 @@ async function parseXlsxDocument(
                 : isFormula
                   ? ` [formula cache: ${formulaStatus}]`
                   : "";
+            const modelCellText = `${labelText}${compactValue}${compactFormat}`;
             return {
-              text: `${labelText}${value}${format}`,
-              modelText: `${labelText}${compactValue}${compactFormat}`,
+              text: `${modelCellText}${annotation}`,
+              modelText: modelCellText,
+              annotation,
+              sourceCell: {
+                sheetName: sheet.name,
+                row: row.number,
+                column: columnLetters(column),
+                cell: cell.reference,
+                label: label ?? null,
+                value: compactValue,
+                rawValue: cell.value,
+                dateIso: isoDate ?? null,
+              } satisfies ParsedSourceCell,
             };
           });
-          const text = cells.map((cell) => cell.text).join(" | ");
           const modelText = cells.map((cell) => cell.modelText).join(" | ");
+          // The row keeps every annotation after its readable text so the row
+          // reference stays citable against exactly what the model was shown.
+          const text = `${modelText}${cells.map((cell) => cell.annotation).filter(Boolean).join("")}`;
+          const rowCells = cells.map((cell) => cell.sourceCell);
+          // A key-value row declares a workbook subject only when its cue and
+          // exactly one literal value share the row; multiple candidates or a
+          // formula result are ambiguous evidence, not a scope declaration.
+          const keyCell = row.cells[0];
+          const subjectCells = row.cells.slice(1).filter(
+            (cell) => cell.value.trim() || cell.formulaCacheStatus !== "not_formula",
+          );
+          const subjectCell = subjectCells.length === 1 &&
+              subjectCells[0].textual &&
+              !subjectCells[0].formula
+            ? subjectCells[0]
+            : undefined;
+          const subjectValue = subjectCell?.value.trim();
+          if (
+            keyCell?.textual &&
+            !keyCell.formula &&
+            SUBJECT_KEY_CUE.test(keyCell.value) &&
+            subjectCell &&
+            subjectValue &&
+            !workbookSubjects.some(
+              (subject) =>
+                subject.value === subjectValue && subject.sheetName === sheet.name,
+            )
+          ) {
+            workbookSubjects.push({
+              value: subjectValue,
+              key: keyCell.value.trim(),
+              sheetName: sheet.name,
+              keyCell: keyCell.reference,
+              valueCell: subjectCell.reference,
+            });
+          }
           if (row.cells.some((cell) => cell.dateFormat)) {
             warnings.push(`Sheet "${sheet.name}" contains date-formatted raw values; recognized dates are normalized and invalid or unavailable values need review.`);
           }
@@ -780,6 +966,7 @@ async function parseXlsxDocument(
             kind: "table-row",
             formulaCells: formulaCellsForRow(row),
             location: rowLocation,
+            rowCells,
             cellReferences: row.cells.map((cell, cellIndex) => ({
               text: cells[cellIndex].text,
               modelText: cells[cellIndex].modelText,
@@ -788,6 +975,7 @@ async function parseXlsxDocument(
                 cellRangeStart: cell.reference,
                 cellRangeEnd: cell.reference,
               },
+              cell: cells[cellIndex].sourceCell,
             })),
             groupKey: `sheet:${sheet.name}:table:${tableIndex}`,
             sectionLabel: sheet.name,
@@ -815,6 +1003,8 @@ async function parseXlsxDocument(
         sheetNames: sheets.map((sheet) => sheet.name),
         textLength: chunks.reduce((length, chunk) => length + chunk.chunkText.length, 0),
         warnings: [...new Set(warnings)],
+        subjects: workbookSubjects,
+        sheetTitles,
       },
     };
   } catch (error) {
@@ -854,7 +1044,13 @@ async function readWorkbookNumberFormats(zip: ZipTextReader, parser: DOMParser) 
       format.getAttribute("formatCode"),
     ]),
   );
-  const builtinDateFormats: Record<string, string> = {
+  // Built-in formats that change how a raw value must be read. Dates drive
+  // normalization; percent formats prove a stored fraction is a percentage.
+  // Every other built-in stays unrecognized so its number format is never
+  // guessed from the display.
+  const builtinFormats: Record<string, string> = {
+    "9": "0%",
+    "10": "0.00%",
     "14": "m/d/yy",
     "15": "d-mmm-yy",
     "16": "d-mmm",
@@ -868,7 +1064,7 @@ async function readWorkbookNumberFormats(zip: ZipTextReader, parser: DOMParser) 
   return Array.from(styles.getElementsByTagNameNS("*", "cellXfs")[0]?.getElementsByTagNameNS("*", "xf") ?? [])
     .map((style) => {
       const id = style.getAttribute("numFmtId");
-      const format = customFormats.get(id ?? "") ?? builtinDateFormats[id ?? ""];
+      const format = customFormats.get(id ?? "") ?? builtinFormats[id ?? ""];
       return {
         format,
         date: Boolean(format && /[yd]/i.test(format.replace(/"[^"]*"|\[[^\]]*\]/g, ""))),
@@ -1056,6 +1252,39 @@ function classifyFormulaCache(
     formulaCacheType: cacheType,
     formulaCacheRaw: rawValue,
   };
+}
+
+// True only when every numeric section of the cell format is a plain percentage
+// pattern. Escaped literal `\%`, quoted `"%"`, color/condition sections, and
+// currency or date formats are never treated as proven scaling; an unusual
+// percent format simply leaves the stored fraction unconverted.
+// ponytail: plain `[#0…]%` sections only; widen if a real workbook needs more.
+function isPercentNumberFormat(format: string): boolean {
+  const sections = format
+    .replace(/"[^"]*"|\[[^\]]*\]|\\./g, "")
+    .split(";")
+    .map((section) => section.trim())
+    .filter(Boolean);
+  return (
+    sections.length > 0 &&
+    sections.every((section) => /^[#0][#0,]*(?:\.[#0]+)?%$/.test(section))
+  );
+}
+
+// A cell whose own number format is a percentage stores a fraction but displays
+// a percentage. Render that exact percentage (not a rounded display value) only
+// for a non-formula numeric literal whose own cell format proves scaling. The
+// raw value and format stay in the same cell's annotation for provenance.
+function percentFormattedDisplayValue(
+  cell: WorkbookCell,
+  isoDate: string | undefined,
+): string | null {
+  if (cell.formula || cell.textual || isoDate || !cell.value.trim()) return null;
+  const format = cell.numberFormat;
+  if (!format || !isPercentNumberFormat(format)) return null;
+  const numeric = Number(cell.value);
+  if (!Number.isFinite(numeric)) return null;
+  return `${Number((numeric * 100).toPrecision(12))}%`;
 }
 
 // Conservative deterministic ambiguity diagnostics. One indicator alone does not
@@ -1636,7 +1865,10 @@ function chunkBlockGroup(blocks: SourceBlock[]): ParsedChunk[] {
     const sourceLocation = mergeSourceLocations(sourceBlocks);
     const sourceReferences: ParsedSourceReference[] = [];
     const addReference = (
-      reference: Pick<ParsedSourceReference, "text" | "modelText" | "sourceLocation">,
+      reference: Pick<
+        ParsedSourceReference,
+        "text" | "modelText" | "sourceLocation" | "cell" | "rowCells"
+      >,
     ) => {
       sourceReferences.push({
         sourceId: `s${chunks.length}s${sourceReferences.length}`,
@@ -1651,13 +1883,20 @@ function chunkBlockGroup(blocks: SourceBlock[]): ParsedChunk[] {
         text: block.text,
         modelText: block.modelText ?? block.text,
         sourceLocation: block.location,
+        rowCells: block.rowCells,
       });
       const cellReferences = block.cellReferences ?? [];
       if (sourceReferences.length + cellReferences.length > MAX_SOURCE_REFERENCES_PER_CHUNK) {
         continue;
       }
       for (const cell of cellReferences) {
-        addReference({ text: cell.text, modelText: cell.modelText, sourceLocation: cell.location });
+        addReference({
+          text: cell.text,
+          modelText: cell.modelText,
+          sourceLocation: cell.location,
+          cell: cell.cell,
+          rowCells: block.rowCells,
+        });
       }
     }
     chunks.push({
@@ -1754,17 +1993,20 @@ function splitSourceBlock(block: SourceBlock): SourceBlock[] {
   const cellReferences = remaining.length > MAX_SOURCE_BLOCK_PART_LENGTH
     ? undefined
     : block.cellReferences;
+  const rowCells = remaining.length > MAX_SOURCE_BLOCK_PART_LENGTH
+    ? undefined
+    : block.rowCells;
 
   while (remaining.length > MAX_SOURCE_BLOCK_PART_LENGTH) {
     let splitAt = remaining.lastIndexOf(" ", MAX_SOURCE_BLOCK_PART_LENGTH);
     if (splitAt < 1) splitAt = MAX_SOURCE_BLOCK_PART_LENGTH;
     const part = remaining.slice(0, splitAt).trimEnd();
-    parts.push({ ...block, text: part, modelText, cellReferences, continuation });
+    parts.push({ ...block, text: part, modelText, cellReferences, rowCells, continuation });
     continuation =
       block.kind === "paragraph" ? part.slice(-PARAGRAPH_OVERLAP) : undefined;
     remaining = remaining.slice(splitAt).trimStart();
   }
-  if (remaining) parts.push({ ...block, text: remaining, modelText, cellReferences, continuation });
+  if (remaining) parts.push({ ...block, text: remaining, modelText, cellReferences, rowCells, continuation });
   return parts;
 }
 

@@ -2,6 +2,7 @@ import type {
   CostBaseline,
   CostMeasure,
   CostObservation,
+  CostScopeProvenance,
   CostScopeLevel,
   WbsMapping,
 } from "@/features/assurance/lib/cost-evidence";
@@ -9,7 +10,7 @@ import type { MilestoneMapping } from "@/features/assurance/lib/schedule-compari
 import type { RiskMapping } from "@/features/assurance/lib/risk-comparison";
 
 export const costObservationColumns =
-  "id, document_id, measure, source_value, normalized_amount, currency, scope_level, scope_label, wbs_code, wbs_parent_code, wbs_name, scope_description, period_label, as_of_date, status_label, evidence_chunk_index, excerpt, page_number, section_label, source_location, documents(title)";
+  "id, document_id, measure, source_value, normalized_amount, currency, scope_level, scope_label, scope_source_id, scope_provenance, wbs_code, wbs_parent_code, wbs_name, scope_description, period_label, as_of_date, status_label, evidence_chunk_index, excerpt, page_number, section_label, source_location, documents(title)";
 
 export const costBaselineColumns =
   "id, scope_level, scope_label, amount, currency, effective_date, state, observation_id, source_document_id, approval_note, approved_at";
@@ -32,6 +33,14 @@ export type CostObservationRow = {
   currency: string | null;
   scope_level: CostScopeLevel;
   scope_label: string | null;
+  scope_source_id: string | null;
+  scope_provenance: {
+    kind: CostScopeProvenance["kind"];
+    source_id: string;
+    sheet_name: string;
+    cell_reference: string;
+    excerpt: string;
+  }[] | null;
   wbs_code: string | null;
   wbs_parent_code: string | null;
   wbs_name: string | null;
@@ -86,6 +95,14 @@ export function mapCostObservationRow(row: CostObservationRow): CostObservation 
     currency: row.currency,
     scopeLevel: row.scope_level,
     scopeLabel: row.scope_label,
+    scopeSourceId: row.scope_source_id,
+    scopeProvenance: row.scope_provenance?.map((item) => ({
+      kind: item.kind,
+      sourceId: item.source_id,
+      sheetName: item.sheet_name,
+      cellReference: item.cell_reference,
+      excerpt: item.excerpt,
+    })) ?? null,
     wbsCode: row.wbs_code,
     wbsParentCode: row.wbs_parent_code,
     wbsName: row.wbs_name,

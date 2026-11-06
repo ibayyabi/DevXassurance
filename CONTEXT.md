@@ -97,6 +97,9 @@ Keep baseline and reported forecast dates for the same milestone or work package
 **Progress record**:
 Preserve explicitly reported progress at project or WBS level with its source period/as-of date. Do not calculate a project percentage from WBS percentages; show change across periods only when the compared scope and WBS are comparable.
 
+**Progress status rule**:
+Evaluate comparable planned and actual progress using a project-approved, versioned rule; if none applies, show the values but leave the calculated status unassessed. Preserve source-reported RAG separately as a cited source claim; a fixture's thresholds are not a global default.
+
 **WBS mapping proposal**:
 A source-backed suggestion that differently coded or named work packages refer to the same scope. It is not used for comparison until a project reviewer accepts it.
 

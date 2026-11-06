@@ -24,7 +24,7 @@ const riskComparison = parse('src/features/assurance/lib/risk-comparison.ts');
 const reviewPeriod = parse('src/features/assurance/lib/review-period.ts');
 const role = parse('src/features/projects/lib/roles.ts');
 function fixture(options = {}) {
-  const calls = [], uploads = [], removals = [], renders = [], inserts = [];
+  const calls = [], uploads = [], removals = [], renders = [], inserts = [], mutations = [];
   const context = {
     attempt_id: 'attempt-1', evidence_count: 2,
     findings: ['budget','schedule','risk'].map(domain => ({ domain, condition: 'more_evidence_required',
@@ -42,9 +42,12 @@ function fixture(options = {}) {
     rpc: async (name, input) => {
       calls.push({name,input});
       if (options.rpc) { const override = options.rpc(name,input); if (override) return override; }
-      if (name === 'claim_assurance_analysis') return {data:options.claim??{
-        attempt_id:'attempt-1',sources,progress_decisions:[],
-      }};
+      if (name === 'claim_assurance_analysis') {
+        const claim=options.claim??{attempt_id:'attempt-1',sources,observation_decisions:[]};
+        return {data:{...claim,prior_risk_snapshot:claim.prior_risk_snapshot??{
+          current_cutoff:'2026-10-31',review:null,sources:[],observation_decisions:[],gap_reason:'no_prior_current_review',
+        }}};
+      }
       if (input.p_operation === 'context') return {data:context};
       if (input.p_operation === 'export_check') return {data:{attempt_id:'attempt-1',report_fingerprint:'content-1',preview:{
         report_type:'assurance_report',reporting_period:'October 2026',original_sections:{project_health:'Saved content'},
@@ -57,7 +60,9 @@ function fixture(options = {}) {
         maybeSingle(){return Promise.resolve({data:table==='assurance_reviews'
           ? (options.existingReview === false ? null : {reporting_period:'2026-10-01',cutoff_precision:'month'})
           : table==='report_previews' ? {assurance_review_id:options.legacy?null:'review-1'} : null,error:options.lookupError})},
-        insert(row){inserts.push({table,row});return Promise.resolve({data:null,error:options.insertError})},
+        update(values){mutations.push({table,operation:'update',values});return this},
+        delete(){mutations.push({table,operation:'delete'});return this},
+        insert(row){mutations.push({table,operation:'insert',row});inserts.push({table,row});return Promise.resolve({data:null,error:options.insertError})},
         then(resolve){const data=table==='assurance_reviews'?[{id:'review-1',reporting_period:'2026-10-01',title:'October',status:'findings_ready'}]:rows;
           return Promise.resolve({data,error:options.queryError}).then(resolve)}};
       assert.ok(['assurance_reviews','report_previews','cost_baselines','cost_observations','wbs_mappings','milestone_mappings','risk_identity_mappings','risk_scale_mappings'].includes(table),`Unexpected table access ${table}`);
@@ -81,7 +86,7 @@ function fixture(options = {}) {
       renderReportDocx:async(input)=>{renders.push(input);return Buffer.from('DOCX')}},
   };
   return {assurance:load('src/features/assurance/actions/assurance-actions.ts',dependencies),
-    reports:load('src/features/reports/actions/report-actions.ts',dependencies),calls,uploads,removals,renders,inserts};
+    reports:load('src/features/reports/actions/report-actions.ts',dependencies),calls,uploads,removals,renders,inserts,mutations};
 }
 function form(extra={}) {
   const data=new FormData();
@@ -95,9 +100,27 @@ test('evidence action delegates no-op detection to the atomic RPC and propagates
   const broken=fixture({rpc:()=>({error:{message:'Selection transaction failed'}})});
   await assert.rejects(()=>broken.assurance.saveReviewEvidence(form({baselineDocumentIds:'base',currentDocumentIds:'current'})),/transaction failed/);
 });
+test('baseline and mapping writes use project-locked RPCs atomically',async()=>{
+  const f=fixture();
+  await f.assurance.approveCostBaseline(form({
+    observationId:'observation-1',effectiveDate:'2026-10-31',approvalNote:'Reviewed',
+  }));
+  await f.assurance.acceptWbsMapping(form({sourceLabel:'WBS A',canonicalLabel:'WBS B'}));
+  await f.assurance.removeWbsMapping(form({mappingId:'wbs-1'}));
+  await f.assurance.acceptMilestoneMapping(form({sourceLabel:'Gate A',canonicalLabel:'Gate B'}));
+  await f.assurance.removeMilestoneMapping(form({mappingId:'milestone-1'}));
+  assert.deepEqual(f.calls.map(({name,input})=>[name,input]),[
+    ['accept_cost_baseline',{p_project_id:'project-1',p_observation_id:'observation-1',p_effective_date:'2026-10-31',p_note:'Reviewed'}],
+    ['replace_assurance_mapping',{p_project_id:'project-1',p_mapping_kind:'wbs',p_source_label:'WBS A',p_canonical_label:'WBS B',p_note:null}],
+    ['remove_assurance_mapping',{p_project_id:'project-1',p_mapping_kind:'wbs',p_mapping_id:'wbs-1'}],
+    ['replace_assurance_mapping',{p_project_id:'project-1',p_mapping_kind:'milestone',p_source_label:'Gate A',p_canonical_label:'Gate B',p_note:null}],
+    ['remove_assurance_mapping',{p_project_id:'project-1',p_mapping_kind:'milestone',p_mapping_id:'milestone-1'}],
+  ]);
+  assert.deepEqual(f.mutations,[]);
+});
 test('analysis publishes deterministic findings from the claimed versioned sources atomically',async()=>{
   const f=fixture();await f.assurance.runAssuranceAnalysis(form());
-  const publication=f.calls.find(call=>call.name==='finish_assurance_analysis_with_results');
+  const publication=f.calls.find(call=>call.name==='finish_assurance_analysis_with_decision_fingerprint');
   assert.equal(publication?.input.p_attempt_id,'attempt-1');
   assert.deepEqual(publication?.input.p_findings.map(x=>x.domain).sort(),['budget','risk','schedule']);
   assert.equal(publication?.input.p_metadata.source_versions.length,2);
@@ -137,7 +160,7 @@ test('analysis findings retain source-version citations from validated observati
   ];
   const f=fixture({claim:{attempt_id:'attempt-1',sources}});
   await f.assurance.runAssuranceAnalysis(form());
-  const findings=f.calls.find(call=>call.name==='finish_assurance_analysis_with_results').input.p_findings;
+  const findings=f.calls.find(call=>call.name==='finish_assurance_analysis_with_decision_fingerprint').input.p_findings;
   const schedule=findings.find(finding=>finding.domain==='schedule');
   assert.equal(schedule.condition,'critical');
   assert.deepEqual(schedule.sourceExcerpts.map(source=>source.documentId),['base','current']);
@@ -161,7 +184,7 @@ test('analysis preserves unprocessed coverage in its atomic result',async()=>{
   }));
   const f=fixture({claim:{attempt_id:'attempt-1',sources,progress_decisions:[]}});
   await f.assurance.runAssuranceAnalysis(form());
-  const publication=f.calls.find(call=>call.name==='finish_assurance_analysis_with_results');
+  const publication=f.calls.find(call=>call.name==='finish_assurance_analysis_with_decision_fingerprint');
   assert.equal(publication?.input.p_metadata.observation_coverage.byRole.baseline.schedule.state,'unprocessed');
   assert.equal(publication?.input.p_findings.find(finding=>finding.domain==='schedule').condition,'more_evidence_required');
 });
@@ -221,7 +244,7 @@ test('overlap claim errors prevent publication and publication errors are not ig
   await assert.rejects(()=>f.assurance.runAssuranceAnalysis(form()),/Already running/);
   assert.equal(f.calls.length,1);
   const broken=fixture({rpc:(name,input)=>{
-    if(name==='finish_assurance_analysis_with_results')return {error:{message:'Publication rollback'}};
+    if(name==='finish_assurance_analysis_with_decision_fingerprint')return {error:{message:'Publication rollback'}};
     if(name==='finish_assurance_analysis'&&input.p_error)return {data:true};
     return null;
   }});
