@@ -1,11 +1,12 @@
 import { requireProjectMembership } from "@/features/projects/lib/queries";
 import { canManageProject } from "@/features/projects/lib/roles";
 import type { ReportType } from "@/features/reports/lib/constants";
-import type { ReportManifest, ReportSnapshotSource } from "@/features/reports/lib/snapshot";
-import {
-  listPublishedSnapshots,
-  type ReportSnapshotRef,
-} from "@/features/reports/lib/snapshot-source";
+import type {
+  ReportManifest,
+  ReportSnapshotRef,
+  ReportSnapshotSource,
+} from "@/features/reports/lib/snapshot";
+import { listPublishedSnapshots } from "@/features/reports/lib/snapshot-source";
 
 export type ReportPreview = {
   id: string;

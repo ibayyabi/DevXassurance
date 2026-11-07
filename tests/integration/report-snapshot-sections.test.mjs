@@ -106,7 +106,7 @@ test("a stored draft re-derives from the manifest the database persisted", () =>
     detailLevel: stored.detailLevel,
   });
   assert.deepEqual(reread.sections, original.sections);
-  assert.equal(reread.snapshotId, "attempt-1");
+  assert.equal(rehydrated.snapshotId, "attempt-1");
 });
 
 test("a detailed draft cites the concrete evidence version, not a table name", () => {
