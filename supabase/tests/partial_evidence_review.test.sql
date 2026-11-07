@@ -95,6 +95,15 @@ $$;
 create or replace function pg_temp.decision_count() returns bigint language sql as $$
   select jsonb_array_length(public.assurance_source_snapshot('50000000-0000-4000-8000-000000000003', '50000000-0000-4000-8000-000000000021')->'observation_decisions');
 $$;
+-- The fingerprints a real claim/finish writes. Simulating an analysis without
+-- them would look like a source change to reference invalidation and mask the
+-- ticket 03 decision-invalidation ordering this section exists to prove.
+create or replace function pg_temp.source_fingerprint() returns text language sql as $$
+  select (public.assurance_source_snapshot('50000000-0000-4000-8000-000000000003', '50000000-0000-4000-8000-000000000021'))->>'fingerprint';
+$$;
+create or replace function pg_temp.reference_fingerprint() returns text language sql as $$
+  select (public.assurance_reference_snapshot('50000000-0000-4000-8000-000000000003', '50000000-0000-4000-8000-000000000021'))->>'fingerprint';
+$$;
 
 select set_config('request.jwt.claims', '{"sub":"50000000-0000-4000-8000-000000000005","role":"authenticated"}', true);
 
@@ -310,18 +319,23 @@ select is(pg_temp.decision_count()::int, 3, 'one decision per observation after 
 -- Decision invalidation: a finished analysis goes stale when a decision
 -- changes, and an in-flight attempt cannot publish over the new decision.
 -- ---------------------------------------------------------------------------
--- Simulate a published analysis: record the current decision fingerprint in
--- last_success/latest_attempt and set status findings_ready.
+-- Simulate a published analysis exactly as claim_assurance_analysis and
+-- finish_assurance_analysis_with_decision_fingerprint record it: the source
+-- fingerprint, the reference fingerprint, and the decision fingerprint.
 update public.assurance_reviews
 set status = 'findings_ready', current_step = 'findings',
   analysis_metadata = analysis_metadata || jsonb_build_object(
     'last_success', jsonb_build_object(
       'id', 'a0000000-0000-4000-8000-0000000000a1',
-      'fingerprint', 'x', 'observation_decision_fingerprint',
+      'fingerprint', pg_temp.source_fingerprint(),
+      'reference_fingerprint', pg_temp.reference_fingerprint(),
+      'observation_decision_fingerprint',
       (select (public.assurance_observation_decisions_snapshot(
         '50000000-0000-4000-8000-000000000003', '50000000-0000-4000-8000-000000000021'))->>'fingerprint')),
     'latest_attempt', jsonb_build_object(
       'id', 'a0000000-0000-4000-8000-0000000000a1', 'outcome', 'succeeded',
+      'fingerprint', pg_temp.source_fingerprint(),
+      'reference_fingerprint', pg_temp.reference_fingerprint(),
       'observation_decision_fingerprint',
       (select (public.assurance_observation_decisions_snapshot(
         '50000000-0000-4000-8000-000000000003', '50000000-0000-4000-8000-000000000021'))->>'fingerprint')))
@@ -334,6 +348,8 @@ set analysis_metadata = analysis_metadata || jsonb_build_object(
   'latest_attempt', jsonb_build_object(
     'id', 'a0000000-0000-4000-8000-0000000000a2', 'outcome', 'analyzing',
     'lease_until', now() + interval '15 minutes',
+    'fingerprint', pg_temp.source_fingerprint(),
+    'reference_fingerprint', pg_temp.reference_fingerprint(),
     'observation_decision_fingerprint',
     (select (public.assurance_observation_decisions_snapshot(
       '50000000-0000-4000-8000-000000000003', '50000000-0000-4000-8000-000000000021'))->>'fingerprint')))

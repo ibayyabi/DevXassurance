@@ -1,12 +1,18 @@
 const DIMENSIONS = ["overall", "schedule", "cost", "risk", "governance", "audit_readiness"];
 
+// Both decomposed group tasks (group analysis and domain evidence) keep the
+// monolithic prompt's header, so the fixture answers them the same way.
+export function isGroupExtractionPrompt(prompt) {
+  return prompt.startsWith("Extract grounded project assurance intelligence");
+}
+
 export function fixtureModelResponse(requestBody, requestPath) {
   const messages = requestBody?.messages;
   const prompt = Array.isArray(messages) ? messages.find((message) => message?.role === "user")?.content : null;
   if (typeof prompt !== "string") throw new Error("Fixture provider received no user prompt.");
 
   let result;
-  if (prompt.startsWith("Extract grounded project assurance intelligence")) {
+  if (isGroupExtractionPrompt(prompt)) {
     result = extractionFixture(prompt);
   } else if (prompt.startsWith("Extract comparable Schedule, Progress, and Risk values")) {
     result = reviewFixture(prompt);
@@ -24,10 +30,15 @@ export function fixtureModelResponse(requestBody, requestPath) {
 }
 
 function extractionFixture(prompt) {
-  const chunksJson = between(prompt, "SOURCE_CHUNKS_JSON=", "\n\nRequired JSON schema");
-  const chunks = JSON.parse(chunksJson);
+  // Decomposed task prompts carry SOURCE_REFERENCES_JSON; the synthetic
+  // provider test still exercises the legacy SOURCE_CHUNKS_JSON shape.
+  const referencesJson = prompt.includes("SOURCE_REFERENCES_JSON=")
+    ? between(prompt, "SOURCE_REFERENCES_JSON=", "\n\n")
+    : between(prompt, "SOURCE_CHUNKS_JSON=", "\n\nRequired JSON schema");
+  const chunks = JSON.parse(referencesJson);
   const source = chunks.find((chunk) => typeof chunk.text === "string" && chunk.text.trim());
   if (!source) throw new Error("Fixture provider received no source chunk.");
+  const sourceId = source.source_id ?? `chunk_${source.chunk_index}`;
   const excerpt = source.text.slice(0, 450).trim();
   if (!excerpt) throw new Error("Fixture provider received an empty source excerpt.");
   const fullText = chunks.map((chunk) => chunk.text).join("\n");
@@ -42,7 +53,9 @@ function extractionFixture(prompt) {
       summary_text: "The generated evidence was reviewed with source-backed citations; unsupported values were not inferred.",
       confidence: 0.9,
       quality_warning: null,
-      sources: [{ evidence_chunk_index: source.chunk_index, excerpt }],
+      // source_id is what the worker validates; the evidence fields are kept
+      // for the provider seam test that inspects the raw fixture output.
+      sources: [{ source_id: sourceId, evidence_chunk_index: source.chunk_index, excerpt }],
     },
     health_snapshots: DIMENSIONS.map((dimension) => ({
       dimension,
@@ -57,6 +70,19 @@ function extractionFixture(prompt) {
     })),
     alerts: [],
     actions: [],
+    cost_observations: [],
+    assurance_observations: {
+      milestones: [],
+      progress: [],
+      risk_snapshots: [],
+      risk_register_statements: [],
+    },
+    group_metadata_suggestions: {
+      suggested_document_date: null,
+      detected_reporting_period: null,
+      suggested_workstream: null,
+      source_id: null,
+    },
     document_suggestions: {
       suggested_document_type: type,
       suggested_document_date: date,
@@ -65,6 +91,7 @@ function extractionFixture(prompt) {
       suggested_evidence_role: role,
       classification_confidence: 0.9,
       classification_reason: "Generated fixture classification follows labels present in the supplied synthetic source.",
+      source_id: sourceId,
       evidence_chunk_index: source.chunk_index,
       excerpt,
     },

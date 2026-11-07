@@ -20,10 +20,13 @@ test("fixture extraction output is schema-shaped and cites exact generated chunk
   assert.equal(output.document_suggestions.suggested_document_type, "progress_report");
   assert.equal(output.document_suggestions.detected_reporting_period, "2026-03-01");
   for (const citation of [...output.summary.sources, output.document_suggestions]) {
-    assert.equal(citation.evidence_chunk_index, 3);
-    assert.ok(source.includes(citation.excerpt));
+    assert.equal(citation.source_id, "chunk_3");
   }
-  assert.equal(output.health_snapshots.every((item) => item.status === "insufficient_evidence" && item.score === null && item.evidence_chunk_index === null), true);
+  assert.ok(source.includes(output.summary.sources[0].excerpt));
+  assert.equal(
+    output.health_snapshots.every((item) => item.status === "insufficient_evidence" && item.score === null && item.evidence_chunk_index === null),
+    true,
+  );
 });
 
 test("fixture review extraction uses source lines and returns only a valid OpenAI-compatible envelope", () => {

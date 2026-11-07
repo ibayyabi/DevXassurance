@@ -134,6 +134,24 @@ async function syntheticLocalizedWeeklyWorkbook() {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 }
 
+async function syntheticFormulaDueWorkbook() {
+  const zip = new JSZip();
+  zip.file(
+    "xl/workbook.xml",
+    `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Weekly" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+  );
+  zip.file(
+    "xl/_rels/workbook.xml.rels",
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>`,
+  );
+  zip.file(
+    "xl/worksheets/sheet1.xml",
+    `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Milestone</t></is></c><c r="B1" t="inlineStr"><is><t>Due Date</t></is></c><c r="C1" t="inlineStr"><is><t>Target Date</t></is></c><c r="D1" t="inlineStr"><is><t>Milestone Date</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Handover</t></is></c><c r="B2" t="inlineStr"><is><t>2026-10-23</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Commissioning</t></is></c><c r="C3" t="str"><f>TEXT(DATE(2026,10,30),&quot;yyyy-mm-dd&quot;)</f><v>2026-10-30</v></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>Closeout</t></is></c><c r="D4"><f>TEXT(DATE(2026,11,6),&quot;yyyy-mm-dd&quot;)</f></c></row></sheetData></worksheet>`,
+  );
+  const buffer = await zip.generateAsync({ type: "nodebuffer" });
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+}
+
 function documentContextFromPrompt(prompt) {
   const match = prompt.match(/^SOURCE_REFERENCES_JSON=(.+)$/m);
   assert.ok(match, "the model request carries source references");
@@ -520,8 +538,18 @@ test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived 
       await processDocumentJob(job(buffer), store),
     );
     assert.equal(jobResult.status, "completed", jobResult.processing_error);
-    assert.equal(jobResult.parser_version, "document-parser/18");
-    assert.equal(jobResult.assurance_observations.progress.length, 1);
+    assert.equal(jobResult.parser_version, "document-parser/20");
+    // The literal actual row survives with its full period/cut-off provenance,
+    // alongside the deterministic-first % Complete rows the pass now derives
+    // from the Workplan sheet's percent-formatted numeric cells.
+    const actualProgressRows = jobResult.assurance_observations.progress.filter((row) =>
+      row.excerpt.includes(`Actual %: ${spec.percent}%`));
+    assert.equal(actualProgressRows.length, 1, "exactly one literal actual row survives");
+    assert.equal(actualProgressRows[0].as_of_date, spec.cutOff);
+    assert.ok(
+      jobResult.assurance_observations.progress.some((row) => row.excerpt.includes("% Complete:")),
+      "deterministic % Complete rows join the actual row",
+    );
     const coldGroupRows = [...store.rows.values()];
     const completedGroupIndexes = coldGroupRows
       .filter((row) => row.status === "completed")
@@ -578,7 +606,7 @@ test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived 
     );
     assert.equal(negative.ok, true, negative.ok ? undefined : negative.errorMessage);
 
-    const actual = jobResult.assurance_observations.progress[0];
+    const actual = actualProgressRows[0];
     const contextReferences = capture.contextReferences ?? [];
     const valueContext = contextReferences.find(
       (entry) =>
@@ -675,7 +703,14 @@ test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived 
     assert.equal(jobResult.facts[0].source_location.cellRangeEnd, actualCell.sourceLocation.cellRangeEnd);
     assert.equal(jobResult.facts[0].source_location.rowStart, rowNumber);
     assert.match(jobResult.facts[0].excerpt, /\[raw value: 0\.\d+; number format: 0%\]/);
-    assert.equal(jobResult.assurance_observations.progress.some((item) => item.percent === 0), false);
+    // A zero-percent row is legitimate only when it cites a cell that states
+    // the zero explicitly; an empty cell never becomes a 0% observation.
+    assert.ok(
+      jobResult.assurance_observations.progress
+        .filter((item) => item.percent === 0)
+        .every((item) => item.excerpt.includes(": 0%")),
+      "every zero-percent row cites an explicit zero cell",
+    );
 
     assert.equal(jobResult.assurance_observations.milestones.length, 1);
     const milestone = jobResult.assurance_observations.milestones[0];
@@ -697,10 +732,12 @@ test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived 
   const [w4, w5] = outcomes;
   assert.notEqual(w4.jobResult.source_content_hash, w5.jobResult.source_content_hash);
   assert.equal(w4.jobResult.parser_version, w5.jobResult.parser_version);
-  assert.notEqual(
-    w4.jobResult.assurance_observations.progress[0].as_of_date,
-    w5.jobResult.assurance_observations.progress[0].as_of_date,
-  );
+  // The literal actual rows carry each session's own record date; the
+  // deterministic Workplan rows (null as-of) are identical in shape.
+  const actualOf = (outcome) =>
+    outcome.jobResult.assurance_observations.progress.find((row) =>
+      row.excerpt.includes(`Actual %: ${outcome.spec.percent}%`));
+  assert.notEqual(actualOf(w4).as_of_date, actualOf(w5).as_of_date);
 });
 
 test("localized period labels and a sparse workbook layout validate through the extraction seam", async () => {
@@ -892,7 +929,7 @@ test("a generated XLSX keeps a literal cell while a sibling formula has no cache
     ),
   );
   assert.equal(result.status, "completed", result.processing_error);
-  assert.equal(result.parser_version, "document-parser/18");
+  assert.equal(result.parser_version, "document-parser/20");
   assert.equal(result.processing_status, "needs_review");
   assert.match(result.processing_error ?? "", /Formula results are unavailable/);
   assert.ok(groupCalls > 0);
@@ -1880,6 +1917,256 @@ test("row metadata separates the record date, an unrelated due date, and a dupli
   });
 });
 
+test("an unnormalizable raw milestone date stays raw when its due column is proven", async () => {
+  const cells = [
+    {
+      sheetName: WEEKLY, row: 6, column: "A", cell: "A6", label: "Item",
+      value: "Handover", rawValue: "Handover", dateIso: null,
+    },
+    {
+      sheetName: WEEKLY, row: 6, column: "B", cell: "B6", label: "Due Date",
+      value: "end of September 2026", rawValue: "end of September 2026", dateIso: null,
+    },
+    {
+      sheetName: WEEKLY, row: 6, column: "C", cell: "C6", label: "Cut-off Date",
+      value: "16 Oktober 2026", rawValue: "16 Oktober 2026", dateIso: null,
+    },
+  ];
+  const cellReference = (sourceId, cell) => ({
+    sourceId,
+    chunkIndex: 0,
+    text: `${cell.label}: ${cell.value}`,
+    modelText: `${cell.label}: ${cell.value}`,
+    sourceLocation: {
+      kind: "xlsx",
+      sheetName: WEEKLY,
+      tableNumber: 0,
+      rowStart: 6,
+      rowEnd: 6,
+      cellRangeStart: cell.cell,
+      cellRangeEnd: cell.cell,
+    },
+    cell,
+    rowCells: cells,
+  });
+  const due = cellReference("cell-due-raw", cells[1]);
+  const cutoff = cellReference("cell-cutoff-raw", cells[2]);
+  const chunks = [{
+    chunkIndex: 0,
+    chunkText: cells.map((cell) => `${cell.label}: ${cell.value}`).join("\n"),
+    sectionLabel: WEEKLY,
+    sourceReferences: [due, cutoff],
+  }];
+  const textBySource = new Map(chunks[0].sourceReferences.map((reference) => [reference.sourceId, reference.text]));
+  const milestone = (sourceId, label, rawDate) => ({
+    label,
+    raw_date: rawDate,
+    date: null,
+    scope_level: "unknown",
+    scope_label: null,
+    period_label: null,
+    as_of_date: null,
+    excerpt: textBySource.get(sourceId),
+    source_id: sourceId,
+  });
+
+  await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    const output = baseGroupOutput(references);
+    output.assurance_observations.milestones = [
+      milestone("cell-due-raw", "Due Date", "end of September 2026"),
+      milestone("cell-cutoff-raw", "Cut-off Date", "16 Oktober 2026"),
+    ];
+    return modelResponse(output);
+  }, async () => {
+    const result = await extractDocumentGroups(
+      job("raw-dates.txt"),
+      chunks,
+      { parserVersion: "document-parser/19" },
+      memoryGroupStore(),
+    );
+    assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+    const milestones = result.extraction.assurance_observations.milestones;
+    assert.deepEqual(
+      milestones.map((item) => [item.label, item.raw_date, item.date]),
+      [["Due Date", "end of September 2026", null]],
+      "a provable due-column raw date is retained without guessing a normalized date",
+    );
+    assert.match(
+      result.extraction.quality_warnings.join(" "),
+      /milestones\[1\]\.date is the cited row's "Cut-off Date" value, not a due or event date/,
+    );
+  });
+});
+
+test("a literal due date stays a milestone while a cached formula due date requires review", async () => {
+  const buffer = await syntheticFormulaDueWorkbook();
+  const parsed = await parseDocumentBuffer("formula-due-review.xlsx", buffer);
+  assert.equal(parsed.ok, true, parsed.ok ? undefined : parsed.errorMessage);
+  if (!parsed.ok) return;
+  const formulaStatus = (cellReference) =>
+    parsed.chunks.flatMap((chunk) => chunk.formulaCells ?? [])
+      .find((cell) => cell.cellReference === cellReference)?.formulaCacheStatus;
+  assert.equal(formulaStatus("C3"), "cached_value");
+  assert.equal(formulaStatus("D4"), "missing_cache");
+
+  const mock = async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    const cell = (reference) => references.find(
+      (source) =>
+        source.source_location?.cellRangeStart === reference &&
+        source.source_location?.cellRangeEnd === reference,
+    );
+    const literalDue = cell("B2");
+    const cachedDue = cell("C3");
+    const missingDue = cell("D4");
+    assert.ok(literalDue && cachedDue && missingDue, "per-cell references exist for each due column");
+    const milestone = (label, rawDate, reference) => ({
+      label,
+      raw_date: rawDate,
+      date: rawDate,
+      scope_level: "unknown",
+      scope_label: null,
+      period_label: null,
+      as_of_date: null,
+      excerpt: reference.text,
+      source_id: reference.source_id,
+    });
+    const output = baseGroupOutput(references);
+    output.assurance_observations.milestones = [
+      milestone("Due Date", "2026-10-23", literalDue),
+      milestone("Target Date", "2026-10-30", cachedDue),
+      milestone("Milestone Date", "2026-11-06", missingDue),
+    ];
+    return modelResponse(output);
+  };
+
+  const result = await withLocalOllama(mock, async () =>
+    await extractDocumentGroups(
+      job("formula-due-review.xlsx"),
+      parsed.chunks,
+      { parserVersion: "document-parser/19" },
+      memoryGroupStore(),
+    ),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  if (!result.ok) return;
+  assert.deepEqual(
+    result.extraction.assurance_observations.milestones.map((item) => [item.label, item.date]),
+    [["Due Date", "2026-10-23"]],
+    "only the literal due cell is accepted as a fresh milestone date",
+  );
+  const warnings = result.extraction.quality_warnings.join(" ");
+  assert.match(
+    warnings,
+    /milestones\[1\]\.date cites a stored formula result whose freshness is not established; it remains a source-reported candidate for review \(formula_cache_review_required\)/,
+  );
+  assert.match(
+    warnings,
+    /milestones\[2\]\.source cites formula_result_unavailable/,
+  );
+});
+
+test("a split XLSX row keeps a citable due-cell milestone while rejecting its cut-off sibling", async () => {
+  const filler = "x".repeat(1400);
+  const inlineCell = (reference, value) =>
+    `<c r="${reference}" t="inlineStr"><is><t>${value}</t></is></c>`;
+  const header = `<row r="1">${["Item", "Due Date", "Cut-off Date", "Filler D", "Filler E", "Filler F"].map((label, index) => inlineCell(`${String.fromCharCode(65 + index)}1`, label)).join("")}</row>`;
+  const data = `<row r="2">${inlineCell("A2", "Milestone")}${inlineCell("B2", "2026-10-23")}${inlineCell("C2", "2026-10-16")}${inlineCell("D2", `D-${filler}`)}${inlineCell("E2", `E-${filler}`)}${inlineCell("F2", `F-${filler}`)}</row>`;
+  const zip = new JSZip();
+  zip.file("xl/workbook.xml", `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><workbookPr date1904="0"/><sheets><sheet name="${WEEKLY}" sheetId="1"/></sheets></workbook>`);
+  zip.file("xl/styles.xml", `<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs><xf/></cellXfs></styleSheet>`);
+  zip.file("xl/worksheets/sheet1.xml", `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${header}${data}</sheetData></worksheet>`);
+  const buffer = await zip.generateAsync({ type: "nodebuffer" });
+  const parsed = await parseDocumentBuffer(
+    "split-provenance.xlsx",
+    buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
+  );
+  assert.equal(parsed.ok, true, parsed.ok ? undefined : parsed.errorMessage);
+  if (!parsed.ok) return;
+  assert.ok(parsed.chunks.length >= 2, "the long row is split into multiple parts");
+
+  const mock = async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    const output = baseGroupOutput(references);
+    const cellReference = (cell) =>
+      references.find(
+        (reference) =>
+          reference.source_location?.cellRangeStart === cell &&
+          reference.source_location?.cellRangeEnd === cell,
+      );
+    const due = cellReference("B2");
+    const cutoff = cellReference("C2");
+    if (due) {
+      output.assurance_observations.milestones = [
+        {
+          label: "Due Date",
+          raw_date: "2026-10-23",
+          date: "2026-10-23",
+          scope_level: "unknown",
+          scope_label: null,
+          period_label: null,
+          as_of_date: null,
+          excerpt: "Due Date: 2026-10-23",
+          source_id: due.source_id,
+        },
+      ];
+    }
+    if (cutoff) {
+      output.assurance_observations.milestones.push({
+        label: "Cut-off Date",
+        raw_date: "2026-10-16",
+        date: "2026-10-16",
+        scope_level: "unknown",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: "Cut-off Date: 2026-10-16",
+        source_id: cutoff.source_id,
+      });
+    }
+    return modelResponse(output);
+  };
+
+  const result = await withLocalOllama(mock, async () =>
+    await extractDocumentGroups(
+      job("split-provenance.xlsx"),
+      parsed.chunks,
+      { parserVersion: "document-parser/19" },
+      memoryGroupStore(),
+    ),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  if (!result.ok) return;
+  const milestones = result.extraction.assurance_observations.milestones;
+  assert.deepEqual(
+    milestones.map((item) => [item.label, item.date]),
+    [["Due Date", "2026-10-23"]],
+    "only the due column is a milestone date after the row is split",
+  );
+  assert.match(
+    result.extraction.quality_warnings.join(" "),
+    /milestones\[\d+\]\.date is the cited row's "Cut-off Date" value, not a due or event date/,
+  );
+});
+
 test("a stale group cache version is not reused and a cache hit re-derives provenance", async () => {
   const text = "Subsystem / Scope: Alarm Kebencanaan | Progress: 42%";
   const location = {
@@ -1986,7 +2273,7 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
 
   const cold = await runOnce("document-parser/18");
   assert.equal(cold.ok, true, cold.ok ? undefined : cold.errorMessage);
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
   assert.equal(cold.extraction.assurance_observations.progress[0].percent, 42);
   assert.deepEqual(
     cold.extraction.assurance_observations.progress[0].source_location,
@@ -1997,7 +2284,6 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
   assert.equal(cached.parserVersion, "document-parser/18");
-  assert.equal(cached.schemaVersion, "phase6-document-extraction/34");
 
   assert.equal(cached.status, "completed");
   assert.deepEqual(
@@ -2030,13 +2316,15 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
   );
 
   // A row written by an older parser version produces a different group key, so
-  // the stale payload is neither selected nor trusted.
+  // the stale payload is neither selected nor trusted. The marker states a
+  // milestone carrying the source percentage, since a bare progress percentage
+  // is no longer accepted as a milestone fact.
   calls = 0;
-  marker = "Progress: 42%";
+  marker = "Topping off reached 42% complete";
   const stale = await runOnce("document-parser/14");
   assert.equal(stale.ok, true, stale.ok ? undefined : stale.errorMessage);
-  assert.equal(calls, 1, "the stale cached group is re-extracted");
-  assert.equal(stale.extraction.facts[0].extracted_text, "Progress: 42%");
+  assert.equal(calls, 2, "the stale cached group is re-extracted by both tasks");
+  assert.equal(stale.extraction.facts[0].extracted_text, "Topping off reached 42% complete");
   assert.equal(store.rows.size, 2);
 });
 
@@ -2695,4 +2983,591 @@ test("health snapshots retain only explicit dimension statuses and record dates"
   assert.match(warnings, /health_snapshots\[0\]\.snapshot_date.*due or event date, not a record date/);
   assert.match(warnings, /health_snapshots\[1\]\.status was replaced with the source-reported green status/);
   assert.match(warnings, /health_snapshots\[2\]\.status is not supported by an explicit dimension-specific source field/);
+});
+
+// Regression: one value can carry two explicit roles in the same narrative
+// ("Reporting date 18 September 2026, milestone due 18 September 2026"). The
+// due role must win for a milestone while a record-only value still cannot
+// become one.
+test("a milestone date keeps an explicit due role when the same value is also the reporting date", async () => {
+  const scenarios = [
+    {
+      name: "one clause",
+      text: "Reporting date 18 September 2026, milestone due 18 September 2026",
+    },
+    {
+      name: "separate clauses",
+      text: "Report date: 18 September 2026 | Milestone due: 18 September 2026",
+    },
+  ];
+  for (const scenario of scenarios) {
+    const chunks = [{
+      chunkIndex: 0,
+      chunkText: scenario.text,
+      sourceReferences: [{
+        sourceId: "narrative-same-date",
+        chunkIndex: 0,
+        text: scenario.text,
+        modelText: scenario.text,
+      }],
+    }];
+    const result = await withLocalOllama(async (_url, init) => {
+      const prompt = JSON.parse(init.body).messages[1].content;
+      if (isExecutiveSummaryPrompt(prompt)) {
+        const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+        return modelResponse(executiveSummaryOutput(input));
+      }
+      const references = documentContextFromPrompt(prompt);
+      if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+      const output = baseGroupOutput(references);
+      output.assurance_observations.milestones = [{
+        label: "Milestone due",
+        raw_date: "18 September 2026",
+        date: "2026-09-18",
+        scope_level: "unknown",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: scenario.text,
+        source_id: "narrative-same-date",
+      }];
+      return modelResponse(output);
+    }, async () =>
+      await extractDocumentGroups(
+        job(scenario.text, { fileName: "milestone-date-role.txt" }),
+        chunks,
+        { parserVersion: `milestone-date-role-${scenario.name.replaceAll(" ", "-")}` },
+        memoryGroupStore(),
+      ),
+    );
+    assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+    assert.deepEqual(
+      result.extraction.assurance_observations.milestones.map((item) => [item.raw_date, item.date]),
+      [["18 September 2026", "2026-09-18"]],
+      `${scenario.name}: the value's explicit due role is preserved`,
+    );
+    assert.doesNotMatch(
+      result.extraction.quality_warnings.join(" "),
+      /milestones\[0\]\.date/,
+      `${scenario.name}: a valid due date is not rejected as a record date`,
+    );
+  }
+});
+
+test("a record-only or conflicting narrative date cannot become a milestone date", async () => {
+  const scenarios = [
+    {
+      name: "record only",
+      text: "Reporting date 18 September 2026",
+    },
+    {
+      name: "record plus a different due date",
+      text: "Reporting date 18 September 2026, milestone due 20 September 2026",
+    },
+  ];
+  for (const scenario of scenarios) {
+    const chunks = [{
+      chunkIndex: 0,
+      chunkText: scenario.text,
+      sourceReferences: [{
+        sourceId: "narrative-record-date",
+        chunkIndex: 0,
+        text: scenario.text,
+        modelText: scenario.text,
+      }],
+    }];
+    const result = await withLocalOllama(async (_url, init) => {
+      const prompt = JSON.parse(init.body).messages[1].content;
+      if (isExecutiveSummaryPrompt(prompt)) {
+        const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+        return modelResponse(executiveSummaryOutput(input));
+      }
+      const references = documentContextFromPrompt(prompt);
+      if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+      const output = baseGroupOutput(references);
+      output.assurance_observations.milestones = [{
+        label: "Reporting date",
+        raw_date: "18 September 2026",
+        date: "2026-09-18",
+        scope_level: "unknown",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        excerpt: scenario.text,
+        source_id: "narrative-record-date",
+      }];
+      return modelResponse(output);
+    }, async () =>
+      await extractDocumentGroups(
+        job(scenario.text, { fileName: "milestone-record-date.txt" }),
+        chunks,
+        { parserVersion: `milestone-record-date-${scenario.name.replaceAll(" ", "-")}` },
+        memoryGroupStore(),
+      ),
+    );
+    assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+    assert.deepEqual(
+      result.extraction.assurance_observations.milestones,
+      [],
+      `${scenario.name}: a record date is not accepted as a milestone date`,
+    );
+    assert.match(
+      result.extraction.quality_warnings.join(" "),
+      /milestones\[0\]\.date is the cited narrative's record date, not a due or event date/,
+      `${scenario.name}: the rejection is reported`,
+    );
+  }
+});
+
+// The monolithic group prompt was decomposed into two narrower tasks (group
+// analysis and domain evidence) over the same bounded sources. These tests pin
+// the decomposition contract at the extractDocumentGroups seam: both tasks are
+// evidence-led over the same source references, a task loss never becomes
+// absent evidence, retries re-send both tasks, and cached groups skip both.
+test("decomposed group tasks share one evidence-led citation surface per group", async () => {
+  const text = "Progress: 42% | Approved project budget USD 1,000,000 | Risk R-1: Delay is Open and rated High.";
+  const chunks = [{
+    chunkIndex: 0,
+    chunkText: text,
+    sectionLabel: "Weekly",
+  }];
+  const taskPrompts = [];
+  const mock = (analysis, domain) => async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    taskPrompts.push(prompt);
+    const output = prompt.includes("Task: collect every source-backed cost")
+      ? domain(references)
+      : analysis(references);
+    return modelResponse(output);
+  };
+  // The analysis task answers only the analysis fields; the domain task answers
+  // only cost and assurance observations. The worker must reconstruct the full
+  // contract from the two partial outputs.
+  const analysisOutput = (references) => {
+    const output = baseGroupOutput(references);
+    delete output.cost_observations;
+    delete output.assurance_observations;
+    return output;
+  };
+  const domainOutput = (references) => {
+    const sourceId = references[0].source_id;
+    return {
+      cost_observations: [{
+        measure: "approved_baseline",
+        source_value: "USD 1,000,000",
+        scope_level: "project",
+        scope_label: null,
+        period_label: null,
+        as_of_date: null,
+        status_label: null,
+        source_id: sourceId,
+      }],
+      assurance_observations: {
+        milestones: [],
+        progress: [{
+          raw_value: "42%",
+          percent: 42,
+          scope_level: "project",
+          scope_label: null,
+          period_label: null,
+          as_of_date: null,
+          excerpt: "Progress: 42%",
+          source_id: sourceId,
+        }],
+        risk_snapshots: [{
+          risk_id: "R-1",
+          name: "Delay",
+          description: null,
+          status: "Open",
+          rating_label: "High",
+          rating_value: null,
+          scale_label: null,
+          owner: null,
+          mitigation: null,
+          mitigation_due_date: null,
+          raw_mitigation_due_date: null,
+          wbs: null,
+          period_label: null,
+          as_of_date: null,
+          raw_value: "Risk R-1: Delay is Open and rated High.",
+          excerpt: "Risk R-1: Delay is Open and rated High.",
+          source_id: sourceId,
+        }],
+        risk_register_statements: [],
+      },
+    };
+  };
+  const result = await withLocalOllama(mock(analysisOutput, domainOutput), async () =>
+    await extractDocumentGroups(
+      job(text, { fileName: "decomposition-tasks.txt" }),
+      chunks,
+      { parserVersion: "decomposition-tasks-v1" },
+      memoryGroupStore(),
+    ),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+
+  // One analysis prompt and one domain prompt per group, both over the same
+  // source references with the same group header.
+  assert.equal(taskPrompts.length, 2);
+  assert.match(taskPrompts[0], /Task: analyze this bounded group/);
+  assert.match(taskPrompts[1], /Task: collect every source-backed cost/);
+  const referencesByTask = taskPrompts.map((prompt) =>
+    JSON.parse(prompt.match(/^SOURCE_REFERENCES_JSON=(.+)$/m)[1]),
+  );
+  assert.deepEqual(referencesByTask[0], referencesByTask[1]);
+  assert.match(taskPrompts[0], /This request contains group 1 and global source chunk indexes 0-0/);
+  assert.match(taskPrompts[1], /This request contains group 1 and global source chunk indexes 0-0/);
+  // The analysis task is told its missing domain arrays mean nothing about the
+  // domain task's coverage: no silent domain gating either way.
+  assert.match(taskPrompts[0], /do not treat their absence as evidence that no cost or assurance values exist/);
+  // The domain task keeps the evidence-led, document-type-independent rule.
+  assert.match(taskPrompts[1], /whatever the artifact's primary type/);
+
+  // Full consumer contract reconstructed from the two tasks and validated by
+  // the unchanged fail-closed validator.
+  const extraction = result.extraction;
+  assert.equal(extraction.cost_observations[0].normalized_amount, 1_000_000);
+  assert.deepEqual(
+    extraction.assurance_observations.progress.map((item) => item.percent),
+    [42],
+  );
+  assert.equal(extraction.assurance_observations.risk_snapshots[0].risk_id, "R-1");
+  assert.ok(extraction.facts.length === 0);
+  const coverage = Object.fromEntries(
+    extraction.assurance_observation_coverage.map((row) => [row.domain, row.state]),
+  );
+  assert.equal(coverage.budget, "processed");
+  assert.equal(coverage.progress, "processed");
+  assert.equal(coverage.risk, "processed");
+  assert.equal(coverage.schedule, "absent");
+  // Aggregation still derives the whole document shape: suggestions, summary
+  // sources, health snapshots, and the observation contract version.
+  assert.equal(extraction.document_suggestions.suggested_document_type, "progress_report");
+  assert.equal(extraction.assurance_observation_contract_version, "pmo-assurance-observations/1");
+  assert.equal(extraction.health_snapshots.length, 6);
+  assert.ok(extraction.summary_sources.length >= 1);
+});
+
+test("a lost domain task output stays retryable failure, never absent evidence", async () => {
+  const text = "Progress: 42% over W4.";
+  const chunks = [{ chunkIndex: 0, chunkText: text, sectionLabel: "Weekly" }];
+  const store = memoryGroupStore();
+  let domainTaskCalls = 0;
+  let analysisTaskCalls = 0;
+  let checkPointedRows = [];
+  const saveGroup = store.saveGroup.bind(store);
+  store.saveGroup = async (row) => {
+    checkPointedRows.push(row);
+    return await saveGroup(row);
+  };
+  const mock = async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    if (prompt.includes("Task: collect every source-backed cost")) {
+      domainTaskCalls += 1;
+      // Every retry of the domain task also fails; the group must never
+      // complete from analysis output alone.
+      return new Response("quota exceeded", { status: 429 });
+    }
+    analysisTaskCalls += 1;
+    return modelResponse(baseGroupOutput(references));
+  };
+  const outcome = await withLocalOllama(mock, async () =>
+    await extractDocumentGroups(
+      job(text, { fileName: "domain-task-failure.txt" }),
+      chunks,
+      { parserVersion: "domain-task-failure-v1" },
+      store,
+    ),
+  );
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.errorCode, "llm_provider_transient_failure");
+  assert.match(outcome.errorMessage, /HTTP 429/);
+  // Both tasks ran, retried together, and the group was checkpointed failed
+  // with a retryable attempt count, not as a completed empty extraction.
+  assert.equal(analysisTaskCalls, 2);
+  assert.equal(domainTaskCalls, 2);
+  const row = checkPointedRows.at(-1);
+  assert.equal(row.status, "failed");
+  assert.equal(row.result, null);
+  assert.equal(row.attemptCount, 2);
+  // No completed row exists that could later be misread as "no evidence".
+  assert.equal([...store.rows.values()].some((entry) => entry.status === "completed"), false);
+});
+
+test("a lost analysis task output also fails closed with a checkpointed retry", async () => {
+  const text = "Schedule status is Red and the delivery owner is Amar.";
+  const chunks = [{ chunkIndex: 0, chunkText: text, sectionLabel: "Weekly" }];
+  const store = memoryGroupStore();
+  let analysisTaskCalls = 0;
+  let domainTaskCalls = 0;
+  const mock = async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    if (prompt.includes("Task: analyze this bounded group")) {
+      analysisTaskCalls += 1;
+      return modelResponse("not json");
+    }
+    domainTaskCalls += 1;
+    return modelResponse(baseGroupOutput(references));
+  };
+  const outcome = await withLocalOllama(mock, async () =>
+    await extractDocumentGroups(
+      job(text, { fileName: "analysis-task-failure.txt" }),
+      chunks,
+      { parserVersion: "analysis-task-failure-v1" },
+      store,
+    ),
+  );
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.errorCode, "llm_group_extraction_failed");
+  assert.match(outcome.errorMessage, /The group analysis task returned invalid JSON/);
+  // The analysis task retried, but the unusable analysis output means the
+  // domain call is never spent on a round that must be discarded.
+  assert.equal(analysisTaskCalls, 2);
+  assert.equal(domainTaskCalls, 0);
+  const row = [...store.rows.values()][0];
+  assert.equal(row.status, "failed");
+  assert.equal(row.result, null);
+});
+
+test("missing domain fields fail closed even when analysis echoes stray placeholders", async () => {
+  const text = "Progress: 42% over W4.";
+  const chunks = [{ chunkIndex: 0, chunkText: text, sectionLabel: "Weekly" }];
+  const store = memoryGroupStore();
+  let analysisTaskCalls = 0;
+  let domainTaskCalls = 0;
+  const mock = async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    if (prompt.includes("Task: collect every source-backed cost")) {
+      domainTaskCalls += 1;
+      // The domain task answers with an object that owns no required fields;
+      // this must never be read as "no cost or assurance evidence".
+      return modelResponse({});
+    }
+    analysisTaskCalls += 1;
+    // The analysis task also returns empty cost/assurance placeholders; the
+    // merge must not use them to stand in for the missing domain fields.
+    return modelResponse(baseGroupOutput(references));
+  };
+  const outcome = await withLocalOllama(mock, async () =>
+    await extractDocumentGroups(
+      job(text, { fileName: "missing-domain-fields.txt" }),
+      chunks,
+      { parserVersion: "missing-domain-fields-v1" },
+      store,
+    ),
+  );
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.errorCode, "llm_group_extraction_failed");
+  assert.match(outcome.errorMessage, /domain task did not return cost_observations, assurance_observations/);
+  assert.equal(analysisTaskCalls, 2);
+  assert.equal(domainTaskCalls, 2);
+  // No completed checkpoint row exists that a later run could misread as a
+  // validated "no evidence" result.
+  assert.equal([...store.rows.values()].some((entry) => entry.status === "completed"), false);
+  const row = [...store.rows.values()][0];
+  assert.equal(row.status, "failed");
+  assert.equal(row.result, null);
+});
+
+test("missing nested assurance arrays do not become completed empty evidence", async () => {
+  const text = "Progress: 42% over W4.";
+  const chunks = [{ chunkIndex: 0, chunkText: text, sectionLabel: "Weekly" }];
+  const store = memoryGroupStore();
+  const mock = async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    if (prompt.includes("Task: collect every source-backed cost")) {
+      return modelResponse({ cost_observations: [], assurance_observations: {} });
+    }
+    return modelResponse(baseGroupOutput(references));
+  };
+  const outcome = await withLocalOllama(mock, async () =>
+    await extractDocumentGroups(job(text), chunks, { parserVersion: "nested-arrays-v1" }, store),
+  );
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.errorCode, "llm_group_extraction_failed");
+  assert.equal([...store.rows.values()].some((entry) => entry.status === "completed"), false);
+});
+
+test("missing analysis fields fail closed even when the domain task echoes them", async () => {
+  const text = "Progress: 42% over W4.";
+  const chunks = [{ chunkIndex: 0, chunkText: text, sectionLabel: "Weekly" }];
+  const store = memoryGroupStore();
+  let analysisTaskCalls = 0;
+  let domainTaskCalls = 0;
+  const mock = async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    if (prompt.includes("Task: collect every source-backed cost")) {
+      domainTaskCalls += 1;
+      // The domain task echoes the narrative fields the analysis task dropped;
+      // the echo cannot stand in for the owning task's required output.
+      const output = baseGroupOutput(references);
+      output.facts = [{
+        fact_type: "milestone",
+        extracted_text: "42%",
+        original_value: "42%",
+        confidence: 0.8,
+        source_id: references[0].source_id,
+      }];
+      return modelResponse(output);
+    }
+    analysisTaskCalls += 1;
+    const output = baseGroupOutput(references);
+    delete output.facts;
+    return modelResponse(output);
+  };
+  const outcome = await withLocalOllama(mock, async () =>
+    await extractDocumentGroups(
+      job(text, { fileName: "missing-analysis-fields.txt" }),
+      chunks,
+      { parserVersion: "missing-analysis-fields-v1" },
+      store,
+    ),
+  );
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.errorCode, "llm_group_extraction_failed");
+  assert.match(outcome.errorMessage, /analysis task did not return facts/);
+  assert.equal(analysisTaskCalls, 2);
+  assert.equal(domainTaskCalls, 2);
+  assert.equal([...store.rows.values()].some((entry) => entry.status === "completed"), false);
+  const row = [...store.rows.values()][0];
+  assert.equal(row.status, "failed");
+  assert.equal(row.result, null);
+});
+
+test("the validation correction round re-sends both decomposed tasks", async () => {
+  const text = "Progress: 42% over W4.";
+  const chunks = [{ chunkIndex: 0, chunkText: text, sectionLabel: "Weekly" }];
+  let analysisTaskCalls = 0;
+  let domainTaskCalls = 0;
+  const mock = async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    if (prompt.includes("Previous response validation errors")) {
+      // Corrected round: both tasks return valid output.
+      if (prompt.includes("Task: collect every source-backed cost")) {
+        domainTaskCalls += 1;
+        return modelResponse(baseGroupOutput(references));
+      }
+      analysisTaskCalls += 1;
+      const output = baseGroupOutput(references);
+      output.facts = [{
+        fact_type: "milestone",
+        extracted_text: "42%",
+        original_value: "42%",
+        confidence: 0.8,
+        source_id: references[0].source_id,
+      }];
+      return modelResponse(output);
+    }
+    if (prompt.includes("Task: collect every source-backed cost")) {
+      domainTaskCalls += 1;
+      return modelResponse(baseGroupOutput(references));
+    }
+    analysisTaskCalls += 1;
+    // First round: the analysis task cites a source ID that does not exist.
+    const output = baseGroupOutput(references);
+    output.facts = [{
+      fact_type: "milestone",
+      extracted_text: "42%",
+      original_value: "42%",
+      confidence: 0.8,
+      source_id: `${references[0].source_id}-missing`,
+    }];
+    return modelResponse(output);
+  };
+  const result = await withLocalOllama(mock, async () =>
+    await extractDocumentGroups(
+      job(text, { fileName: "correction-tasks.txt" }),
+      chunks,
+      { parserVersion: "correction-tasks-v1" },
+      memoryGroupStore(),
+    ),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  assert.deepEqual(result.extraction.facts.map((fact) => fact.extracted_text), ["42%"]);
+  assert.equal(analysisTaskCalls, 2);
+  assert.equal(domainTaskCalls, 2);
+});
+
+test("a warm cache hit skips both decomposed task prompts", async () => {
+  const text = "Progress: 42% over W4.";
+  const chunks = [{ chunkIndex: 0, chunkText: text, sectionLabel: "Weekly" }];
+  const store = memoryGroupStore();
+  let taskCalls = 0;
+  const mock = async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    taskCalls += 1;
+    const output = baseGroupOutput(references);
+    output.facts = [{
+      fact_type: "milestone",
+      extracted_text: "42%",
+      original_value: "42%",
+      confidence: 0.8,
+      source_id: references[0].source_id,
+    }];
+    return modelResponse(output);
+  };
+  const runOnce = () =>
+    withLocalOllama(mock, async () =>
+      await extractDocumentGroups(
+        job(text, { fileName: "warm-cache-tasks.txt" }),
+        chunks,
+        { parserVersion: "warm-cache-tasks-v1" },
+        store,
+      ),
+    );
+  const cold = await runOnce();
+  assert.equal(cold.ok, true, cold.ok ? undefined : cold.errorMessage);
+  assert.equal(taskCalls, 2);
+  const warm = await runOnce();
+  assert.equal(warm.ok, true, warm.ok ? undefined : warm.errorMessage);
+  assert.equal(taskCalls, 2, "the cached group re-runs neither task");
+  assert.deepEqual(
+    warm.extraction.facts.map((fact) => fact.extracted_text),
+    ["42%"],
+  );
 });

@@ -188,14 +188,15 @@ function validModelOutput(
         suggested_workstream: null,
         source_id: null,
       };
+  const facts = [{
+    fact_type: "risk",
+    extracted_text: excerpt,
+    original_value: excerpt,
+    confidence: 0.81,
+    source_id: sourceId,
+  }];
   return {
-    facts: [{
-      fact_type: "risk",
-      extracted_text: excerpt,
-      original_value: excerpt,
-      confidence: 0.81,
-      source_id: sourceId,
-    }],
+    facts,
     summary: {
       summary_text: `Source group summary: ${excerpt}`,
       confidence: 0.79,
@@ -212,6 +213,11 @@ function validModelOutput(
     ],
     alerts: [],
     actions: [],
+    // Both group tasks receive the full object; the worker's group task is
+    // decomposed into analysis + domain prompts over the same sources, and the
+    // validator reads only the fields each task is asked for. Decomposition
+    // behavior (a group whose analysis output lost its cost rows, for example)
+    // is covered by dedicated decomposition tests.
     cost_observations: [],
     assurance_observations: {
       milestones: [],
@@ -329,7 +335,7 @@ test("bounded groups retry only failed work, reuse exact cached outputs, and kee
     assert.equal(partial.status, "completed", `${partial.errorCode}: ${partial.errorMessage}`);
     assert.equal(partial.processing_status, "needs_review");
     assert.match(partial.processing_error, /facts\[0\].*excluded/i);
-    assert.equal(calls, 6);
+    assert.equal(calls, 10);
     assert.ok(maximumActive <= 2);
     assert.equal([...store.rows.values()].filter((row) => row.status === "completed").length, 2);
     assert.equal([...store.rows.values()].filter((row) => row.status === "failed").length, 1);
@@ -342,7 +348,7 @@ test("bounded groups retry only failed work, reuse exact cached outputs, and kee
     );
     assert.equal(retried.status, "completed");
     assert.equal(retried.processing_status, "needs_review");
-    assert.equal(calls, beforeRetry + 3);
+    assert.equal(calls, beforeRetry + 4);
     assert.deepEqual(retried.facts.map((fact) => fact.evidence_chunk_index), [0, 2, 4]);
     assert.equal(new Set(retried.facts.map((fact) => fact.evidence_chunk_index)).size, 3);
     assert.equal(retried.document_suggestions.suggested_document_type, "progress_report");
@@ -377,7 +383,7 @@ test("bounded groups retry only failed work, reuse exact cached outputs, and kee
       store,
     );
     assert.equal(replaced.status, "completed");
-    assert.equal(calls, beforeReplacement + 5);
+    assert.equal(calls, beforeReplacement + 8);
     assert.ok(replaced.facts.some((fact) => fact.extracted_text.includes("REPLACED")));
     assert.ok(replaced.facts.every((fact) => !fact.extracted_text.includes("ORIGINAL")));
     assert.ok([...store.rows.values()].every((row) => /^[0-9a-f]{64}$/.test(row.groupKey)));
@@ -400,7 +406,7 @@ test("one invalid optional fact preserves validated outputs and marks the docume
     );
     assert.equal(result.status, "completed");
     assert.equal(result.processing_status, "needs_review");
-    assert.equal(calls, 4);
+    assert.equal(calls, 6);
     assert.equal(result.facts.length, 1);
     assert.equal(result.summary.summary_text, "- The project status remains under review.");
     assert.equal(result.document_suggestions.suggested_document_type, "progress_report");
@@ -408,6 +414,274 @@ test("one invalid optional fact preserves validated outputs and marks the docume
     assert.match(result.summary.quality_warning, /facts\[1\].*excluded/i);
     assert.equal([...store.rows.values()][0].result, null);
     assert.equal([...store.rows.values()][0].status, "failed");
+  });
+});
+test("a progress percentage typed as a milestone fact is corrected, while stated milestones and progress survive", async () => {
+  const narrative = [
+    "WEEKLY ASSURANCE NOTE (synthetic).",
+    "Progress pekerjaan: 5%.",
+    "Physical progress has reached 25%.",
+    "Milestone: topping off gedung direncanakan 3 Februari 2026.",
+    "Tower crane erection reached 50% complete.",
+    "RISK R-1: Tower crane delivery is Open and rated High.",
+  ].join(" ");
+  const riskFact = (sourceId) => ({
+    fact_type: "risk",
+    extracted_text: "Tower crane delivery is Open and rated High",
+    original_value: "RISK R-1: Tower crane delivery is Open and rated High",
+    confidence: 0.95,
+    source_id: sourceId,
+  });
+  const fakeMilestone = (sourceId) => ({
+    fact_type: "milestone",
+    extracted_text: "Progress pekerjaan: 5%",
+    original_value: "5%",
+    confidence: 0.9,
+    source_id: sourceId,
+  });
+  const trueMilestoneId = (sourceId) => ({
+    fact_type: "milestone",
+    extracted_text: "Milestone: topping off gedung direncanakan 3 Februari 2026",
+    original_value: "Milestone: topping off gedung direncanakan 3 Februari 2026",
+    confidence: 0.9,
+    source_id: sourceId,
+  });
+  const milestoneMentioningProgress = (sourceId) => ({
+    fact_type: "milestone",
+    extracted_text: "Tower crane erection reached 50% complete",
+    original_value: "Tower crane erection reached 50% complete",
+    confidence: 0.9,
+    source_id: sourceId,
+  });
+  const store = memoryGroupStore();
+  let analysisCalls = 0;
+  await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = executiveSummaryContextFromPrompt(prompt);
+      return modelResponse({
+        summary_text: "- Synthetic weekly assurance note.",
+        confidence: 0.9,
+        source_indexes: [input.sources[0].source_index],
+      });
+    }
+    if (prompt.startsWith("Classify the entire document")) {
+      const sources = documentContextFromPrompt(prompt);
+      return modelResponse({
+        document_suggestions: {
+          suggested_document_type: "progress_report",
+          suggested_evidence_role: "current",
+          classification_confidence: 0.9,
+          classification_reason: "The source reports weekly progress and milestones.",
+          source_id: sources[0].source_id,
+        },
+        quality_warning: null,
+      });
+    }
+    const sources = documentContextFromPrompt(prompt);
+    const sourceId = sources[0].source_id;
+    if (prompt.includes("Task: analyze this bounded group")) {
+      analysisCalls += 1;
+      return modelResponse({
+        facts: analysisCalls === 1
+          ? [riskFact(sourceId), fakeMilestone(sourceId)]
+          : [riskFact(sourceId), trueMilestoneId(sourceId), milestoneMentioningProgress(sourceId)],
+        summary: {
+          summary_text: "- Weekly progress, milestones, and risk status.",
+          confidence: 0.8,
+          quality_warning: null,
+          sources: [{ source_id: sourceId }],
+        },
+        health_snapshots: ["overall", "schedule", "cost", "risk", "governance", "audit_readiness"].map((dimension) => ({
+          dimension,
+          score: null,
+          status: "insufficient_evidence",
+          evidence_coverage: null,
+          status_text: `No validated ${dimension} status in this group.`,
+          source_summary: `No ${dimension} evidence in this group.`,
+          snapshot_date: null,
+          source_id: null,
+        })),
+        alerts: [],
+        actions: [],
+        group_metadata_suggestions: {
+          suggested_document_date: null,
+          detected_reporting_period: null,
+          suggested_workstream: null,
+          source_id: null,
+        },
+      });
+    }
+    return modelResponse({
+      cost_observations: [],
+      assurance_observations: {
+        milestones: [],
+        progress: [{
+          raw_value: "5%",
+          percent: 5,
+          scope_level: "project",
+          scope_label: null,
+          scope_source_id: null,
+          period_label: null,
+          as_of_date: null,
+          excerpt: "Progress pekerjaan: 5%.",
+          source_id: sourceId,
+        }],
+        risk_snapshots: [],
+        risk_register_statements: [],
+      },
+    });
+  }, async () => {
+    const result = await processDocumentJob(
+      job(narrative, { documentTypeHint: "progress_report" }),
+      store,
+    );
+    assert.equal(result.status, "completed", result.processing_error);
+    assert.equal(result.processing_status, "completed", result.processing_error);
+    assert.equal(result.processing_error, null);
+    // The mis-typed progress fact is gone; correctly stated milestones (an
+    // Indonesian declared milestone and an English completion event that
+    // merely mentions a percentage) are both published.
+    assert.ok(!result.facts.some((fact) => fact.extracted_text === "Progress pekerjaan: 5%"));
+    assert.ok(result.facts.some((fact) =>
+      fact.fact_type === "risk" && fact.extracted_text.includes("Tower crane delivery"),
+    ));
+    assert.ok(result.facts.some((fact) =>
+      fact.fact_type === "milestone" && fact.extracted_text.includes("topping off gedung"),
+    ));
+    assert.ok(result.facts.some((fact) =>
+      fact.fact_type === "milestone" && fact.extracted_text.includes("Tower crane erection"),
+    ));
+    // The same percentage stays available through the progress channel.
+    assert.deepEqual(
+      result.assurance_observations.progress.map((row) => row.percent),
+      [5],
+    );
+    assert.equal([...store.rows.values()][0].status, "completed");
+    assert.ok([...store.rows.values()][0].result !== null, "a corrected group checkpoints as reusable");
+  });
+});
+test("a persistent progress-percentage milestone fact fails the group closed and never publishes as verified", async () => {
+  const narrative = [
+    "WEEKLY ASSURANCE NOTE (synthetic).",
+    "Progress pekerjaan: 5%.",
+    "Physical progress has reached 25%.",
+    "RISK R-1: Tower crane delivery is Open and rated High.",
+  ].join(" ");
+  const riskFact = (sourceId) => ({
+    fact_type: "risk",
+    extracted_text: "Tower crane delivery is Open and rated High",
+    original_value: "RISK R-1: Tower crane delivery is Open and rated High",
+    confidence: 0.95,
+    source_id: sourceId,
+  });
+  const fakeMilestoneId = (sourceId) => ({
+    fact_type: "milestone",
+    extracted_text: "Progress pekerjaan: 5%",
+    original_value: "5%",
+    confidence: 0.9,
+    source_id: sourceId,
+  });
+  const fakeMilestoneEn = (sourceId) => ({
+    fact_type: "milestone",
+    extracted_text: "Physical progress has reached 25%",
+    original_value: "25%",
+    confidence: 0.9,
+    source_id: sourceId,
+  });
+  const store = memoryGroupStore();
+  await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = executiveSummaryContextFromPrompt(prompt);
+      return modelResponse({
+        summary_text: "- Synthetic weekly assurance note.",
+        confidence: 0.9,
+        source_indexes: [input.sources[0].source_index],
+      });
+    }
+    if (prompt.startsWith("Classify the entire document")) {
+      const sources = documentContextFromPrompt(prompt);
+      return modelResponse({
+        document_suggestions: {
+          suggested_document_type: "progress_report",
+          suggested_evidence_role: "current",
+          classification_confidence: 0.9,
+          classification_reason: "The source reports weekly progress.",
+          source_id: sources[0].source_id,
+        },
+        quality_warning: null,
+      });
+    }
+    const sources = documentContextFromPrompt(prompt);
+    const sourceId = sources[0].source_id;
+    if (prompt.includes("Task: analyze this bounded group")) {
+      return modelResponse({
+        facts: [riskFact(sourceId), fakeMilestoneId(sourceId), fakeMilestoneEn(sourceId)],
+        summary: {
+          summary_text: "- Weekly progress and risk status.",
+          confidence: 0.8,
+          quality_warning: null,
+          sources: [{ source_id: sourceId }],
+        },
+        health_snapshots: ["overall", "schedule", "cost", "risk", "governance", "audit_readiness"].map((dimension) => ({
+          dimension,
+          score: null,
+          status: "insufficient_evidence",
+          evidence_coverage: null,
+          status_text: `No validated ${dimension} status in this group.`,
+          source_summary: `No ${dimension} evidence in this group.`,
+          snapshot_date: null,
+          source_id: null,
+        })),
+        alerts: [],
+        actions: [],
+        group_metadata_suggestions: {
+          suggested_document_date: null,
+          detected_reporting_period: null,
+          suggested_workstream: null,
+          source_id: null,
+        },
+      });
+    }
+    return modelResponse({
+      cost_observations: [],
+      assurance_observations: {
+        milestones: [],
+        progress: [{
+          raw_value: "5%",
+          percent: 5,
+          scope_level: "project",
+          scope_label: null,
+          scope_source_id: null,
+          period_label: null,
+          as_of_date: null,
+          excerpt: "Progress pekerjaan: 5%.",
+          source_id: sourceId,
+        }],
+        risk_snapshots: [],
+        risk_register_statements: [],
+      },
+    });
+  }, async () => {
+    const result = await processDocumentJob(job(narrative), store);
+    assert.equal(result.status, "completed");
+    // The document is held for human review instead of presenting the
+    // unsupported milestone typing as verified extraction output.
+    assert.equal(result.processing_status, "needs_review");
+    assert.match(result.processing_error, /facts\[1\].*types a progress percentage as a milestone/i);
+    assert.match(result.processing_error, /facts\[2\].*types a progress percentage as a milestone/i);
+    // Neither the Indonesian nor the English mis-typed fact is published.
+    assert.ok(result.facts.every((fact) => fact.fact_type !== "milestone"));
+    assert.ok(result.facts.some((fact) =>
+      fact.fact_type === "risk" && fact.extracted_text.includes("Tower crane delivery"),
+    ));
+    // The group checkpoint is failed with no reusable result, so a cache read
+    // can never resurrect the rejected fact as a completed extraction.
+    const row = [...store.rows.values()][0];
+    assert.equal(row.status, "failed");
+    assert.equal(row.result, null);
+    assert.match(row.lastError, /types a progress percentage as a milestone/i);
   });
 });
 
@@ -683,7 +957,7 @@ test("invalid fact citations are excluded with an explicit review warning", asyn
     assert.equal(result.processing_status, "needs_review");
     assert.equal(result.facts.length, 0);
     assert.match(result.processing_error, /facts\[0\].*excluded/i);
-    assert.equal(calls, 4);
+    assert.equal(calls, 6);
     assert.equal([...store.rows.values()][0].status, "failed");
   });
 });
@@ -709,7 +983,7 @@ test("a valid correction on the final bounded attempt is accepted", async () => 
     );
     assert.equal(result.status, "completed");
     assert.equal(result.processing_status, "completed");
-    assert.equal(calls, 4);
+    assert.equal(calls, 6);
     assert.ok(result.facts[0].evidence_chunk_index >= 0);
   });
 });
@@ -800,7 +1074,7 @@ test("provider concurrency stays bounded across simultaneous document jobs", asy
     ]);
     assert.equal(first.status, "completed");
     assert.equal(second.status, "completed");
-    assert.equal(calls, 10);
+    assert.equal(calls, 16);
     assert.equal(maximumActive, 2);
   });
 });
@@ -961,7 +1235,7 @@ test("per-document extraction ceiling allows 32 groups and rejects 33 before mod
       store,
     );
     assert.equal(atLimit.ok, true);
-    assert.equal(calls, 34);
+    assert.equal(calls, 66);
     const priorCalls = calls;
     const overLimit = await extractDocumentGroups(
       job("oversized document"),
@@ -1042,7 +1316,7 @@ test("accepts a complete JSON object with plain trailing commentary and escaped 
     const source = `RISK SOURCE has {braces}, [brackets], "quoted text", and \\ escaped text. ${"evidence detail ".repeat(40)}`;
     const result = await processDocumentJob(job(source), memoryGroupStore());
     assert.equal(result.status, "completed");
-    assert.equal(calls, 3);
+    assert.equal(calls, 4);
     assert.ok(result.facts[0].excerpt.includes("{braces}"));
   });
 });
@@ -1073,6 +1347,8 @@ test("rejects leading prose, truncated objects, and extra JSON values or contain
       assert.equal(result.status, "failed", name);
       assert.equal(result.errorCode, "llm_group_extraction_failed", name);
       assert.match(result.errorMessage, /invalid JSON/, name);
+      // One classification call plus two analysis attempts; the domain call is
+      // skipped because the analysis task never returned a usable JSON object.
       assert.equal(calls, 3, name);
     });
   }
@@ -1096,7 +1372,7 @@ test("trailing commentary does not bypass extraction schema validation", async (
     assert.equal(result.processing_status, "needs_review");
     assert.equal(result.facts.length, 0);
     assert.match(result.processing_error, /facts\[0\]\.confidence/);
-    assert.equal(calls, 4);
+    assert.equal(calls, 6);
   });
 });
 
@@ -1130,7 +1406,7 @@ test("normalizes known document type labels but rejects unsupported categories",
       assert.equal(result.processing_status, "needs_review");
       assert.equal(result.document_suggestions.suggested_document_type, null);
       assert.match(result.processing_error, /not a supported document type/i);
-      assert.equal(calls, 4);
+      assert.equal(calls, 5);
     });
   }
 });
@@ -1410,6 +1686,344 @@ test("a milestone raw_date with no recognizable date wording stays a gap (date: 
   assert.equal(milestones[0].raw_date, "4.500 m2 dari pintu utama");
 });
 
+test("a stage-counter period label never fabricates a record date while genuine cut-off, as-of, due, and period wording stay accepted", async () => {
+  // One chunk per scenario so each citation's narrative is judged in isolation.
+  const stagedChunks = [
+    // Fabrication: the only record-cue wording is a stage counter whose tail
+    // looks like a date; the ISO string is a document number, not a date.
+    "Berita Acara No. 12/AST/2026-01-02. Periode: Tahap 2 Januari 2026. Actual cost to date USD 600,000.",
+    // Duplicate wording of the same date: a genuine cut-off plus the stage form.
+    "Cut-off: 2026-01-02. Periode: Tahap 2 Januari 2026. Actual cost to date USD 600,000.",
+    // Valid spaced form with no ISO duplicate: nothing fabricates 2026-01-02.
+    "Baseline disetujui as of 2 Januari 2026: USD 500,000.",
+    // A plain-date period field is not a date fabrication, and due wording
+    // still proves a milestone date.
+    "Periode: 2 Januari 2026. Progress pekerjaan: 5%. Due date penyelesaian struktur: 3 Februari 2026.",
+  ];
+  const chunks = stagedChunks.map((chunkText, chunkIndex) => ({
+    chunkIndex,
+    chunkText,
+    sectionLabel: "Laporan",
+  }));
+
+  const outcome = await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (prompt.startsWith("Classify the entire document") || isExecutiveSummaryPrompt(prompt)) {
+      return modelResponse(validModelOutput(prompt));
+    }
+    const range = /global source chunk indexes (\d+)-(\d+)/.exec(prompt);
+    const [start, end] = range ? [Number(range[1]), Number(range[2])] : [0, Infinity];
+    const sourceIdByChunk = new Map(
+      documentContextFromPrompt(prompt).map((reference) => [reference.chunk_index, reference.source_id]),
+    );
+    const chunkOf = (sourceId) =>
+      [...sourceIdByChunk.entries()].find(([, id]) => id === sourceId)?.[0];
+    const inRange = (observation) => {
+      const chunkIndex = chunkOf(observation.source_id);
+      return chunkIndex !== undefined && chunkIndex >= start && chunkIndex <= end;
+    };
+    const cost = (chunkIndex, observation) => ({
+      scope_level: "project",
+      scope_label: null,
+      period_label: null,
+      as_of_date: null,
+      status_label: null,
+      source_id: sourceIdByChunk.get(chunkIndex),
+      ...observation,
+    });
+    const milestone = (chunkIndex, observation) => ({
+      scope_level: "project",
+      scope_label: null,
+      period_label: null,
+      as_of_date: null,
+      date: null,
+      source_id: sourceIdByChunk.get(chunkIndex),
+      ...observation,
+    });
+    return modelResponse({
+      ...validModelOutput(prompt),
+      cost_observations: [
+        // Claims the fabricated stage-tail date as its cut-off: must be excluded.
+        cost(0, { measure: "actual_to_date", source_value: "USD 600,000", as_of_date: "2026-01-02", excerpt: "Berita Acara No. 12/AST/2026-01-02." }),
+        // Same date, but the cited narrative states it in a genuine cut-off field
+        // next to the duplicate stage form: must be accepted.
+        cost(1, { measure: "actual_to_date", source_value: "USD 600,000", as_of_date: "2026-01-02", excerpt: "Cut-off: 2026-01-02." }),
+        // The spaced "as of 2 Januari 2026" wording states no ISO date, so the
+        // row stays valid with a null cut-off (a gap, not a guess).
+        cost(2, { measure: "approved_baseline", source_value: "USD 500,000", as_of_date: null, excerpt: "Baseline disetujui as of 2 Januari 2026: USD 500,000." }),
+        // Normalizing the spaced wording into an ISO cut-off claim is still
+        // rejected: the ISO form is absent from the cited source.
+        cost(2, { measure: "approved_baseline", source_value: "USD 500,000", as_of_date: "2026-01-02", excerpt: "Baseline disetujui as of 2 Januari 2026: USD 500,000." }),
+      ].filter(inRange),
+      assurance_observations: {
+        milestones: [
+          // Claims the stage counter as its date: the row is retained for review
+          // but no day is derived (a gap, not a guess).
+          milestone(0, { label: "Tahap 2", raw_date: "2 Januari 2026", excerpt: "Periode: Tahap 2 Januari 2026." }),
+          // The due-date wording proves the milestone reading.
+          milestone(3, { label: "Penyelesaian struktur", raw_date: "3 Februari 2026", excerpt: "Due date penyelesaian struktur: 3 Februari 2026." }),
+        ].filter(inRange),
+        progress: [{
+          raw_value: "5%",
+          percent: 5,
+          scope_level: "project",
+          scope_label: null,
+          period_label: null,
+          as_of_date: null,
+          excerpt: "Periode: 2 Januari 2026. Progress pekerjaan: 5%.",
+          source_id: sourceIdByChunk.get(3),
+        }].filter(inRange),
+        risk_snapshots: [],
+        risk_register_statements: [],
+      },
+    });
+  }, async () =>
+    await extractDocumentGroups(
+      job(stagedChunks.join("\n\n"), { fileName: "laporan.txt", title: "Laporan Mingguan" }),
+      chunks,
+      { parserVersion: "stage-counter-date-test-v1" },
+      memoryGroupStore(),
+    ));
+
+  assert.equal(outcome.ok, true, `${outcome.errorCode}: ${outcome.errorMessage}`);
+  const extraction = outcome.extraction;
+  if (process.env.DEBUG_STAGE_COUNTER) {
+    console.log("COSTS", JSON.stringify(extraction.cost_observations.map((o) => [o.measure, o.as_of_date])));
+    console.log("MILESTONES", JSON.stringify(extraction.assurance_observations.milestones.map((m) => [m.label, m.date])));
+    console.log("WARNINGS", JSON.stringify(extraction.quality_warnings, null, 2));
+  }
+  // The genuine cut-off and the gap-only spaced-form row survive; the
+  // fabricated stage-tail cut-off and the ISO-claim without ISO wording are
+  // excluded, not accepted.
+  assert.deepEqual(
+    extraction.cost_observations.map((observation) => [observation.measure, observation.as_of_date]),
+    [["actual_to_date", "2026-01-02"], ["approved_baseline", null]],
+  );
+  assert.ok(
+    extraction.quality_warnings.some((warning) =>
+      warning.includes("cost_observations[0]") &&
+      warning.includes("cannot be attributed to an explicitly labelled record date"),
+    ),
+    extraction.quality_warnings.join(" "),
+  );
+  assert.ok(
+    extraction.quality_warnings.some((warning) =>
+      warning.includes("cost_observations[3]") &&
+      warning.includes("is not present in the cited source"),
+    ),
+    extraction.quality_warnings.join(" "),
+  );
+  // The stage counter states no day: its milestone row is retained but the
+  // derived date stays null (a gap, not a guess). The due-date milestone is
+  // derived normally.
+  assert.deepEqual(
+    extraction.assurance_observations.milestones.map((milestone) => [milestone.label, milestone.date]),
+    [["Tahap 2", null], ["Penyelesaian struktur", "2026-02-03"]],
+  );
+  assert.deepEqual(
+    extraction.assurance_observations.progress.map((progress) => [progress.percent, progress.period_label]),
+    [[5, null]],
+  );
+});
+
+// Variant C integration through the real parser + production extraction path
+// with a fake provider. One workbook holds a structured XLSX table whose rows
+// mix a provable progress row, an unrecognized milestone row (raw-text dates
+// without record/due role cues), and a stored-formula percent that must stay
+// review; a second group adds narrative text so deterministic coverage stays
+// incomplete there. The fake domain task echoes narrative-only rows when the
+// prompt says structured rows were derived, and structured+narrative rows
+// otherwise, so each run proves which ownership contract the worker applied.
+test("deterministic-first ownership: derived rows are never dropped, incomplete coverage sends structured rows to the model, complete coverage keeps only narrative rows, and a validator failure falls back instead of claiming coverage", async () => {
+  const JSZip = require("jszip");
+  const cell = (reference, value) => `<c r="${reference}" t="inlineStr"><is><t>${value}</t></is></c>`;
+  const numberCell = (reference, value) => `<c r="${reference}"><v>${value}</v></c>`;
+  const rowXml = (rowNumber, values) =>
+    `<row r="${rowNumber}">${values.map((value) => value ?? "").join("")}</row>`;
+  // Sheet 1 "Weekly": header A3:F3, data rows 4-6.
+  // Row 4: provable — labeled scope, period week, cut-off date, Actual %.
+  // Row 5: unrecognized milestone — raw-text ISO date columns with no
+  //   record/due label ("Info Date"), so milestone/date attribution fails and
+  //   the row must stay on the model route (no silent absence).
+  // Row 6: percent lives in a stored-formula cell whose freshness is
+  //   unestablished — the row must never be deterministically accepted.
+  const weeklySheet = `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>` +
+    `<row r="1">${cell("A1", "Weekly progress report")}</row>` +
+    `<row r="3">${["Subsystem / Scope", "Week", "Cut-off Date", "Actual %", "Milestone", "Due Date"]
+      .map((value, index) => cell(`${String.fromCharCode(65 + index)}3`, value)).join("")}</row>` +
+    rowXml(4, [cell("A4", "Alarm Kebencanaan"), cell("B4", "W4"), cell("C4", "2026-10-09"), cell("D4", "12.5%"), "", ""]) +
+    rowXml(5, [cell("A5", "Kamera Pengawasan"), cell("B5", "W4"), cell("C5", "2026-10-09"), "", cell("E5", "Tower crane delivery"), cell("F5", "2026-02-03"), numberCell("G5", 7)]) +
+    rowXml(6, [cell("A6", "Kontrol Akses"), cell("B6", "W4"), cell("C6", "2026-10-09"), `<c r="D6"><f>D4*2</f><v>25</v></c>`, "", ""]) +
+    `</sheetData></worksheet>`;
+  // Group 2 is plain text (a separate .txt file parsed by the real parser) so
+  // its chunk stays truly narrative (no XLSX rowCells): the model's narrative
+  // rows for it must be accepted.
+  const narrativeText =
+    "Weekly narrative notes. Physical progress: 30%. The foundations milestone completed on 2026-02-20. " +
+    "Delivery evidence detail. ".repeat(6);
+  const zip = new JSZip();
+  zip.file("xl/workbook.xml", `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Weekly" sheetId="1" r:id="rId1"/></sheets></workbook>`);
+  zip.file("xl/_rels/workbook.xml.rels", `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>`);
+  zip.file("xl/worksheets/sheet1.xml", weeklySheet);
+  const workbook = await zip.generateAsync({ type: "nodebuffer" });
+
+  const analysisOutput = (references) => ({
+    facts: [],
+    summary: {
+      summary_text: "Source-backed assurance evidence for this group.",
+      confidence: 0.8,
+      quality_warning: null,
+      sources: [{ source_id: references[0].source_id }],
+    },
+    health_snapshots: ["overall", "schedule", "cost", "risk", "governance", "audit_readiness"].map((dimension) => ({
+      dimension, score: null, status: "insufficient_evidence", evidence_coverage: 0,
+      status_text: "none", source_summary: "none", snapshot_date: null, source_id: null,
+    })),
+    alerts: [],
+    actions: [],
+    group_metadata_suggestions: {
+      suggested_document_date: null, detected_reporting_period: null,
+      suggested_workstream: null, source_id: null,
+    },
+  });
+  const narrativeRows = (references) => {
+    const narrative = references.find((reference) => reference.text.includes("Physical progress: 30%"));
+    return narrative
+      ? {
+        milestones: [{
+          label: "Foundations milestone", raw_date: "2026-02-20", date: null,
+          scope_level: "unknown", scope_label: null, scope_source_id: null,
+          period_label: null, as_of_date: null,
+          excerpt: "The foundations milestone completed on 2026-02-20.",
+          source_id: narrative.source_id,
+        }],
+        progress: [{
+          raw_value: "30%", percent: 30,
+          scope_level: "unknown", scope_label: null, scope_source_id: null,
+          period_label: null, as_of_date: null,
+          excerpt: "Physical progress: 30%.",
+          source_id: narrative.source_id,
+        }],
+      }
+      : { milestones: [], progress: [] };
+  };
+
+  // Run 1 — the workbook alone: the structured group derives the provable
+  // progress and due-date milestone rows deterministically; the formula row
+  // and the bare-number milestone stay unresolved (review, model route). The
+  // separate narrative .txt then proves the model route still reports its own
+  // rows alongside determinism.
+  let run1DomainPromptHasStructuredRule = null;
+  const run1 = await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (prompt.startsWith("Classify the entire document")) return modelResponse(validModelOutput(prompt));
+    if (isExecutiveSummaryPrompt(prompt)) return modelResponse(validModelOutput(prompt));
+    if (prompt.includes("narrative assurance signals")) return modelResponse(analysisOutput(documentContextFromPrompt(prompt)));
+    run1DomainPromptHasStructuredRule = prompt.includes("Structured (spreadsheet) progress and milestone rows are yours to report");
+    const references = documentContextFromPrompt(prompt);
+    return modelResponse({
+      cost_observations: [],
+      assurance_observations: {
+        ...narrativeRows(references),
+        risk_snapshots: [],
+        risk_register_statements: [],
+      },
+    });
+  }, async () => {
+    const result = await processDocumentJob(
+      job(workbook, { fileName: "weekly.xlsx", title: "Weekly Progress Report" }),
+      memoryGroupStore(),
+    );
+    assert.equal(result.status, "completed", `${result.errorCode ?? ""} ${result.processing_error ?? ""}`);
+    const narrative = await processDocumentJob(
+      job(Buffer.from(narrativeText, "utf8"), {
+        fileName: "notes.txt", title: "Weekly narrative notes", jobId: "notes-job",
+        projectId: "project-1", documentId: "document-notes",
+      }),
+      memoryGroupStore(),
+    );
+    assert.equal(narrative.status, "completed", `${narrative.errorCode ?? ""} ${narrative.processing_error ?? ""}`);
+    return { result, narrative };
+  });
+
+  // The workbook's structured group: derived progress row keeps its cut-off;
+  // the unrecognized bare-number cell and the cached-formula percent stay
+  // unresolved (never deterministically accepted, never silently absent).
+  assert.equal(run1.result.assurance_observations.progress.length, 1, JSON.stringify(run1.result.assurance_observations.progress));
+  const derivedRow = run1.result.assurance_observations.progress[0];
+  assert.equal(derivedRow.percent, 12.5);
+  assert.equal(derivedRow.as_of_date, "2026-10-09");
+  assert.equal(derivedRow.source_location?.kind, "xlsx");
+  assert.ok(!run1.result.assurance_observations.progress.some((row) => row.percent === 25));
+  // The workbook run stays flagged for review: unresolved formula cells force
+  // formula review messaging and the ambiguous XLSX group needs a candidate
+  // interpretation, so absence of the formula percent is never read as
+  // evidence there is none.
+  assert.match(
+    run1.result.processing_error ?? "",
+    /Formula results are unavailable|ambiguous XLSX group/i,
+  );
+  const milestoneDates = run1.result.assurance_observations.milestones.map((milestone) => milestone.date);
+  assert.ok(milestoneDates.includes("2026-02-03"), JSON.stringify(run1.result.assurance_observations.milestones));
+  const coverage1 = Object.fromEntries(run1.result.assurance_observation_coverage.map((row) => [row.domain, row.state]));
+  // The conflicting as-of variants on the same row keep schedule/progress at
+  // ambiguous_conflicting, not processed: reviewers still see both readings.
+  assert.equal(coverage1.progress, "ambiguous_conflicting");
+  assert.equal(coverage1.risk, "ambiguous_conflicting");
+  // The workbook's structured group told the domain task it owns structured
+  // rows (coverage incomplete: formula row + unrecognized milestone row).
+  assert.equal(run1DomainPromptHasStructuredRule, true);
+  // The narrative document's own run accepts the model's narrative rows —
+  // the model route still reports what it finds.
+  assert.ok(run1.narrative.assurance_observations.progress.some((row) => row.percent === 30), JSON.stringify(run1.narrative.assurance_observations.progress));
+  assert.ok(run1.narrative.assurance_observations.milestones.some((milestone) => milestone.date === "2026-02-20"), JSON.stringify(run1.narrative.assurance_observations.milestones));
+
+  // Run 2 — the same workbook cached/failed deliberately: a domain payload
+  // that fails validation must fall back to the full model route (attempt 2
+  // narrates), never reduce the group to silently-absent rows.
+  let run2DomainCalls = 0;
+  const run2 = await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (prompt.startsWith("Classify the entire document")) return modelResponse(validModelOutput(prompt));
+    if (isExecutiveSummaryPrompt(prompt)) return modelResponse(validModelOutput(prompt));
+    if (prompt.includes("narrative assurance signals")) {
+      return modelResponse(analysisOutput(documentContextFromPrompt(prompt)));
+    }
+    run2DomainCalls += 1;
+    const references = documentContextFromPrompt(prompt);
+    const base = {
+      cost_observations: [],
+      assurance_observations: {
+        ...narrativeRows(references),
+        risk_snapshots: [],
+        risk_register_statements: [],
+      },
+    };
+    if (run2DomainCalls === 1) {
+      // Invalid domain output: a broken citation on the narrative milestone.
+      base.assurance_observations.milestones = base.assurance_observations.milestones.map((row) => ({
+        ...row, source_id: `${row.source_id}-missing`,
+      }));
+      return modelResponse(base);
+    }
+    return modelResponse(base);
+  }, async () => {
+    const result = await processDocumentJob(
+      job(workbook, { fileName: "weekly.xlsx", title: "Weekly Progress Report", jobId: "retry-job" }),
+      memoryGroupStore(),
+    );
+    assert.equal(result.status, "completed", `${result.errorCode ?? ""} ${result.processing_error ?? ""}`);
+    return result;
+  });
+  assert.ok(run2DomainCalls >= 3, "the failing domain attempt retried instead of failing the group");
+  assert.equal(run2.assurance_observations.progress.length, 1);
+  assert.ok(run2.assurance_observations.progress.some((row) => row.source_location?.kind === "xlsx" && row.percent === 12.5));
+  assert.ok(
+    run2.assurance_observations.milestones.some((milestone) => milestone.date === "2026-02-03"),
+    JSON.stringify(run2.assurance_observations.milestones),
+  );
+});
+
 test("a cost value absent from its cited source is excluded, not accepted", async () => {
   const outcome = await extractCostObservations([
     { measure: "eac", source_value: "USD 9,999,999" },
@@ -1658,12 +2272,15 @@ test("a per-cell citation survives a sibling cell's unresolved formula while the
     }
     const output = validModelOutput(prompt);
     output.facts = [
-      // A literal cell in column A, disjoint from the unresolved formula in C.
-      { fact_type: "milestone", extracted_text: "Progress: 25%", original_value: "Progress: 25%", confidence: 0.8, source_id: "c0s1" },
+      // Milestone-shaped claims: a bare "Progress: 25%" is no longer accepted as
+      // a milestone fact, so the fixture states a milestone that carries the
+      // same source-backed percentage. A literal cell in column A, disjoint
+      // from the unresolved formula in C.
+      { fact_type: "milestone", extracted_text: "Topping off reached 25% complete", original_value: "Topping off reached 25% complete", confidence: 0.8, source_id: "c0s1" },
       // The retained full-row reference spans the formula column.
-      { fact_type: "milestone", extracted_text: "Progress: 25%", original_value: "Progress: 25%", confidence: 0.8, source_id: "c0s0" },
+      { fact_type: "milestone", extracted_text: "Topping off reached 25% complete", original_value: "Topping off reached 25% complete", confidence: 0.8, source_id: "c0s0" },
       // The unresolved formula cell itself.
-      { fact_type: "milestone", extracted_text: "Progress: 25%", original_value: "Progress: 25%", confidence: 0.8, source_id: "c0s3" },
+      { fact_type: "milestone", extracted_text: "Topping off reached 25% complete", original_value: "Topping off reached 25% complete", confidence: 0.8, source_id: "c0s3" },
     ];
     output.assurance_observations.progress = [{
       raw_value: "25%", percent: 25, scope_level: "project", scope_label: null,
@@ -1680,7 +2297,7 @@ test("a per-cell citation survives a sibling cell's unresolved formula while the
     assert.equal(result.ok, true, `${result.errorCode}: ${result.errorMessage}`);
     assert.deepEqual(
       result.extraction.facts.map((fact) => [fact.extracted_text, fact.evidence_chunk_index]),
-      [["Progress: 25%", 0]],
+      [["Topping off reached 25% complete", 0]],
     );
     assert.equal(result.extraction.assurance_observations.progress[0]?.source_location?.cellRangeStart, "A12");
     const warnings = result.extraction.quality_warnings.join(" ");

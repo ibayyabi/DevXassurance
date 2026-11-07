@@ -364,7 +364,7 @@ type ZipTextReader = {
 
 // Bump whenever parsed chunk/source-reference output changes: cached extraction
 // groups are keyed by this version, so older rows are never reused.
-const PARSER_VERSION = "document-parser/18";
+const PARSER_VERSION = "document-parser/20";
 const MAX_CHUNK_LENGTH = 4000;
 // Growth ceiling per chunk: retained row references always fit, then cell
 // references are added row by row. Cells left uncovered stay citable through
@@ -374,6 +374,16 @@ const MAX_SOURCE_REFERENCES_PER_CHUNK = 120;
 const PARAGRAPH_OVERLAP = 160;
 const CHUNK_CONTEXT_BUDGET = 900;
 const MAX_SOURCE_BLOCK_PART_LENGTH = MAX_CHUNK_LENGTH - CHUNK_CONTEXT_BUDGET;
+
+// A weekly Gantt's first header row is a grid of week/period labels or
+// date-formatted serials, optionally with a WBS-style caption. A second header
+// row is accepted only when that grid is proven and the candidate row still
+// looks like labels; otherwise the row may be the first data row, so it stays
+// data (fail closed) instead of being consumed and lost.
+const WEEK_HEADER_LABEL = /^(?:w(?:eek)?\s*[-#]?\s*\d{1,3}(?:\s*(?:19|20)\d{2})?|(?:19|20)\d{2}(?:[-/]\d{1,2}){0,2}|\d{1,2}[-/]\d{1,2}(?:[-/]\d{2,4})?|q[1-4](?:\s*(?:19|20)?\d{2})?|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:[.,]?\s+\d{2,4})?|(?:week|month|period|minggu|pekan|bulan|sprint|cycle)\s+[\w./-]+)$/iu;
+const WEEK_HEADER_CAPTION = /^(?:wbs|no\.?|id|code|task|activity|item|phase|work\s*package|description|deliverable)$/iu;
+const DATA_LIKE_LABEL = /^(?:[-+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?\s*%?|(?:rp|idr|usd|eur|sgd|myr)\s*[\d.,]+|[$€£]\s*[\d.,]+)$/iu;
+const DATA_LIKE_LABEL_MAX_LENGTH = 60;
 
 
 
@@ -676,12 +686,95 @@ async function parseXlsxDocument(
       }
       for (const [tableIndex, tableRows] of tables.entries()) {
         let headerCount = 1;
-        if (
-          tableRows.length >= 3 &&
-          tableRows[0].cells.every((cell) => cell.textual) &&
-          tableRows[1].cells.every((cell) => cell.textual) &&
-          tableRows[2].cells.some((cell) => !cell.textual)
-        ) headerCount = 2;
+        // A weekly Gantt may put a week/date header row above the WBS header
+        // row. Two headers are accepted only when the first row is proven to be
+        // a week/period grid or a merged group-header row, and the second row
+        // still reads as labels; a row that could be the first data row stays
+        // data rather than being lost.
+        if (tableRows.length >= 3) {
+          const isPeriodHeaderCell = (cell: WorkbookCell) =>
+            Boolean(
+              cell.dateFormat &&
+              cell.value &&
+              excelSerialToIsoDate(cell.value, date1904),
+            ) || WEEK_HEADER_LABEL.test(cell.value.trim());
+          const hasDateHeaderCell = (cell: WorkbookCell) =>
+            Boolean(
+              cell.dateFormat &&
+              cell.value &&
+              excelSerialToIsoDate(cell.value, date1904),
+            );
+          const isWeekHeaderRow = tableRows[0].cells.every((cell) =>
+            isPeriodHeaderCell(cell) ||
+            (
+              cell.textual &&
+              !cell.formula &&
+              WEEK_HEADER_CAPTION.test(cell.value.trim())
+            ),
+          ) && tableRows[0].cells.filter(isPeriodHeaderCell).length >= 2;
+          const isTextHeaderRow = tableRows[0].cells.every((cell) =>
+            cell.textual && !cell.formula && Boolean(cell.value.trim()),
+          );
+          const hasGroupedHeader = merges.some((merge) => {
+            const [start, end] = merge.split(":");
+            const startRow = Number(start?.match(/\d+$/)?.[0]);
+            const startColumn = columnNumber(start ?? "");
+            const endColumn = columnNumber(end ?? "");
+            return startRow === tableRows[0].number &&
+              startColumn !== null &&
+              endColumn !== null &&
+              endColumn > startColumn &&
+              tableRows[0].cells.some((cell) => cell.reference === start);
+          });
+          const isHeaderLabelCell = (cell: WorkbookCell) => {
+            const text = cell.value.trim();
+            return cell.textual &&
+              !cell.formula &&
+              Boolean(text) &&
+              text.length <= DATA_LIKE_LABEL_MAX_LENGTH &&
+              !DATA_LIKE_LABEL.test(text);
+          };
+          // A weekly Gantt may place field labels (WBS, Deliverable, ...)
+          // beside the week/date cells they continue rather than above the
+          // whole row. Accept that staggered subtitle only under a proven
+          // week-header row, and only for date cells in a column the first
+          // header row already labelled; any other cell must be a label.
+          const firstHeaderColumns = new Set(
+            tableRows[0].cells
+              .map((cell) => columnNumber(cell.reference))
+              .filter((column) => column > 0),
+          );
+          const isPeriodContinuationCell = (cell: WorkbookCell) =>
+            firstHeaderColumns.has(columnNumber(cell.reference)) &&
+            hasDateHeaderCell(cell);
+          const isPlainLabelRow = tableRows[1].cells.every(isHeaderLabelCell);
+          const subtitleLabelCells = tableRows[1].cells.filter(isHeaderLabelCell);
+          const subtitleLabels = subtitleLabelCells.map((cell) =>
+            cell.value.trim().toLocaleLowerCase(),
+          );
+          const hasSubtitleFieldLabel = subtitleLabelCells.some(
+            (cell) => !firstHeaderColumns.has(columnNumber(cell.reference)),
+          );
+          const isStaggeredWeekLabelRow =
+            isWeekHeaderRow &&
+            tableRows[1].cells.every(
+              (cell) => isHeaderLabelCell(cell) || isPeriodContinuationCell(cell),
+            ) &&
+            hasSubtitleFieldLabel &&
+            new Set(subtitleLabels).size === subtitleLabels.length;
+          if (
+            (
+              isWeekHeaderRow ||
+              (
+                hasGroupedHeader &&
+                isTextHeaderRow &&
+                !tableRows[0].cells.some(hasDateHeaderCell)
+              )
+            ) &&
+            (isPlainLabelRow || isStaggeredWeekLabelRow) &&
+            tableRows[2].cells.some((cell) => !cell.textual)
+          ) headerCount = 2;
+        }
 
         const headers = new Map<number, string>();
         for (const row of tableRows.slice(0, headerCount)) {
@@ -1295,6 +1388,7 @@ type AmbiguityReason =
   | "merged_header"
   | "key_value_shape"
   | "date_period_columns"
+  | "duplicate_header"
   | "non_square_header"
   | "unresolved_formula_columns"
   | "inconsistent_cell_types";
@@ -1305,6 +1399,7 @@ const AMBIGUITY_TRIGGER_REASONS: Partial<Record<AmbiguityReason, true>> = {
   multi_row_header: true,
   key_value_shape: true,
   date_period_columns: true,
+  duplicate_header: true,
   non_square_header: true,
   inconsistent_cell_types: true,
 };
@@ -1346,6 +1441,43 @@ function diagnoseTableAmbiguity(
   ))) reasons.add("merged_header");
   if (dataRows.length && dataRows.every((row) => row.cells.length <= 1)) reasons.add("key_value_shape");
   if (headerLabels.filter((label) => AMBIGUITY_PERIOD_PATTERN.test(label)).length > 1) reasons.add("date_period_columns");
+  const mergeCovers = (reference: string, merge: string) => {
+    const [start, end] = merge.split(":");
+    const referenceColumn = columnNumber(reference);
+    const startColumn = columnNumber(start ?? "");
+    const endColumn = columnNumber(end ?? "");
+    const referenceRow = Number(reference.match(/\d+$/)?.[0]);
+    const startRow = Number(start?.match(/\d+$/)?.[0]);
+    const endRow = Number(end?.match(/\d+$/)?.[0]);
+    return referenceColumn !== null &&
+      startColumn !== null &&
+      endColumn !== null &&
+      referenceRow >= startRow &&
+      referenceRow <= endRow &&
+      referenceColumn >= Math.min(startColumn, endColumn) &&
+      referenceColumn <= Math.max(startColumn, endColumn);
+  };
+  for (const row of headerRows) {
+    const referencesByLabel = new Map<string, string[]>();
+    for (const cell of row.cells) {
+      const label = cell.value.trim().toLocaleLowerCase();
+      if (!label) continue;
+      const references = referencesByLabel.get(label) ?? [];
+      references.push(cell.reference);
+      referencesByLabel.set(label, references);
+    }
+    const duplicated = [...referencesByLabel.values()].some(
+      (references) =>
+        references.length > 1 &&
+        // One merged header legitimately repeats the same value across its own
+        // range; repeating it in unrelated columns is an ambiguous mapping.
+        !merges.some((merge) => references.every((reference) => mergeCovers(reference, merge))),
+    );
+    if (duplicated) {
+      reasons.add("duplicate_header");
+      break;
+    }
+  }
   if (headerColumns.size > 0 && dataColumns.size > 0 && ![...dataColumns].every((column) => headerColumns.has(column))) {
     reasons.add("non_square_header");
   }
@@ -1860,6 +1992,15 @@ function chunkBlockGroup(blocks: SourceBlock[]): ParsedChunk[] {
   let sectionLabel = blocks.find((block) => block.sectionLabel)?.sectionLabel;
   let tableHeader: SourceBlock | undefined;
 
+  // Row references are mandatory for provenance, so the per-chunk budget must
+  // be checked before adding a block; otherwise many retained row references
+  // could grow a chunk past the reference cap. A block that is itself wider
+  // than the remaining budget starts a fresh chunk instead of losing rows.
+  const referenceCount = () =>
+    sourceBlocks.reduce(
+      (count, block) => count + 1 + (block.cellReferences?.length ?? 0),
+      0,
+    );
   const flush = () => {
     if (!text || !sourceBlocks.length) return;
     const sourceLocation = mergeSourceLocations(sourceBlocks);
@@ -1935,7 +2076,13 @@ function chunkBlockGroup(blocks: SourceBlock[]): ParsedChunk[] {
         : chunkContext(sectionLabel, tableHeader, part, part.continuation);
       let addition = `${text ? `${text}\n\n` : ""}${prefix ? `${prefix}\n\n` : ""}${part.text}`;
 
-      if (text && addition.length > MAX_CHUNK_LENGTH) {
+      if (
+        text &&
+        (
+          addition.length > MAX_CHUNK_LENGTH ||
+          referenceCount() + 1 + (part.cellReferences?.length ?? 0) > MAX_SOURCE_REFERENCES_PER_CHUNK
+        )
+      ) {
         const previous = sourceBlocks[sourceBlocks.length - 1];
         const overlap =
           previous?.kind === "paragraph"
@@ -1981,32 +2128,119 @@ function chunkContext(
   return context.join("\n\n");
 }
 
-function splitSourceBlock(block: SourceBlock): SourceBlock[] {
-  const parts: SourceBlock[] = [];
-  let remaining = block.text;
-  let continuation = block.continuation;
-  const modelText = block.text.length > MAX_SOURCE_BLOCK_PART_LENGTH
-    ? undefined
-    : block.modelText;
-  // A split part no longer contains the whole row, so its per-cell locators would
-  // not describe that part; keep only the retained row reference for such rows.
-  const cellReferences = remaining.length > MAX_SOURCE_BLOCK_PART_LENGTH
-    ? undefined
-    : block.cellReferences;
-  const rowCells = remaining.length > MAX_SOURCE_BLOCK_PART_LENGTH
-    ? undefined
-    : block.rowCells;
+type SplitPartRange = { start: number; end: number };
 
-  while (remaining.length > MAX_SOURCE_BLOCK_PART_LENGTH) {
-    let splitAt = remaining.lastIndexOf(" ", MAX_SOURCE_BLOCK_PART_LENGTH);
-    if (splitAt < 1) splitAt = MAX_SOURCE_BLOCK_PART_LENGTH;
-    const part = remaining.slice(0, splitAt).trimEnd();
-    parts.push({ ...block, text: part, modelText, cellReferences, rowCells, continuation });
-    continuation =
-      block.kind === "paragraph" ? part.slice(-PARAGRAPH_OVERLAP) : undefined;
-    remaining = remaining.slice(splitAt).trimStart();
+// Splits long block text at cell boundaries when the block carries per-cell
+// references, otherwise at word boundaries. Ranges are half-open offsets into
+// the unsplit block text so each cell's own span can be assigned to exactly one
+// part. A " | " is consumed only when it lies exactly between two located cell
+// tokens; the same characters inside a cell's own text are literal content.
+function splitBlockRanges(
+  text: string,
+  limit: number,
+  cellSpans: ReadonlyArray<{ start: number; end: number }>,
+): SplitPartRange[] {
+  const separators = cellSpans.flatMap((span, index) => {
+    const next = cellSpans[index + 1];
+    return next && next.start === span.end + 3 && text.slice(span.end, next.start) === " | "
+      ? [span.end]
+      : [];
+  });
+  const ranges: SplitPartRange[] = [];
+  let start = 0;
+  while (start < text.length) {
+    if (text.length - start <= limit) {
+      ranges.push({ start, end: text.length });
+      break;
+    }
+    const boundary = start + limit;
+    let cut = -1;
+    for (const separator of separators) {
+      if (separator <= start) continue;
+      if (separator > boundary) break;
+      cut = separator;
+    }
+    let next = cut > start ? cut + 3 : -1;
+    if (cut <= start) {
+      cut = text.lastIndexOf(" ", boundary);
+      next = cut > start ? cut + 1 : -1;
+    }
+    if (cut <= start) {
+      cut = boundary;
+      next = boundary;
+    }
+    ranges.push({ start, end: cut });
+    start = next;
   }
-  if (remaining) parts.push({ ...block, text: remaining, modelText, cellReferences, rowCells, continuation });
+  return ranges;
+}
+
+// Locates each cell's model-visible text once, in reference order. A duplicate
+// token is matched at the next position, and a token that cannot be located is
+// left out instead of being guessed.
+function locateCellSpans(block: SourceBlock) {
+  const spans = new Map<SourceCellReference, { start: number; end: number }>();
+  let cursor = 0;
+  for (const reference of block.cellReferences ?? []) {
+    const token = reference.modelText;
+    if (!token) continue;
+    const index = block.text.indexOf(token, cursor);
+    if (index === -1) continue;
+    spans.set(reference, { start: index, end: index + token.length });
+    cursor = index + token.length;
+  }
+  return spans;
+}
+
+function splitSourceBlock(block: SourceBlock): SourceBlock[] {
+  if (block.text.length <= MAX_SOURCE_BLOCK_PART_LENGTH) return [block];
+
+  const cellSpans = block.cellReferences?.length ? locateCellSpans(block) : new Map();
+  const ranges = splitBlockRanges(
+    block.text,
+    MAX_SOURCE_BLOCK_PART_LENGTH,
+    [...cellSpans.values()].sort((left, right) => left.start - right.start),
+  );
+  const parts: SourceBlock[] = [];
+  let continuation = block.continuation;
+  ranges.forEach((range, index) => {
+    const text = block.text.slice(range.start, range.end).trim();
+    if (!text) return;
+    // A per-cell locator is retained only when the whole cell token lies inside
+    // this part; a cell crossing the boundary stays row-level/review instead of
+    // being attributed to a part that does not contain its evidence.
+    const contained = (block.cellReferences ?? []).filter((reference) => {
+      const span = cellSpans.get(reference);
+      return span !== undefined && span.start >= range.start && span.end <= range.end;
+    });
+    const cellReferences: SourceCellReference[] | undefined = cellSpans.size
+      ? contained.map((reference) => {
+        const span = cellSpans.get(reference)!;
+        const exactText = block.text.slice(span.start, span.end);
+        return {
+          text: exactText,
+          modelText: reference.modelText,
+          location: reference.location,
+          cell: reference.cell,
+        };
+      })
+      : undefined;
+    const rowCells = cellSpans.size
+      ? contained.flatMap((reference) => (reference.cell ? [reference.cell] : []))
+      : undefined;
+    parts.push({
+      ...block,
+      text,
+      modelText: undefined,
+      cellReferences,
+      rowCells,
+      continuation,
+    });
+    continuation =
+      block.kind === "paragraph" && index < ranges.length - 1
+        ? text.slice(-PARAGRAPH_OVERLAP)
+        : undefined;
+  });
   return parts;
 }
 

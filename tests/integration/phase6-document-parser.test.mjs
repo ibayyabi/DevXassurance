@@ -52,11 +52,27 @@ try {
 
 const JSZip = require("jszip");
 const PDFDocument = require("pdfkit");
+
+const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+const ocrPython =
+  process.env.XASS_OCR_PYTHON?.trim() ||
+  join(repoRoot, ".venv-ocr", "bin", "python");
+const ocrCheck = spawnSync(
+  ocrPython,
+  [join(repoRoot, "worker", "ocr", "ppocr.py"), "--check", "--json"],
+  { encoding: "utf8", timeout: 60_000 },
+);
+let ocrCheckPayload;
+try {
+  ocrCheckPayload = JSON.parse(ocrCheck.stdout ?? "");
+} catch {
+  ocrCheckPayload = undefined;
+}
 const canRunLocalOcr =
   spawnSync("gs", ["--version"], { stdio: "ignore" }).status === 0 &&
-  spawnSync("tesseract", ["--list-langs"], { encoding: "utf8" }).stdout
-    ?.split(/\r?\n/)
-    .includes("eng");
+  ocrCheck.status === 0 &&
+  ocrCheckPayload?.ok === true;
+const OCR_SHA256 = /^[0-9a-f]{64}$/;
 
 async function makePdf(render) {
   const pdf = new PDFDocument();
@@ -102,7 +118,7 @@ test("TXT extraction keeps headings and source-linked bounded chunks across long
   for (let index = 1; index <= 24; index += 1) {
     assert.ok(result.chunks.some((chunk) => chunk.chunkText.includes(`PARAGRAPH-${index} `)));
   }
-  assert.equal(result.parserMetadata.parserVersion, "document-parser/18");
+  assert.equal(result.parserMetadata.parserVersion, "document-parser/20");
 });
 test("a single long paragraph is bounded without losing its boundary markers", async () => {
   const paragraph =
@@ -357,7 +373,7 @@ test("XLSX cell references locate literals exactly and never claim an unresolved
 
   assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
   if (!result.ok) return;
-  assert.equal(result.parserMetadata.parserVersion, "document-parser/18");
+  assert.equal(result.parserMetadata.parserVersion, "document-parser/20");
 
   const chunk = result.chunks[0];
   const references = chunk.sourceReferences ?? [];
@@ -572,12 +588,12 @@ test("CSV multiline quoted records remain intact as one source row", async () =>
 });
 
 test(
-  "available local OCR extracts image and scanned-PDF text and reports missing language data",
+  "available local PP-OCRv6 extracts image and scanned-PDF text with real provenance",
   { skip: !canRunLocalOcr },
   async () => {
     const directory = mkdtempSync(join(tmpdir(), "xass-parser-test-"));
-    const originalOcrLanguage = process.env.XASS_OCR_LANG;
-    process.env.XASS_OCR_LANG = "eng";
+    const originalOcrPython = process.env.XASS_OCR_PYTHON;
+    const originalOcrModelDir = process.env.XASS_OCR_MODEL_DIR;
     try {
       const sourcePdf = await makePdf((document) => {
         document.fontSize(34).text("OCR SOURCE 4821", 36, 40);
@@ -601,39 +617,271 @@ test(
       );
       assert.equal(raster.status, 0);
       const image = readFileSync(imagePath);
-      const imageResult = await parseDocumentBuffer("scan.png", asArrayBuffer(image));
-      assert.equal(imageResult.ok, true);
-      if (!imageResult.ok) return;
-      assert.match(imageResult.chunks.map((chunk) => chunk.chunkText).join(" ").toUpperCase(), /OCR SOURCE/);
-      assert.ok(imageResult.chunks.every((chunk) => chunk.sourceLocation?.imageName === "scan.png"));
-      assert.equal(imageResult.parserMetadata.ocrLanguage, "eng");
 
-      process.env.XASS_OCR_LANG = "xass_missing_language";
-      const missingLanguage = await parseDocumentBuffer("scan.png", asArrayBuffer(image));
-      assert.equal(missingLanguage.ok, false);
-      if (!missingLanguage.ok) {
-        assert.equal(missingLanguage.errorCode, "ocr_language_unavailable");
-        assert.match(missingLanguage.errorMessage, /XASS_OCR_LANG/);
+      const imageResult = await parseDocumentBuffer("scan.png", asArrayBuffer(image));
+      assert.equal(
+        imageResult.ok,
+        true,
+        imageResult.ok ? undefined : imageResult.errorMessage,
+      );
+      if (!imageResult.ok) return;
+      assert.match(
+        imageResult.chunks.map((chunk) => chunk.chunkText).join(" ").toUpperCase(),
+        /OCR\s+SOURCE\s+4821/,
+      );
+      assert.ok(
+        imageResult.chunks.every(
+          (chunk) => chunk.sourceLocation?.imageName === "scan.png",
+        ),
+      );
+      const imageMetadata = imageResult.parserMetadata;
+      assert.equal(imageMetadata.parser, "rapidocr");
+      assert.equal(imageMetadata.ocrEngine, "rapidocr");
+      assert.equal(imageMetadata.ocrModel, "PP-OCRv6");
+      assert.equal(imageMetadata.ocrModelSize, "tiny");
+      assert.equal(imageMetadata.ocrBackend, "onnxruntime-cpu");
+      assert.equal(imageMetadata.ocrRoute, "id");
+      assert.match(imageMetadata.ocrRuntimeVersions.rapidocr, /^\d+\.\d+\.\d+/);
+      assert.match(imageMetadata.ocrRuntimeVersions.onnxruntime, /^\d+\.\d+\.\d+/);
+      for (const asset of ["detector", "recognizer", "classifier"]) {
+        assert.match(imageMetadata.ocrModelSha256[asset], OCR_SHA256);
       }
-      process.env.XASS_OCR_LANG = "eng";
+      assert.ok(
+        imageMetadata.warnings.some((warning) => /PP-OCRv6/.test(warning)),
+        imageMetadata.warnings.join("\n"),
+      );
+
+      // A missing runtime fails explicitly instead of silently returning text.
+      process.env.XASS_OCR_PYTHON = join(directory, "missing-python");
+      const missingRuntime = await parseDocumentBuffer(
+        "scan.png",
+        asArrayBuffer(image),
+      );
+      assert.equal(missingRuntime.ok, false);
+      if (!missingRuntime.ok) {
+        assert.equal(missingRuntime.errorCode, "ocr_unavailable");
+        assert.match(
+          missingRuntime.errorMessage,
+          /Local PP-OCRv6 runtime is unavailable/,
+        );
+      }
+      if (originalOcrPython === undefined) delete process.env.XASS_OCR_PYTHON;
+      else process.env.XASS_OCR_PYTHON = originalOcrPython;
+
+      // A missing pinned model directory fails explicitly before OCR runs.
+      const emptyModelDirectory = mkdtempSync(
+        join(tmpdir(), "xass-empty-models-"),
+      );
+      try {
+        process.env.XASS_OCR_MODEL_DIR = emptyModelDirectory;
+        const missingModel = await parseDocumentBuffer(
+          "scan.png",
+          asArrayBuffer(image),
+        );
+        assert.equal(missingModel.ok, false);
+        if (!missingModel.ok) {
+          assert.equal(missingModel.errorCode, "ocr_model_unavailable");
+          assert.match(
+            missingModel.errorMessage,
+            /model assets are not ready/i,
+          );
+          assert.match(missingModel.errorMessage, /--prefetch/);
+        }
+      } finally {
+        if (originalOcrModelDir === undefined) {
+          delete process.env.XASS_OCR_MODEL_DIR;
+        } else {
+          process.env.XASS_OCR_MODEL_DIR = originalOcrModelDir;
+        }
+        rmSync(emptyModelDirectory, { recursive: true, force: true });
+      }
 
       const scannedPdf = await makePdf((document) => {
         document.image(image, 36, 36, { width: 540 });
       });
-      const pdfResult = await parseDocumentBuffer("scanned.pdf", asArrayBuffer(scannedPdf));
+      const pdfResult = await parseDocumentBuffer(
+        "scanned.pdf",
+        asArrayBuffer(scannedPdf),
+      );
       assert.equal(pdfResult.ok, true, JSON.stringify(pdfResult));
       if (!pdfResult.ok) return;
-      assert.ok(pdfResult.chunks.some((chunk) => chunk.sourceLocation?.pageNumber === 1));
-      assert.match(pdfResult.chunks.map((chunk) => chunk.chunkText).join(" ").toUpperCase(), /OCR SOURCE/);
-      assert.ok(pdfResult.parserMetadata.warnings.length > 0);
-      assert.equal(pdfResult.parserMetadata.ocrLanguage, "eng");
+      assert.ok(
+        pdfResult.chunks.some(
+          (chunk) => chunk.sourceLocation?.pageNumber === 1,
+        ),
+      );
+      assert.match(
+        pdfResult.chunks.map((chunk) => chunk.chunkText).join(" ").toUpperCase(),
+        /OCR\s+SOURCE\s+4821/,
+      );
+      assert.ok(
+        pdfResult.parserMetadata.warnings.some((warning) =>
+          /OCR was used for scanned PDF page 1/.test(warning),
+        ),
+        pdfResult.parserMetadata.warnings.join("\n"),
+      );
+      assert.equal(pdfResult.parserMetadata.parser, "pdfjs-dist");
+      assert.equal(pdfResult.parserMetadata.scannedPageCount, 1);
+      assert.equal(pdfResult.parserMetadata.ocrEngine, "rapidocr");
+      assert.equal(pdfResult.parserMetadata.ocrModel, "PP-OCRv6");
+      assert.equal(pdfResult.parserMetadata.ocrRoute, "id");
     } finally {
-      if (originalOcrLanguage === undefined) delete process.env.XASS_OCR_LANG;
-      else process.env.XASS_OCR_LANG = originalOcrLanguage;
+      if (originalOcrPython === undefined) delete process.env.XASS_OCR_PYTHON;
+      else process.env.XASS_OCR_PYTHON = originalOcrPython;
+      if (originalOcrModelDir === undefined) delete process.env.XASS_OCR_MODEL_DIR;
+      else process.env.XASS_OCR_MODEL_DIR = originalOcrModelDir;
       rmSync(directory, { recursive: true, force: true });
     }
   },
 );
+
+function xlsxPackage(sheetName, rowsXml, { styles = "", workbookExtra = "" } = {}) {
+  return makeZip({
+    "xl/workbook.xml": `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><workbookPr date1904="0"${workbookExtra}/><sheets><sheet name="${sheetName}" sheetId="1"/></sheets></workbook>`,
+    "xl/styles.xml": `<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs>${styles || "<xf/>"}</cellXfs></styleSheet>`,
+    "xl/worksheets/sheet1.xml": `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rowsXml}</sheetData></worksheet>`,
+  });
+}
+
+const inlineCell = (reference, value) =>
+  `<c r="${reference}" t="inlineStr"><is><t>${value}</t></is></c>`;
+
+function columnLettersForTest(column) {
+  let value = column;
+  let letters = "";
+  while (value > 0) {
+    value -= 1;
+    letters = String.fromCharCode(65 + (value % 26)) + letters;
+    value = Math.floor(value / 26);
+  }
+  return letters;
+}
+
+test("long XLSX rows keep per-cell references only inside the split part that contains the cell", async () => {
+  const filler = "x".repeat(1400);
+  const labels = ["Item", "Part B", "Calc", "Part D", "Part E", "Part F", "Part G", "Huge"];
+  const header = `<row r="1">${labels.map((label, index) => inlineCell(`${String.fromCharCode(65 + index)}1`, label)).join("")}</row>`;
+  const data = `<row r="2">${inlineCell("A2", "Long row")}${inlineCell("B2", `B-${filler}`)}<c r="C2"><f>1+1</f></c>${inlineCell("D2", `D-${filler}`)}${inlineCell("E2", `E-${filler}`)}${inlineCell("F2", `F-${filler}`)}${inlineCell("G2", `G-${filler}`)}${inlineCell("H2", "Z".repeat(4000))}</row>`;
+  const result = await parseDocumentBuffer(
+    "split-row.xlsx",
+    await xlsxPackage("Long", header + data),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  if (!result.ok) return;
+
+  const references = result.chunks.flatMap((chunk) =>
+    (chunk.sourceReferences ?? []).map((source) => ({ chunk, source })),
+  );
+  assert.ok(result.chunks.length >= 2, "the long row is split across chunks");
+  const sourceIds = references.map(({ source }) => source.sourceId);
+  assert.equal(new Set(sourceIds).size, sourceIds.length, "source IDs stay unique");
+
+  for (const { chunk, source } of references) {
+    assert.ok(chunk.chunkText.includes(source.text), "every reference text is citable in its chunk");
+    if (source.cell) {
+      assert.ok(source.modelText.length > 0);
+      assert.ok(chunk.chunkText.includes(source.modelText));
+      for (const sibling of source.rowCells ?? []) {
+        assert.ok(
+          chunk.chunkText.includes(sibling.value),
+          "a split part exposes only sibling cells whose evidence it contains",
+        );
+      }
+    }
+  }
+
+  const formula = references.find(({ source }) => source.cell?.cell === "C2");
+  assert.ok(formula, "the formula cell keeps a per-cell reference in its part");
+  assert.match(formula.source.text, /no cached value/);
+  assert.match(formula.source.text, /formula cache: missing_cache/);
+  assert.equal(formula.chunk.formulaCells?.find((cell) => cell.cellReference === "C2")?.formulaCacheStatus, "missing_cache");
+
+  // A cell whose token is longer than one part cannot be cited per cell; it
+  // stays row-level instead of being attributed to a part that lacks it.
+  assert.equal(references.some(({ source }) => source.cell?.cell === "H2"), false);
+
+  const rowReferences = references.filter(({ source }) => !source.cell && source.sourceLocation?.rowStart === 2);
+  assert.ok(rowReferences.length >= 2, "each split part retains its own row reference");
+});
+
+test("the 120 source-reference cap leaves later rows citable at row level", async () => {
+  const header = `<row r="1">${["Code", "Name", "Progress", "Status", "Owner"].map((label, index) => inlineCell(`${String.fromCharCode(65 + index)}1`, label)).join("")}</row>`;
+  const rows = Array.from({ length: 40 }, (_, index) => {
+    const row = index + 2;
+    return `<row r="${row}">${inlineCell(`A${row}`, `W-${row}`)}${inlineCell(`B${row}`, `Work ${row}`)}${inlineCell(`C${row}`, `${row}%`)}${inlineCell(`D${row}`, "On track")}${inlineCell(`E${row}`, "Owner")}</row>`;
+  }).join("");
+  // A row that alone exceeds the budget cannot expose all cells per cell; it
+  // must still keep its row reference instead of being dropped.
+  const wideRow = `<row r="42">${Array.from({ length: 130 }, (_, index) => inlineCell(`${columnLettersForTest(index + 1)}42`, `V-${index + 1}`)).join("")}</row>`;
+  const result = await parseDocumentBuffer("cap.xlsx", await xlsxPackage("Cap", header + rows + wideRow));
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  if (!result.ok) return;
+
+  assert.ok(result.chunks.length >= 2, "the reference budget splits the group into bounded chunks");
+  const rowReferences = result.chunks.flatMap((chunk) =>
+    (chunk.sourceReferences ?? []).filter(
+      (source) => !source.cell && typeof source.sourceLocation?.rowStart === "number",
+    ),
+  );
+  assert.ok(rowReferences.length >= 41, "every data row keeps a row reference");
+  const wideRowReferences = result.chunks
+    .flatMap((chunk) => chunk.sourceReferences ?? [])
+    .filter((source) => source.sourceLocation?.rowStart === 42);
+  assert.equal(wideRowReferences.some((source) => source.cell), false, "an over-budget row stays row-level");
+  for (const chunk of result.chunks) {
+    const references = chunk.sourceReferences ?? [];
+    assert.ok(references.length <= 120, `each chunk is capped, got ${references.length}`);
+  }
+});
+
+test("duplicate XLSX headers are diagnosed fail-closed while merged repeats are not", async () => {
+  const duplicateHeader = `<row r="1">${inlineCell("A1", "Item")}${inlineCell("B1", "Progress")}${inlineCell("C1", "Progress")}</row><row r="2">${inlineCell("A2", "Cable")}${inlineCell("B2", "30%")}${inlineCell("C2", "40%")}</row>`;
+  const duplicate = await parseDocumentBuffer(
+    "duplicate-header.xlsx",
+    await xlsxPackage("Duplicate", duplicateHeader),
+  );
+  assert.equal(duplicate.ok, true, duplicate.ok ? undefined : duplicate.errorMessage);
+  if (duplicate.ok) {
+    assert.ok(
+      duplicate.parserMetadata.warnings.some((warning) => String(warning).includes("duplicate_header")),
+      duplicate.parserMetadata.warnings.join("\n"),
+    );
+    assert.ok(
+      duplicate.chunks.some((chunk) => chunk.sourceReferences?.some((source) => source.cell?.cell === "B2")),
+      "literal cells remain citable beside the warning",
+    );
+  }
+
+  const mergedHeader = `<row r="1">${inlineCell("A1", "Fire Alarm")}${inlineCell("B1", "Fire Alarm")}${inlineCell("C1", "Status")}</row><row r="2">${inlineCell("A2", "Sub")}${inlineCell("B2", "Progress")}${inlineCell("C2", "State")}</row><row r="3">${inlineCell("A3", "Alarm")}${inlineCell("B3", "20%")}${inlineCell("C3", "Green")}</row>`;
+  const merged = await parseDocumentBuffer(
+    "merged-header.xlsx",
+    await makeZip({
+      "xl/workbook.xml": `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets><sheet name="Merged" sheetId="1"/></sheets></workbook>`,
+      "xl/worksheets/sheet1.xml": `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${mergedHeader}</sheetData><mergeCells><mergeCell ref="A1:B1"/></mergeCells></worksheet>`,
+    }),
+  );
+  assert.equal(merged.ok, true, merged.ok ? undefined : merged.errorMessage);
+  if (merged.ok) {
+    assert.equal(
+      merged.parserMetadata.warnings.some((warning) => String(warning).includes("duplicate_header")),
+      false,
+      "one merged header range is an intentional repeat",
+    );
+  }
+});
+
+test("a weekly Gantt week header above a WBS header is kept as a two-row header", async () => {
+  const rows = `<row r="1">${inlineCell("A1", "WBS")}<c r="B1" s="0"><v>46311</v></c><c r="C1" s="0"><v>46318</v></c></row><row r="2">${inlineCell("A2", "Code")}${inlineCell("B2", "WBS 1")}${inlineCell("C2", "WBS 2")}</row><row r="3">${inlineCell("A3", "1.1")}<c r="B3"><v>10</v></c><c r="C3"><v>20</v></c></row>`;
+  const result = await parseDocumentBuffer(
+    "weekly-gantt.xlsx",
+    await xlsxPackage("Gantt", rows, { styles: '<xf numFmtId="14"/>' }),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  if (!result.ok) return;
+  const text = result.chunks.map((chunk) => chunk.chunkText).join("\n");
+  assert.match(text, /WBS \/ Code/, "the week row and WBS row are combined as one header");
+  assert.match(text, /46311 \/ WBS 1/, "the date-formatted week header row joins the WBS header row");
+});
 
 test("Office package expansion and WebP/PPT signature checks fail before decompression", async () => {
   const oversizedPackage = Buffer.from(
@@ -666,5 +914,94 @@ test("Office package expansion and WebP/PPT signature checks fail before decompr
       "legacy.ppt",
     ),
     true,
+  );
+});
+
+// Regression: a single header row may hold one date beside textual labels. The
+// row below it is the first data row, and the row after that has numbers. The
+// second data row must not be consumed as a second header.
+test("two-header detection fails closed when the candidate second header is the first data row", async () => {
+  const rows =
+    `<row r="1">${inlineCell("A1", "Item")}<c r="B1" s="0"><v>46311</v></c>${inlineCell("C1", "Owner")}</row>` +
+    `<row r="2">${inlineCell("A2", "1.1")}${inlineCell("B2", "Install cameras")}${inlineCell("C2", "On track")}</row>` +
+    `<row r="3">${inlineCell("A3", "1.2")}${inlineCell("B3", "Terminate cable")}<c r="C3"><v>40</v></c></row>`;
+  const result = await parseDocumentBuffer(
+    "two-header-regression.xlsx",
+    await xlsxPackage("Report", rows, { styles: '<xf numFmtId="14"/>' }),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  if (!result.ok) return;
+
+  const references = result.chunks.flatMap((chunk) => chunk.sourceReferences ?? []);
+  assert.ok(
+    references.some((source) => source.sourceLocation?.rowStart === 2 && source.sourceLocation?.rowEnd === 2),
+    "the first data row keeps its own row reference",
+  );
+  assert.ok(
+    references.some((source) => source.cell?.cell === "A2"),
+    "the first data row keeps per-cell references",
+  );
+  assert.ok(
+    references.some((source) => source.cell?.cell === "C3"),
+    "later rows remain citable",
+  );
+  const text = result.chunks.map((chunk) => chunk.chunkText).join("\n");
+  assert.match(text, /1\.1/, "the first data row's literal value is retained");
+  assert.match(text, /Install cameras/, "the first data row's text is retained");
+});
+
+// Regression: the same two-header shape still works when the first row is a
+// real week/date grid rather than an ordinary header with one date column.
+test("two-header detection still accepts a date row above a label row", async () => {
+  const rows =
+    `<row r="1"><c r="A1" s="0"><v>46311</v></c><c r="B1" s="0"><v>46318</v></c><c r="C1" s="0"><v>46325</v></c></row>` +
+    `<row r="2">${inlineCell("A2", "Code")}${inlineCell("B2", "WBS 1")}${inlineCell("C2", "WBS 2")}</row>` +
+    `<row r="3">${inlineCell("A3", "1.1")}<c r="B3"><v>10</v></c><c r="C3"><v>20</v></c></row>`;
+  const result = await parseDocumentBuffer(
+    "week-grid.xlsx",
+    await xlsxPackage("Gantt", rows, { styles: '<xf numFmtId="14"/>' }),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  if (!result.ok) return;
+  const text = result.chunks.map((chunk) => chunk.chunkText).join("\n");
+  assert.match(text, /46311 \/ Code/, "the week grid row joins the WBS label row as a header");
+});
+
+// Regression: a block can contain " | " inside a cell's own value. Only a
+// separator that lies between two located cell tokens may be consumed; literal
+// text must survive the split, and contained cells stay citable.
+test("splitting a long row preserves a literal pipe inside a cell value", async () => {
+  const before = "b".repeat(700);
+  const cellValue = `${before} CORE_BEFORE | CORE_AFTER ${"c".repeat(1500)}`;
+  const header = `<row r="1">${inlineCell("A1", "Item")}${inlineCell("B1", "Detail")}</row>`;
+  const data = `<row r="2">${inlineCell("A2", `A-${"a".repeat(2000)}`)}${inlineCell("B2", cellValue)}</row>`;
+  const result = await parseDocumentBuffer(
+    "pipe-in-cell.xlsx",
+    await xlsxPackage("Literal", header + data),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  if (!result.ok) return;
+
+  const chunks = result.chunks;
+  assert.ok(chunks.length >= 2, "the long row is split into multiple chunks");
+  const text = chunks.map((chunk) => chunk.chunkText).join("\n");
+  assert.ok(
+    text.includes("CORE_BEFORE | CORE_AFTER"),
+    "the literal pipe inside the cell value is not skipped",
+  );
+
+  const cellReferences = chunks.flatMap((chunk) =>
+    (chunk.sourceReferences ?? [])
+      .filter((source) => source.cell?.cell === "B2")
+      .map((source) => ({ chunk, source })),
+  );
+  assert.equal(cellReferences.length, 1, "the contained cell keeps exactly one per-cell reference");
+  assert.ok(
+    cellReferences[0].source.modelText.includes("CORE_BEFORE | CORE_AFTER"),
+    "the per-cell reference covers the literal cell text",
+  );
+  assert.ok(
+    cellReferences[0].chunk.chunkText.includes(cellReferences[0].source.text),
+    "the per-cell reference stays citable in its own chunk",
   );
 });
