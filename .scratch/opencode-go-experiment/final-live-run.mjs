@@ -271,7 +271,7 @@ async function runDocument(name, fileName, buffer) {
       progress: result.ok ? result.extraction.assurance_observations.progress.map((row) => ({ percent: row.percent, as_of: row.as_of_date, scope: row.scope_label ?? row.scope_level })) : null,
       milestones: result.ok ? result.extraction.assurance_observations.milestones.map((row) => ({ label: row.label, date: row.date ?? row.raw_date })) : null,
       quality_warnings: result.ok ? result.extraction.quality_warnings.slice(0, 8) : null,
-      checkpoints: [...rows.values()].map(({ status, lastError }) => ({ status, lastError: lastError ? String(lastError).slice(0, 160) : null })),
+      checkpoints: Object.values(rows).map(({ status, lastError }) => ({ status, lastError: lastError ? String(lastError).slice(0, 160) : null })),
     };
   } catch (error) {
     outcomes[name] = { parse_ok: true, crash: String(error?.message ?? error).slice(0, 300) };

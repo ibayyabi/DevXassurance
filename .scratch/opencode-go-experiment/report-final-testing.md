@@ -231,3 +231,15 @@ Hipotesis lampiran 7/8 ("anotasi formula raksasa mendominasi") terbukti **spesif
 Implikasi jujur: tidak ada satu lever aman yang dramatis untuk dokumen asli. Kompresi `source_location`/overhead JSON menyentuh bentuk sitasi yang mengalir ke persistensi dan read model; slimming kerangka menyentuh rules fail-closed yang diperoleh dari insiden. Kombinasi realistis ±20–25% dengan risiko kontrak sedang — **tidak dikerjakan sekarang**. Biaya workbook asli ±250k token; cache `/41` memangkas ±36% untuk upload mingguan berikutnya. Kompresi anotasi formula TETAP berharga untuk keluarga fixtures (formula RAG raksasa generator) tapi bukan prioritas dokumen asli.
 
 Status akhir "menerima file asli sebaik mungkin": **terpenuhi secara offline** (30/30 file, derivasi terverifikasi independen, disiplin kosong-vs-nol, gate label) dan fail-closed untuk live. Test live dokumen asli menunggu persetujuan konten + anggaran dari pengguna.
+
+## Lampiran 10: gerbang live dokumen PMO asli — dua dokumen, dua jalur, lulus
+
+Persetujuan pengguna (konten nyata ke provider + anggaran test akhir). Subsistem 7. AIR BERSIH dipilih karena nilainya sudah terverifikasi independen. Provider: `glm-5.3-flash` via OpenCode Go; tanpa mock.
+
+**Tahap 1 — `Progres Air Bersih.xlsx` (tracker PM, dokumen ringan): `ok: true` end-to-end penuh.** 6 request, 32.590 in / 5.557 out. Progress **2.1=90%, 2.2=30% — cocok persis ground truth XML independen**. Fakta grounded berbahasa Indonesia dari kolom Catatan (kendala access point, pengadaan flow meter, milestone uji fungsi 2026-11-27); summary koheren. Fail-closed: 8 milestone dengan `scope_source_id` tak terbukti dieksklusi validator.
+
+**Tahap 2 — `07_Air_Bersih_Subcontractor_Weekly.xlsx` (template berat, 21 grup): pipeline selesai, `ok: true`.** 53 request, 271.249 in / 48.642 out, `cached_tokens` 47.872. **13 grup completed, 8 gagal fail-closed** (milestone scope tak terbukti ×2, nilai fakta tak cocok sumber, dst. — semua tampil sebagai warning/needs_review, tidak ada data tak terbukti terbit). Terbit: 36 fakta, 15 progress (termasuk **konflik sumber nyata: dua baris berbeda mengklaim WBS 2.1 = 90% dan 9%** — diturunkan setia dengan sitasi masing-masing, bahan tepat untuk keputusan konflik C4 di overview), 16 milestone. Summary dokumen koheren (subkontraktor Urbansolv, baseline 2026-09-18, progress minimal).
+
+**Total live dokumen asli: ±428k token** (tahap 1 + tiga attempt tahap 2; dua attempt awal terhenti di cap prompt 38k/45k sebelum dinaikkan ke 60k — grup terbesar 47k char). Store `/41` menyimpan semua grup completed; run ulang tidak membayar ulang.
+
+**Kesimpulan gerbang**: arsitektur menerima dokumen PMO asli end-to-end secara live pada KEDUA jalur (dokumen ringan selesai bersih; dokumen berat selesai dengan 8 grup gagal-closed yang jujur). Rasio needs_review pada workbook berat (8/21) adalah feedback loop iterasi prompt berikutnya — bukan kebocoran. Status klaim tetap `READY WITH HUMAN REVIEW` (lampiran 5); bukti live dokumen asli ini memperluas cakupannya ke jalur model pada 1 subsistem nyata.
