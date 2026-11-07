@@ -283,3 +283,16 @@ Trade-off terukur: memperkecil kepadatan menaikkan total biaya moderat (scaffold
 ## Lampiran 14: probe validator Gemini 3.8-flash — kontrol positif lulus, kontrol negatif tertahan kuota
 
 Probe v2 (respons Gemini disuapi ke validator produksi): kontrol positif (grup Progres yang glm luluskan) - validator ok, 1 fakta grounded terbit tanpa warning; model mampu menghasilkan keluaran yang lolos fail-closed pada dokumen asli. Kontrol negatif (grup numeric-mismatch yang glm gagalkan) tertahan high demand free tier - inkonklusif, tinggal re-run gratis. Kesimpulan sementara: fallback Gemini flash 3.8 layak dibangun; keputusan final menunggu kontrol negatif.
+
+## Lampiran 15: dokumen cost asli (Pengajuan Pembelian) — gagal tertutup 8/8, penyebab teridentifikasi
+
+File cost nyata satu-satunya di DOKUMEN ASLI ternyata yang terpadat: 8 grup dengan prompt 29-41k char (~7-10k token/request). Dua attempt live (total ±565k token): **semua 8 grup gagal fail-closed** bahkan setelah loop koreksi — model konsisten menghasilkan keluaran yang ditolak validator pada tabel ini.
+
+**Akar masalah teridentifikasi**: tabel Master Hardware di file ini **bergeser** — header r1 (Kode Komponen | Nama | PIC | ...) tidak lagi cocok dengan layout baris 5+ (harga 2.357.276 muncul di kolom "Satuan"; nama komponen pindah ke kolom A). Ini kasus konkret dari catatan terbuka stream parser: "headerless tables are still open". Model tidak dapat mengaitkan nilai ke kolom bermakna pada tabel yang strukturnya melompat, dan validator (dengan benar) menolak klaim tanpa bukti kolom.
+
+**Implikasi**:
+1. Sign-off cost/risk pada dokumen asli **tertahan** oleh masalah tabel bergeser — bukan oleh iterasi prompt.
+2. Jalur penyelesaiannya adalah pekerjaan **parser**: deteksi tabel yang header-nya tidak cocok dengan tata letak data (structural re-mapping atau per-row header inference) — item nyata untuk stream parser/document-22 berikutnya, dengan contoh file nyata yang kini tersedia.
+3. Model biaya keluarga ini dikoreksi: file 8-grup ≈ **300k+ token** (rerata 10k token/request — terpadat sejauh ini).
+
+Status klaim tetap lampiran 5; domain cost pada dokumen asli = gap yang jujur sampai tabel bergeser tertangani.
