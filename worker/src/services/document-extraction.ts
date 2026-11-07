@@ -470,7 +470,11 @@ function percentShapedClaimText(cell: ParsedSourceCell): string | null {
 // /40: task prompts require verbatim ISO record dates for snapshot_date and
 // as_of_date, and treat stage-counter wording as a label, not a period;
 // cached /39 rows are re-extracted once.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/40";
+// /41: group keys are content-addressed (chunk texts + locators + versions,
+// without the document hash or group index), so a next-week workbook reuses
+// the earlier validated results of its unchanged groups across documents;
+// cached /40 rows are re-extracted once.
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/41";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -659,7 +663,7 @@ export async function extractDocumentGroups(
     );
   }
   const contentHash = hashContent(job.fileBuffer);
-  const groups = buildChunkGroups(chunks, contentHash, parserVersion, parserMetadata, job);
+  const groups = buildChunkGroups(chunks, parserVersion, parserMetadata, job);
   if (groups.length > MAX_DOCUMENT_GROUPS) {
     return failure(
       "document_extraction_limit_exceeded",
@@ -691,6 +695,11 @@ export async function extractDocumentGroups(
   }
 
   const groupKeys = new Set(groups.map((group) => group.groupKey));
+  // Same-document rows drive retry accounting and take precedence; completed
+  // rows from sibling documents (a next-week workbook whose unchanged groups
+  // hash identically) may satisfy a group through the content-addressed key.
+  // Cross-document rows are only reusable when completed: a failed row from
+  // another document must never suppress this document's own extraction.
   const cacheByKey = new Map(
     cachedRows
       .filter((row) =>
@@ -700,6 +709,15 @@ export async function extractDocumentGroups(
       )
       .map((row) => [row.groupKey, row]),
   );
+  const reusableByKey = new Map(cacheByKey);
+  for (const row of cachedRows) {
+    if (row.projectId !== job.projectId || !groupKeys.has(row.groupKey)) continue;
+    if (row.status !== "completed" || !row.provider || !row.model) continue;
+    const existing = reusableByKey.get(row.groupKey);
+    if (!existing || (existing.documentId !== job.documentId && row.documentId === job.documentId)) {
+      reusableByKey.set(row.groupKey, row);
+    }
+  }
   const groupResults: Array<{
     value: GroupExtraction;
     provider: string;
@@ -708,7 +726,7 @@ export async function extractDocumentGroups(
   const groupsToProcess: Array<{ group: ChunkGroup; groupIndex: number }> = [];
 
   groups.forEach((group, groupIndex) => {
-    const cached = cacheByKey.get(group.groupKey);
+    const cached = reusableByKey.get(group.groupKey);
     if (cached?.status === "completed" && cached.provider && cached.model) {
       const validated = validateGroupExtraction(cached.result, group, true);
       if (validated.ok) {
@@ -839,7 +857,6 @@ function containsSourcePhrase(text: string, phrase: string) {
 
 function buildChunkGroups(
   chunks: ParsedChunk[],
-  contentHash: string,
   parserVersion: string,
   parserMetadata: Record<string, unknown>,
   job: DocumentExtractionContext,
@@ -916,23 +933,33 @@ function buildChunkGroups(
     const groupIndex = groups.length;
     const chunkStartIndex = current[0].chunkIndex;
     const chunkEndIndex = current[current.length - 1].chunkIndex;
+    // Content-addressed group key: binds this group's own chunk texts and
+    // locators plus the parser/schema versions — deliberately NOT the document
+    // hash and NOT the group index. A next-week workbook whose structure is
+    // unchanged (only a few cell values edited) produces byte-identical chunk
+    // texts for its unchanged groups, so those groups reuse the earlier
+    // validated result without a model call; any edited group hashes
+    // differently and re-extracts (fail-closed: reuse requires exact content
+    // equality). The chunk range stays in the key so a reused result's
+    // evidence_chunk_index and parser-authored source ids remain valid without
+    // remapping; groups whose earlier boundaries shifted miss the cache and
+    // re-extract. Reused output is still validated against the current group
+    // on load, and hints or titles never enter the key because the validator
+    // only accepts source-backed values.
     const groupKey = createHash("sha256")
-      .update(contentHash)
+      .update("document-extraction-group-content/v1")
       .update("\0")
       .update(parserVersion)
       .update("\0")
       .update(EXTRACTION_SCHEMA_VERSION)
       .update("\0")
-      .update(String(groupIndex))
-      .update(":")
       .update(String(chunkStartIndex))
       .update(":")
       .update(String(chunkEndIndex))
       .update("\0")
       .update(JSON.stringify(current.map((chunk) => ({
-        chunkIndex: chunk.chunkIndex,
-        sourceLocation: chunk.sourceLocation ?? null,
         text: chunk.chunkText,
+        sourceLocation: chunk.sourceLocation ?? null,
       }))))
       .digest("hex");
     const candidateInterpretation = collectCandidateInterpretation(current, parserMetadata);

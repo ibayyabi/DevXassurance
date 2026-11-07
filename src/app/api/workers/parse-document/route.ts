@@ -500,6 +500,11 @@ function createExtractionGroupStore(
 ): DocumentExtractionGroupStore {
   return {
     async loadGroups(projectId, documentId, groupKeys) {
+      // Project-scoped on purpose: group keys are content-addressed (chunk
+      // texts + locators + parser/schema versions), so a next-week workbook's
+      // unchanged groups may reuse a sibling document's completed results.
+      // Same-document rows take precedence in the extraction layer; failed
+      // rows from other documents are never reusable.
       const rows: DocumentExtractionGroupCacheRow[] = [];
       for (let offset = 0; offset < groupKeys.length; offset += CACHE_QUERY_BATCH_SIZE) {
         const keys = groupKeys.slice(offset, offset + CACHE_QUERY_BATCH_SIZE);
@@ -509,7 +514,6 @@ function createExtractionGroupStore(
             "project_id, document_id, group_key, status, result, attempt_count, provider, model",
           )
           .eq("project_id", projectId)
-          .eq("document_id", documentId)
           .in("group_key", keys);
 
         if (error) throw new Error("The extraction-group cache could not be read.");

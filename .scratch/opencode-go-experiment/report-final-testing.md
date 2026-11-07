@@ -133,3 +133,25 @@ File: `.scratch/opencode-go-experiment/ground-truth-review-11-pengeloaan.md` (11
 Sampel dasar per panggilan (rata-rata terukur): classification 936/137, analysis naratif 1.582/1.020, analysis XLSX 3.053/1.132, domain naratif 2.282/308, domain XLSX 3.528/62, summary 512/136. Satuan token, bukan biaya uang.
 
 Faktor yang mengubah angka: (1) **loop koreksi** +20–50% request (teramati 1 loop pada Amber naratif; grup ITB lolos attempt pertama); (2) **prompt caching penyedia** berpotensi memangkas biaya input secara besar (pilot melihat input cached) — belum diukur; (3) reasoning token dihitung provider ke `max_tokens`. Penurunan biaya paling menjanjikan berikutnya: memangkas ukuran prompt source-reference dan mengeksplorasi caching — bukan bagian ronde ini.
+
+## Lampiran 4: cache grup konten-ter-address (/41) — penghematan upload mingguan terukur offline
+
+**Motivasi pengguna**: file yang diupload antar minggu strukturnya sama, hanya sebagian kecil nilai berubah (mis. `01_Alarm` W4 vs W5). Pengukuran menunjukkan 64–86% chunk identik byte-per-byte antar minggu — tetapi kunci cache lama menghash **seluruh dokumen** + index grup, sehingga satu nilai berubah menginvalidasi semua grup dan upload mingguan membayar ulang penuh (~50 request, ~188k token).
+
+**Perubahan** (commit terpisah, tanpa migrasi DB):
+1. `groupKey` kini **konten-ter-address**: hash teks chunk + locator + versi parser/schema — tanpa hash dokumen, tanpa index grup. Reuse hanya untuk baris `completed` dengan kesamaan konten eksak; hasil reuse **divalidasi ulang** terhadap grup saat ini saat load; `chunkStart/EndIndex` tetap di kunci sehingga `evidence_chunk_index` dan source id parser tetap valid tanpa remap.
+2. Reuse lintas-dokumen dalam satu proyek: baris dokumen lain yang completed boleh memuaskan grup identik (baris dokumen-sendiri diutamakan; baris `failed` dari dokumen lain tidak pernah reusable).
+3. Query store produksi (`parse-document/route.ts`) menjadi project-scoped (query app-level; format kunci tetap sha256 → tanpa migrasi).
+4. Cache `/40` → `/41` (baris lama diekstrak ulang sekali).
+
+**Bukti offline (0 token):**
+- 3 tes baru (`content-addressed-group-cache.test.mjs`): upload minggu berikutnya hanya memanggil ulang grup yang berubah (2 panggilan, sisanya reuse); re-upload identik sebagai dokumen baru = 0 panggilan grup; baris proyek lain tidak pernah reusable. Suite penuh **314/314**, tsc, lint bersih.
+- **Pengukuran file asli** (`measure-cache-savings.mjs`, cold vs warm minggu yang sama, termasuk retry grup gagal):
+
+| Subsistem | W4→W5 | W5→W6 | W6→W7 |
+|---|---|---|---|
+| 11_Pengelolaan | −22 call (50%) | −26 (59%) | −8 (18%) |
+| 01_Alarm | −24 (43%) | −8 (14%) | −22 (39%) |
+| 12_BISMA | −18 (43%) | −20 (48%) | −8 (19%) |
+
+Rata-rata **~36% panggilan grup hemat per upload mingguan** (≈60–100k token/minggu/subsistem pada sampel live). Tiga faktor yang menahan di bawah potensi chunk-level (64–86%): nilai % berubah tersebar di banyak grup Workplan; grup ambigu gagal-closed harus diekstrak ulang tiap minggu (butuh `sheet_interpretation` baru); transisi W6→W7 menggeser boundary chunk (29→31, 27→28, 44→45) sehingga grup lintas pergeseran meleset. Levyer lanjutan yang tersisa: chunking struktural yang stabil antar minggu dan remap index — dicatat sebagai kerja berikutnya, bukan bagian ronde ini.
