@@ -938,15 +938,15 @@ test("document-level artifact classification survives conflicting chunk groups",
 
 test("invalid fact citations are excluded with an explicit review warning", async () => {
   const store = memoryGroupStore();
-  let calls = 0;
-  let groupCalls = 0;
+  let analysisCalls = 0;
   await withLocalOllama(async (_url, init) => {
-    calls += 1;
     const prompt = JSON.parse(init.body).messages[1].content;
     if (prompt.startsWith("Classify the entire document")) return modelResponse(validModelOutput(prompt));
     if (isExecutiveSummaryPrompt(prompt)) return modelResponse(validModelOutput(prompt));
-    groupCalls += 1;
-    assert.ok(groupCalls === 1 || prompt.includes("Previous response validation errors"));
+    if (prompt.includes("narrative assurance signals")) {
+      analysisCalls += 1;
+      if (analysisCalls > 1) assert.ok(prompt.includes("Previous response validation errors"));
+    }
     return modelResponse(validModelOutput(prompt, { invalidCitation: true }));
   }, async () => {
     const result = await processDocumentJob(
@@ -957,22 +957,23 @@ test("invalid fact citations are excluded with an explicit review warning", asyn
     assert.equal(result.processing_status, "needs_review");
     assert.equal(result.facts.length, 0);
     assert.match(result.processing_error, /facts\[0\].*excluded/i);
-    assert.equal(calls, 6);
+    assert.equal(analysisCalls, 2);
     assert.equal([...store.rows.values()][0].status, "failed");
   });
 });
 
 test("a valid correction on the final bounded attempt is accepted", async () => {
-  let calls = 0;
-  let groupCalls = 0;
+  let analysisCalls = 0;
   await withLocalOllama(async (_url, init) => {
-    calls += 1;
     const prompt = JSON.parse(init.body).messages[1].content;
     if (prompt.startsWith("Classify the entire document")) return modelResponse(validModelOutput(prompt));
     if (isExecutiveSummaryPrompt(prompt)) return modelResponse(validModelOutput(prompt));
-    groupCalls += 1;
-    if (groupCalls === 2) assert.ok(prompt.includes("Previous response validation errors"));
-    return modelResponse(validModelOutput(prompt, { invalidCitation: groupCalls === 1 }));
+    if (prompt.includes("narrative assurance signals")) {
+      analysisCalls += 1;
+      if (analysisCalls > 1) assert.ok(prompt.includes("Previous response validation errors"));
+      return modelResponse(validModelOutput(prompt, { invalidCitation: analysisCalls === 1 }));
+    }
+    return modelResponse(validModelOutput(prompt));
   }, async () => {
     const result = await processDocumentJob(
       job(sourceDocument("CORRECTION", 1), {
@@ -983,7 +984,7 @@ test("a valid correction on the final bounded attempt is accepted", async () => 
     );
     assert.equal(result.status, "completed");
     assert.equal(result.processing_status, "completed");
-    assert.equal(calls, 6);
+    assert.equal(analysisCalls, 2);
     assert.ok(result.facts[0].evidence_chunk_index >= 0);
   });
 });
@@ -2126,6 +2127,8 @@ test("a provider quota defers the remaining groups for retry instead of reportin
   let groupCalls = [];
   let releaseFirstGroup;
   const firstGroupGate = new Promise((resolve) => { releaseFirstGroup = resolve; });
+  let markFirstDomainStarted;
+  const firstDomainStarted = new Promise((resolve) => { markFirstDomainStarted = resolve; });
   let markDeferredCheckpoint;
   const deferredCheckpointSaved = new Promise((resolve) => { markDeferredCheckpoint = resolve; });
   const saveGroup = store.saveGroup.bind(store);
@@ -2142,8 +2145,12 @@ test("a provider quota defers the remaining groups for retry instead of reportin
     if (isExecutiveSummaryPrompt(prompt)) return modelResponse(validModelOutput(prompt));
     const chunkIndex = documentContextFromPrompt(prompt)[0].chunk_index;
     groupCalls.push(chunkIndex);
-    if (quotaExhausted && chunkIndex === 0) await firstGroupGate;
+    if (quotaExhausted && chunkIndex === 0 && prompt.includes("Task: collect every source-backed cost")) {
+      markFirstDomainStarted();
+      await firstGroupGate;
+    }
     if (quotaExhausted && chunkIndex === 2) {
+      await firstDomainStarted;
       return new Response(JSON.stringify({ error: "quota exceeded" }), {
         status: 429,
         headers: { "Content-Type": "application/json" },
