@@ -241,13 +241,21 @@ test("a published source snapshot runs the real pipeline and carries its provena
     const published = recorder.calls.find((call) => call.name === "publish_assurance_assessment_snapshot");
     const domains = published.args.p_findings.map((finding) => finding.domain).sort();
     assert.deepEqual(domains, ["budget", "schedule", "risk"]);
-    assert.equal(
-      published.args.p_metadata.results.progress_observations.length,
-      1,
-      "the reported progress observation reaches the published metadata",
+    assert.ok(
+      Array.isArray(published.args.p_metadata.results.progress_observations),
+      "reported progress is published beside the computed findings",
     );
     assert.equal(
-      published.args.p_metadata.results.progress_observations[0].percent,
+      published.args.p_metadata.results.progress_source_observations.length,
+      1,
+      "the cited progress row reaches the published metadata",
+    );
+    assert.equal(
+      published.args.p_metadata.results.progress_source_observations[0].observation_id,
+      "obs-1",
+    );
+    assert.equal(
+      published.args.p_metadata.results.progress_source_observations[0].percent,
       18,
     );
     assert.deepEqual(
