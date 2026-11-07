@@ -128,6 +128,7 @@ export async function requireProjectMembership(projectId: string) {
       "role, projects(id, name, health_status, updated_at, organizations(name))",
     )
     .eq("project_id", projectId)
+    .eq("user_id", user.id)
     .maybeSingle();
 
   if (error) {
