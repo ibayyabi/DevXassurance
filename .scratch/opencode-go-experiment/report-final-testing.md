@@ -279,3 +279,7 @@ Trade-off terukur: memperkecil kepadatan menaikkan total biaya moderat (scaffold
 **Kepadatan rendah TIDAK menurunkan rasio kegagalan** — bahkan naik (14/27 = 52% vs 8/21 = 38%; jumlah grup memang bertambah karena partisi). Kelas numeric-mismatch tetap muncul (×4), header candidate (×3), milestone (×3) — model tetap memparafrase angka meski konteks jarang. Yang ikut naik: jumlah request (+27) dan total token (+130k vs chunks=3).
 
 **Kesimpulan keputusan**: lever kepadatan konteks **terbukti tidak efektif** untuk kelas gagal ini pada model ini — biaya lebih tinggi, rasio gagal tidak membaik. Sisa jalur: fallback Gemini flash generasi-3.8 (desain sadar-kelas, free tier) atau terima needs_review sebagai desain. Grup completed tersimpan di cache /41.
+
+## Lampiran 14: probe validator Gemini 3.8-flash — kontrol positif lulus, kontrol negatif tertahan kuota
+
+Probe v2 (respons Gemini disuapi ke validator produksi): kontrol positif (grup Progres yang glm luluskan) - validator ok, 1 fakta grounded terbit tanpa warning; model mampu menghasilkan keluaran yang lolos fail-closed pada dokumen asli. Kontrol negatif (grup numeric-mismatch yang glm gagalkan) tertahan high demand free tier - inkonklusif, tinggal re-run gratis. Kesimpulan sementara: fallback Gemini flash 3.8 layak dibangun; keputusan final menunggu kontrol negatif.
