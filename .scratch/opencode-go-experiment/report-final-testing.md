@@ -243,3 +243,20 @@ Persetujuan pengguna (konten nyata ke provider + anggaran test akhir). Subsistem
 **Total live dokumen asli: ±428k token** (tahap 1 + tiga attempt tahap 2; dua attempt awal terhenti di cap prompt 38k/45k sebelum dinaikkan ke 60k — grup terbesar 47k char). Store `/41` menyimpan semua grup completed; run ulang tidak membayar ulang.
 
 **Kesimpulan gerbang**: arsitektur menerima dokumen PMO asli end-to-end secara live pada KEDUA jalur (dokumen ringan selesai bersih; dokumen berat selesai dengan 8 grup gagal-closed yang jujur). Rasio needs_review pada workbook berat (8/21) adalah feedback loop iterasi prompt berikutnya — bukan kebocoran. Status klaim tetap `READY WITH HUMAN REVIEW` (lampiran 5); bukti live dokumen asli ini memperluas cakupannya ke jalur model pada 1 subsistem nyata.
+
+## Lampiran 11: iterasi prompt kelas 1–2 — verifikasi live parsial dan tercemar ceiling
+
+Perubahan (/43, ter-commit): (1) aturan verbatim `original_value` digit-per-digit dari teks tersitasi (belum pernah ada di prompt analysis — celah nyata); (2) milestone: scope_label wajib bukti kolom scope/declared subject, tanggal hanya dari kolom due/event, null bila tak terbukti — di kedua branch deterministicComplete.
+
+Verifikasi offline: 315/315, tsc, lint ✓. Verifikasi live dilakukan murah via kunci /42 sementara (13 grup completed gratis), lalu versi dikembalikan ke /43 untuk ship.
+
+**Hasil verifikasi: TIDAK MENUTUP.** 22 request, 165,9k in / 32,9k out — **melewati langit-langit input 150k yang dipasang sendiri** → sisa run teracun (4 grup gagal "provider failed" karena StopError, bukan model). Dari 4 grup yang kebagian tes adil: numeric-mismatch ×2, milestone ×1, header ×1 — **masih gagal**. Kelas over-limit dan formula-alert tidak muncul ulang, tetapi sampel tercemar membuat klaim perbaikan lemah.
+
+**Kesimpulan jujur**: iterasi prompt saja **belum terbukti** memperbaiki kelas kegagalan ini pada `glm-5.3-flash` dengan tabel nyata yang padat — model tetap memparafrase angka meski diinstruksikan verbatim. Kumulatif live dokumen asli ±627k token; dirundur sesuai disiplin anti-loop, tanpa run live lanjutan sesi ini.
+
+**Lever berikutnya yang lebih menjanjikan (tercatat, belum dikerjakan)**:
+1. Perkecil kepadatan konteks: kurangi chunk/grup atau pecah grup tabel besar — model lebih jarang salah baris.
+2. Model kuat untuk grup padat (fallback per-kepadatan) — perlu anggaran dan keputusan provider terpisah.
+3. Terima sebagai desain: grup gagal = needs_review + keputusan reviewer (USERFLOW C2/C4) — pipeline sudah benar; beban reviewer inilah metrik yang dipantau rencana overview.
+
+Status klaim TETAP lampiran 5 (READY WITH HUMAN REVIEW, terbatas). Bukti live dokumen asli (lampiran 10) tidak berubah.
