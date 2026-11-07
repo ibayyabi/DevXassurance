@@ -35,6 +35,28 @@ export async function generateReportPreview(formData: FormData) {
   );
   const build = buildReportSections(snapshot, { audience, detailLevel });
 
+  // Automatic snapshots pin through their own operation: no review exists, and
+  // the database derives the identity, manifest, counts, and sources itself.
+  if (snapshot.snapshotId.startsWith("assessment:")) {
+    const { error: automaticError } = await supabase.rpc("assurance_report_operation", {
+      p_project_id: projectId,
+      p_review_id: null,
+      p_operation: "create_automatic",
+      p_payload: {
+        audience,
+        detail_level: detailLevel,
+        sections: build.sections,
+        counts: build.counts,
+        snapshot_cutoff: snapshot.cutoff,
+        snapshot_version: snapshot.version,
+      },
+    });
+    if (automaticError) throw new Error(automaticError.message);
+    revalidatePath(`/app/projects/${projectId}/reports`);
+    revalidatePath(`/app/projects/${projectId}/assurance`);
+    return;
+  }
+
   const { error: previewError } = await supabase.rpc("assurance_report_operation", {
     p_project_id: projectId,
     p_review_id: snapshot.reviewId,

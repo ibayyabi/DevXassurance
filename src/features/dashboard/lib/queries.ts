@@ -7,6 +7,122 @@ import {
   type HealthStatus,
 } from "@/features/dashboard/lib/constants";
 
+/** Live automatic-assessment snapshot for one cut-off, read through RLS. */
+export type AutomaticSnapshotState = {
+  cutoff: string | null;
+  status: string;
+  pending: boolean;
+  snapshot: {
+    id: string;
+    cutoff: string;
+    generation: number;
+    status: "partial" | "complete" | "failed" | "stale";
+    attemptId: string;
+    fingerprint: string;
+    findings: {
+      domain: string;
+      condition: string;
+      headline: string;
+      explanation: string | null;
+      severity: string | null;
+    }[];
+    actions: { domain: string; title: string; priority: string | null; status: string | null }[];
+    evidenceGaps: { document_id?: string; document_title?: string; reason: string }[];
+    sourceVersions: { document_id?: string; role?: string; content_hash?: string | null }[];
+    publishedAt: string;
+  } | null;
+};
+
+type SnapshotRow = {
+  id: string;
+  cutoff: string;
+  generation: number;
+  status: "partial" | "complete" | "failed" | "stale";
+  attempt_id: string;
+  fingerprint: string;
+  findings: unknown;
+  actions: unknown;
+  evidence_gaps: unknown;
+  source_versions: unknown;
+  published_at: string;
+};
+
+type LatestAssessmentPayload = {
+  cutoff: string | null;
+  status: string | null;
+  pending_generation: boolean | null;
+  snapshot: SnapshotRow | null;
+};
+
+type SnapshotFinding = NonNullable<AutomaticSnapshotState["snapshot"]>["findings"][number];
+type SnapshotAction = NonNullable<AutomaticSnapshotState["snapshot"]>["actions"][number];
+type SnapshotGap = NonNullable<AutomaticSnapshotState["snapshot"]>["evidenceGaps"][number];
+type SnapshotSource = NonNullable<AutomaticSnapshotState["snapshot"]>["sourceVersions"][number];
+
+function mapSnapshot(row: SnapshotRow): NonNullable<AutomaticSnapshotState["snapshot"]> {
+  return {
+    id: row.id,
+    cutoff: row.cutoff,
+    generation: row.generation,
+    status: row.status,
+    attemptId: row.attempt_id,
+    fingerprint: row.fingerprint,
+    findings: Array.isArray(row.findings) ? (row.findings as SnapshotFinding[]) : [],
+    actions: Array.isArray(row.actions) ? (row.actions as SnapshotAction[]) : [],
+    evidenceGaps: Array.isArray(row.evidence_gaps) ? (row.evidence_gaps as SnapshotGap[]) : [],
+    sourceVersions: Array.isArray(row.source_versions)
+      ? (row.source_versions as SnapshotSource[])
+      : [],
+    publishedAt: row.published_at,
+  };
+}
+
+/**
+ * Live automatic assessment for a project, through the member-gated read RPC.
+ * `cutoff` selects a specific cut-off (the `?assessment=` navigation); null
+ * means the latest known one. The queue row comes back alongside the snapshot
+ * so a pending re-derivation is visible instead of silently served stale.
+ */
+export async function getAutomaticAssessmentSnapshot(
+  projectId: string,
+  cutoff?: string | null,
+): Promise<AutomaticSnapshotState> {
+  const { supabase } = await requireProjectMembership(projectId);
+  const { data, error } = await supabase.rpc("get_latest_assessment_snapshot", {
+    p_project_id: projectId,
+    ...(cutoff ? { p_cutoff: cutoff } : {}),
+  });
+  if (error) throw new Error(error.message);
+  const payload = (data ?? null) as LatestAssessmentPayload | null;
+  if (!payload) {
+    return { cutoff: null, status: "none", pending: false, snapshot: null };
+  }
+  return {
+    cutoff: payload.cutoff,
+    status: payload.status ?? "none",
+    pending: payload.pending_generation === true,
+    snapshot: payload.snapshot ? mapSnapshot(payload.snapshot) : null,
+  };
+}
+
+/** Available automatic cut-offs for navigation, newest first. */
+export async function getAutomaticAssessmentPeriods(
+  projectId: string,
+): Promise<{ cutoff: string; status: string; pending: boolean }[]> {
+  const { supabase } = await requireProjectMembership(projectId);
+  const { data, error } = await supabase.rpc("get_project_assessment_periods", {
+    p_project_id: projectId,
+  });
+  if (error) throw new Error(error.message);
+  return ((data ?? []) as { cutoff: string; status: string | null; pending: boolean | null }[]).map(
+    (row) => ({
+      cutoff: row.cutoff,
+      status: row.status ?? "none",
+      pending: row.pending === true,
+    }),
+  );
+}
+
 export type HealthCardMetric = {
   dimension: HealthDimension;
   score: number | null;

@@ -15,12 +15,12 @@ export type ReportSections = Record<ReportSectionKey, string>;
 /** A published assessment result a report is pinned to. */
 export type ReportSnapshotRef = {
   /**
-   * Identity of the published snapshot. Today the assessment stream publishes
-   * one version per successful analysis attempt, so this is the attempt id.
+   * Identity of the published snapshot: a review analysis attempt id, or
+   * "assessment:<snapshot uuid>" for the automatic queue's published result.
    */
   snapshotId: string;
-  /** Assurance review whose cut-off and evidence binding produced the snapshot. */
-  reviewId: string;
+  /** Review bound to the snapshot; null for automatic-queue snapshots. */
+  reviewId: string | null;
   /** Review cut-off as YYYY-MM-DD. Never derived from upload or file metadata. */
   cutoff: string;
   /** Published version of the snapshot; differs whenever the assessment is refreshed. */
@@ -78,7 +78,8 @@ export type ReportManifest = {
   snapshotCutoff: string;
   snapshotVersion: string;
   cutoffLabel: string;
-  reviewId: string;
+  /** Review bound to the snapshot; null for automatic-queue snapshots. */
+  reviewId: string | null;
   audience: string;
   detailLevel: string;
   evidenceCount: number;

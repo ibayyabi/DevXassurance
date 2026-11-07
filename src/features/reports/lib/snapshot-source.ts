@@ -52,21 +52,46 @@ type SnapshotPayload = {
 const reviewColumns = "id, reporting_period, cutoff_precision, analysis_metadata";
 
 /**
- * Published snapshots for a project, newest cut-off first. A review without a
+ * Published snapshots for a project, newest cut-off first. Includes both the
+ * review-bound analyses and the automatic assessment queue's published
+ * snapshots — a report must not require a manual review. A review without a
  * successful analysis has published nothing and is not offered.
  */
 export async function listPublishedSnapshots(
   supabase: SupabaseClient,
   projectId: string,
 ): Promise<ReportSnapshotRef[]> {
-  const { data, error } = await supabase
-    .from("assurance_reviews")
-    .select(reviewColumns)
-    .eq("project_id", projectId)
-    .order("reporting_period", { ascending: false })
-    .limit(50);
+  const [{ data, error }, { data: periods, error: periodsError }] = await Promise.all([
+    supabase
+      .from("assurance_reviews")
+      .select(reviewColumns)
+      .eq("project_id", projectId)
+      .order("reporting_period", { ascending: false })
+      .limit(50),
+    supabase.rpc("get_project_assessment_periods", { p_project_id: projectId }),
+  ]);
   if (error) throw new Error(error.message);
-  return ((data ?? []) as unknown as ReviewRow[]).flatMap(toSnapshotRef);
+  if (periodsError) throw new Error(periodsError.message);
+  const reviewRefs = ((data ?? []) as unknown as ReviewRow[]).flatMap(toSnapshotRef);
+  const automaticRefs = ((periods ?? []) as unknown as {
+    cutoff: string;
+    snapshot_id: string | null;
+    status: string | null;
+    published_at: string | null;
+  }[])
+    .filter((period) => period.status === "partial" || period.status === "complete" || period.status === "stale")
+    .map((period) => ({
+      // Identity mirrors the server-side derivation in 202611050011, which
+      // versions by generation: a new publication between list and resolve
+      // fails loudly instead of pinning the wrong version.
+      snapshotId: `assessment:${period.snapshot_id ?? `cutoff:${period.cutoff}`}`,
+      reviewId: null,
+      cutoff: period.cutoff,
+      version: `assessment:${period.snapshot_id ?? `cutoff:${period.cutoff}`}`,
+      reportingPeriod: formatReportPeriod(period.cutoff),
+      publishedAt: period.published_at,
+    }));
+  return [...reviewRefs, ...automaticRefs].sort((first, second) => second.cutoff.localeCompare(first.cutoff));
 }
 
 export async function resolveReportSnapshot(
@@ -84,6 +109,52 @@ export async function resolveReportSnapshot(
         ? "The selected assessment snapshot is not published for this project."
         : "No published assessment snapshot is available for this project yet.",
     );
+  }
+
+  // An automatic snapshot derives through its own member-gated RPC; the
+  // review-bound path is unchanged.
+  if (ref.snapshotId.startsWith("assessment:")) {
+    const { data: automatic, error: automaticError } = await supabase.rpc(
+      "get_assessment_report_snapshot",
+      { p_project_id: projectId, p_cutoff: ref.cutoff },
+    );
+    if (automaticError) throw new Error(automaticError.message);
+    const payload = automatic as unknown as {
+      snapshotVersion: string;
+      snapshotCutoff: string;
+      cutoffLabel: string;
+      reviewId: string | null;
+      evidenceCount: number;
+      values: ReportSnapshotValue[];
+      gaps: ReportSnapshotGap[];
+      actions: ReportSnapshotAction[];
+      sources: ReportSnapshotSource[];
+    } | null;
+    if (!payload) {
+      throw new Error(
+        "The selected assessment snapshot is not published for this project.",
+      );
+    }
+    // The server-side identity includes the generation; a fallback cutoff id
+    // (queue row without a published snapshot) never matches and fails loudly.
+    if (payload.snapshotVersion !== ref.snapshotId) {
+      throw new Error(
+        "The assessment snapshot changed while the report was prepared. Generate the report again.",
+      );
+    }
+    return {
+      snapshotId: payload.snapshotVersion,
+      reviewId: payload.reviewId,
+      cutoff: payload.snapshotCutoff,
+      version: payload.snapshotVersion,
+      reportingPeriod: payload.cutoffLabel || formatReportPeriod(payload.snapshotCutoff),
+      publishedAt: ref.publishedAt,
+      evidenceCount: payload.evidenceCount,
+      values: payload.values ?? [],
+      gaps: payload.gaps ?? [],
+      actions: payload.actions ?? [],
+      sources: payload.sources ?? [],
+    };
   }
 
   const { data, error } = await supabase.rpc("assurance_report_operation", {

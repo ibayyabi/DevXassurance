@@ -64,6 +64,7 @@ function fixture(options = {}) {
           current_cutoff:'2026-10-31',review:null,sources:[],observation_decisions:[],gap_reason:'no_prior_current_review',
         }}};
       }
+      if (name === 'get_project_assessment_periods') return {data:[],error:null};
       if (input.p_operation === 'context') return {data:context};
       if (input.p_operation === 'export_check') return {data:{attempt_id:'attempt-1',report_fingerprint:'content-1',preview:{
         report_type:'assurance_report',reporting_period:'October 2026',original_sections:{project_health:'Saved content'},
@@ -279,10 +280,13 @@ test('overlap claim errors prevent publication and publication errors are not ig
 });
 test('report generation checks context then persists with the same successful analysis',async()=>{
   const f=fixture();await f.reports.generateReportPreview(form({assuranceReviewId:'review-1',audience:'PMO',detailLevel:'Standard'}));
-  assert.equal(f.calls[0].input.p_operation,'context');assert.equal(f.calls[1].input.p_operation,'create');
-  assert.equal(f.calls[1].input.p_attempt_id,'attempt-1');
-  assert.match(f.calls[1].input.p_payload.sections.key_findings,/Gap - Budget: Missing evidence/);
-  assert.equal(f.calls[1].input.p_payload.snapshot_id,'attempt-1');
+  const contextCall=f.calls.find(c=>c.input.p_operation==='context');
+  const createCall=f.calls.find(c=>c.input.p_operation==='create');
+  assert.ok(contextCall,'the review snapshot is resolved through the context operation');
+  assert.ok(createCall,'the draft is persisted through create');
+  assert.equal(createCall.input.p_attempt_id,'attempt-1');
+  assert.match(createCall.input.p_payload.sections.key_findings,/Gap - Budget: Missing evidence/);
+  assert.equal(createCall.input.p_payload.snapshot_id,'attempt-1');
 });
 test('stale report context and stale approval are rejected before further writes',async()=>{
   const f=fixture({rpc:()=>({error:{message:'Analysis is not current'}})});

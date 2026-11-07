@@ -1,6 +1,14 @@
 import { Suspense } from "react";
 
 import { getAssuranceWorkspace, getProjectObservationEvidence } from "@/features/assurance/lib/queries";
+import {
+  getAutomaticAssessmentPeriods,
+  getAutomaticAssessmentSnapshot,
+} from "@/features/dashboard/lib/queries";
+import {
+  AutomaticSnapshotOverview,
+  AutomaticSnapshotPeriods,
+} from "@/features/dashboard/components/automatic-snapshot-overview";
 import { UsableOverview } from "@/features/dashboard/components/usable-overview";
 import { buildPublishedEvidence, isAnalysisCurrent } from "@/features/dashboard/lib/overview";
 
@@ -9,7 +17,7 @@ export default function DashboardPage({
   searchParams,
 }: {
   params: Promise<{ projectId: string }>;
-  searchParams: Promise<{ review?: string }>;
+  searchParams: Promise<{ review?: string; assessment?: string }>;
 }) {
   return (
     <Suspense fallback={<DashboardLoading />}>
@@ -23,10 +31,10 @@ async function DashboardContent({
   searchParams,
 }: {
   params: Promise<{ projectId: string }>;
-  searchParams: Promise<{ review?: string }>;
+  searchParams: Promise<{ review?: string; assessment?: string }>;
 }) {
   const { projectId } = await params;
-  const { review: reviewParam } = await searchParams;
+  const { review: reviewParam, assessment: assessmentParam } = await searchParams;
   const { membership, review, reviews, documents } =
     await getAssuranceWorkspace(projectId);
   const selectedReview =
@@ -37,16 +45,35 @@ async function DashboardContent({
     !selectedReview || !isAnalysisCurrent(selectedReview)
       ? buildPublishedEvidence(await getProjectObservationEvidence(projectId))
       : null;
+  // The automatic queue's published snapshot, selected by ?assessment= or the
+  // latest known cut-off. Independent of the review path: both surfaces can
+  // exist for the same project.
+  const [automatic, automaticPeriods] = await Promise.all([
+    getAutomaticAssessmentSnapshot(projectId, assessmentParam ?? null),
+    getAutomaticAssessmentPeriods(projectId),
+  ]);
 
   return (
-    <UsableOverview
-      projectId={projectId}
-      projectName={membership.projectName}
-      review={selectedReview}
-      reviews={reviews}
-      documents={documents}
-      publishedEvidence={publishedEvidence}
-    />
+    <>
+      {!(automatic.status === "none" && automaticPeriods.length === 0) && (
+        <div className="mx-auto max-w-[1600px] space-y-3 px-4 pt-6 md:px-6">
+          <AutomaticSnapshotPeriods
+            projectId={projectId}
+            selectedCutoff={assessmentParam ?? automatic.cutoff}
+            periods={automaticPeriods}
+          />
+          {automatic.status !== "none" && <AutomaticSnapshotOverview assessment={automatic} />}
+        </div>
+      )}
+      <UsableOverview
+        projectId={projectId}
+        projectName={membership.projectName}
+        review={selectedReview}
+        reviews={reviews}
+        documents={documents}
+        publishedEvidence={publishedEvidence}
+      />
+    </>
   );
 }
 
