@@ -1,97 +1,20 @@
 import assert from "node:assert/strict";
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { pathToFileURL, fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { unlinkSync } from "node:fs";
+import { compileModuleGraph } from "./helpers/worker-modules.mjs";
+import { pathToFileURL } from "node:url";
 import { test } from "node:test";
-
+import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const ts = require("typescript");
-const parserSource = fileURLToPath(
-  new URL("../../worker/src/services/document-parser.ts", import.meta.url),
-);
-const extractionSource = fileURLToPath(
-  new URL("../../worker/src/services/document-extraction.ts", import.meta.url),
-);
-const jobSource = fileURLToPath(
-  new URL("../../worker/src/jobs/process-document.ts", import.meta.url),
-);
-const zipSafetySource = fileURLToPath(
-  new URL("../../src/features/documents/lib/zip-safety.ts", import.meta.url),
-);
-const guardSource = fileURLToPath(
-  new URL("../../worker/src/types/guards.ts", import.meta.url),
-);
-const constantsSource = fileURLToPath(
-  new URL("../../src/features/documents/lib/constants.ts", import.meta.url),
-);
-const costEvidenceSource = fileURLToPath(
-  new URL("../../src/features/assurance/lib/cost-evidence.ts", import.meta.url),
-);
-const sourceValueValidationSource = fileURLToPath(
-  new URL("../../src/features/documents/lib/source-value-validation.ts", import.meta.url),
-);
-const parserModule = join(dirname(parserSource), `.parser-${randomUUID()}.mjs`);
-const extractionModule = join(dirname(extractionSource), `.extraction-${randomUUID()}.mjs`);
-const jobModule = join(dirname(jobSource), `.job-${randomUUID()}.mjs`);
-const guardModule = join(dirname(guardSource), `.guards-${randomUUID()}.mjs`);
-const zipSafetyModule = join(dirname(zipSafetySource), `.zip-safety-${randomUUID()}.mjs`);
-const constantsModule = join(dirname(constantsSource), `.constants-${randomUUID()}.mjs`);
-const costEvidenceModule = join(dirname(costEvidenceSource), `.cost-evidence-${randomUUID()}.mjs`);
-const sourceValueValidationModule = join(dirname(sourceValueValidationSource), `.source-value-validation-${randomUUID()}.mjs`);
-const compile = (source) =>
-  ts.transpileModule(readFileSync(source, "utf8"), {
-    compilerOptions: {
-      module: ts.ModuleKind.ESNext,
-      target: ts.ScriptTarget.ES2022,
-    },
-  }).outputText;
-
-writeFileSync(zipSafetyModule, compile(zipSafetySource));
-writeFileSync(constantsModule, compile(constantsSource));
-writeFileSync(costEvidenceModule, compile(costEvidenceSource));
-writeFileSync(sourceValueValidationModule, compile(sourceValueValidationSource));
-writeFileSync(
-  parserModule,
-  compile(parserSource).replace(
-    'from "../../../src/features/documents/lib/zip-safety"',
-    `from "${pathToFileURL(zipSafetyModule).href}"`,
-  ),
-);
-writeFileSync(guardModule, compile(guardSource));
-writeFileSync(
-  extractionModule,
-  compile(extractionSource)
-    .replace(
-      'from "../../../src/features/documents/lib/constants"',
-      `from "${pathToFileURL(constantsModule).href}"`,
-    )
-    .replace(
-      'from "../../../src/features/assurance/lib/cost-evidence"',
-      `from "${pathToFileURL(costEvidenceModule).href}"`,
-    )
-    .replace(
-      'from "../../../src/features/documents/lib/source-value-validation"',
-      `from "${pathToFileURL(sourceValueValidationModule).href}"`,
-    )
-    .replace(
-      'from "../types/guards"',
-      `from "${pathToFileURL(guardModule).href}"`,
-    ),
-);
-writeFileSync(
-  jobModule,
-  compile(jobSource)
-    .replace(
-      'from "../services/document-parser"',
-      `from "${pathToFileURL(parserModule).href}"`,
-    )
-    .replace(
-      'from "../services/document-extraction"',
-      `from "${pathToFileURL(extractionModule).href}"`,
-    ),
-);
+const graphSource = (rel) => new URL(rel, import.meta.url).pathname;
+const { compiled } = compileModuleGraph(graphSource("../../worker/src/jobs/process-document.ts"));
+const findTarget = (suffix) => {
+  for (const [sourcePath, entry] of compiled) {
+    if (sourcePath.includes(suffix)) return entry.target;
+  }
+  throw new Error(`compiled module not found: ${suffix}`);
+};
+const jobModule = findTarget("process-document.ts");
+const extractionModule = findTarget("document-extraction.ts");
 let processDocumentJob;
 let extractDocumentGroups;
 let documentSuggestionUpdateFields;
@@ -99,14 +22,9 @@ try {
   ({ processDocumentJob } = await import(pathToFileURL(jobModule).href));
   ({ extractDocumentGroups, documentSuggestionUpdateFields } = await import(pathToFileURL(extractionModule).href));
 } finally {
-  unlinkSync(parserModule);
-  unlinkSync(zipSafetyModule);
-  unlinkSync(guardModule);
-  unlinkSync(constantsModule);
-  unlinkSync(costEvidenceModule);
-  unlinkSync(sourceValueValidationModule);
-  unlinkSync(extractionModule);
-  unlinkSync(jobModule);
+  for (const { target } of compiled.values()) {
+    try { unlinkSync(target); } catch {}
+  }
 }
 
 function asArrayBuffer(value) {

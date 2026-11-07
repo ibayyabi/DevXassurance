@@ -8,46 +8,34 @@ import {
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 
 const require = createRequire(import.meta.url);
-const ts = require("typescript");
 const parserSource = fileURLToPath(
   new URL("../../worker/src/services/document-parser.ts", import.meta.url),
 );
-const zipSafetySource = fileURLToPath(
-  new URL("../../src/features/documents/lib/zip-safety.ts", import.meta.url),
-);
-const parserModule = join(dirname(parserSource), `.document-parser-${randomUUID()}.mjs`);
-const zipSafetyModule = join(dirname(zipSafetySource), `.zip-safety-${randomUUID()}.mjs`);
-const parserJavaScript = ts.transpileModule(readFileSync(parserSource, "utf8"), {
-  compilerOptions: {
-    module: ts.ModuleKind.ESNext,
-    target: ts.ScriptTarget.ES2022,
-  },
-}).outputText;
-writeFileSync(zipSafetyModule, ts.transpileModule(readFileSync(zipSafetySource, "utf8"), {
-  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-}).outputText);
-writeFileSync(
-  parserModule,
-  parserJavaScript.replace(
-    'from "../../../src/features/documents/lib/zip-safety"',
-    `from "${pathToFileURL(zipSafetyModule).href}"`,
-  ),
-);
+import { compileModuleGraph } from "./helpers/worker-modules.mjs";
+const { compiled } = compileModuleGraph(parserSource);
+const findTarget = (suffix) => {
+  for (const [sourcePath, entry] of compiled) {
+    if (sourcePath.includes(suffix)) return entry.target;
+  }
+  throw new Error(`compiled module not found: ${suffix}`);
+};
+const parserModule = findTarget("document-parser.ts");
+const zipSafetyModule = findTarget("zip-safety.ts");
 let parseDocumentBuffer;
 let hasEvidenceSignature;
 try {
   ({ parseDocumentBuffer } = await import(pathToFileURL(parserModule).href));
   ({ hasEvidenceSignature } = await import(pathToFileURL(zipSafetyModule).href));
 } finally {
-  unlinkSync(parserModule);
-  unlinkSync(zipSafetyModule);
+  for (const { target } of compiled.values()) {
+    try { unlinkSync(target); } catch {}
+  }
 }
 
 const JSZip = require("jszip");
