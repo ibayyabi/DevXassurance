@@ -333,3 +333,9 @@ Fallback sadar-kelas tetap terbangun dan terverifikasi offline (lampiran 17); bu
 Setelah resolusi tanggal-teks: **Duration (G5-F5+1=8) dan Weighted Progress (I5*J5) cocok persis** dengan cache - keluarga aritmetika terverifikasi konsisten. 58 sel tersisa (referensi lintas-sheet yang menarik nilai teks + formula IF) belum terhitung evaluator ringkas - iterasi evaluator berlanjut sebagai pekerjaan tersisa (skrip probe tidak di-commit per preferensi pengguna; hasil saja).
 
 **Status Level 2**: parsial - keluarga aritmetika generator terbukti konsisten; keluarga IF/lintas-sheet menunggu evaluator lengkap. Temuan generator nyata sejauh ini: tanggal disimpan sebagai teks (kelas invalid-serial terkonfirmasi dari sisi artefak).
+
+## Lampiran 21: iterasi evaluator ronde 3 - masih 58 not_computable, debug berlanjut
+
+Guard aritmetika + normalisasi dua-arah ditambahkan; keluarga aritmetika tetap terverifikasi (2 match), namun 58 sel cross-sheet/IF tetap not_computable - penyebab pastinya belum terisolasi (dugaan: pemetaan nama sheet ter-escape `&amp;` antara token formula dan kunci data, atau bentuk sel yang belum tertangani regex). Debug berlanjut di konteks berikutnya dengan pelacakan per-token; skrip probe tetap working file (tidak di-commit).
+
+**Status Level 2 tetap parsial**: keluarga aritmetika terverifikasi; IF/cross-sheet inconclusive - bukan bukti generator salah, bukan bukti benar.
