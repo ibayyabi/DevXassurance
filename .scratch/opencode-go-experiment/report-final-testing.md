@@ -161,3 +161,23 @@ Rata-rata **~36% panggilan grup hemat per upload mingguan** (≈60–100k token/
 Reviewer (pemilik proyek) meninjau `ground-truth-review-11-pengelolaan.md` dan menerima hasilnya ("sudah cukup baik", 2026-11-07): nilai progress/milestone deterministik cocok dengan workbook, evolusi W4→W7 masuk akal, dan tipe fakta live diterima termasuk toleransi atas contoh mislabel "periode diketik milestone".
 
 **Status yang dibenarkan oleh bukti gabungan**: `READY WITH HUMAN REVIEW` untuk **jalur deterministic-first (progress + milestone) pada korpus mingguan ITB** — didukung 408+248 baris tervalidasi, cross-check XML independen 8/8, dan tinjauan manusia ini. Yang TETAP di luar klaim: cost/risk observations (jalur model, belum ditinjau manusia per baris), file baseline & MoM, run live penuh satu workbook, dan pengukuran biaya provider (prompt caching penyedia belum diverifikasi — dikerjakan di lampiran 6).
+
+## Lampiran 6: lapisan 2 — prompt statis-dulu + pengukuran prefix cache penyedia
+
+**Perubahan** (cache `/41` → `/42`): kedua prompt task kini memimpin dengan konten statis byte-identik (preamble bersama + rules + schema), lalu konteks dokumen, lalu scope grup, lalu sumber, lalu aturan dinamis per-grup (aturan milestone/progress deterministik pindah ke belakang sources). Angka grup/count tidak lagi muncul sebelum sumber. Kontrak layout diuji tes baru: prefix bersama antar DOKUMEN > 2.000 char (berakhiran sebelum "Document context:", memuat "Required JSON schema"), dan antar grup satu dokumen berakhiran tepat di "This request contains group ". Suite **315/315**, tsc + lint bersih.
+
+**Pengukuran live** (`prefix-cache-ab.mjs`, disetujui 6 request, terpakai 4 — 9.074 in / 3.491 out, `glm-5.3-flash`): dikirim 3 prompt analysis grup berbeda + 1 repeat identik, back-to-back.
+
+| Request | Prompt | in | cached_tokens |
+|---|---|---|---|
+| 1 | analysis g1 (cold) | 1.980 | 0 |
+| 2 | analysis g2 (berbagi prefix statis ±2k char) | 3.605 | 0 |
+| 3 | analysis g3 | 1.509 | 0 |
+| 4 | repeat identik g1 | 1.980 | **1.088** |
+
+**Kesimpulan terukur**: penyedia menghormati caching untuk **repeat identik** (~55% prompt tokens kena cache) tetapi **tidak melakukan prefix-sharing antar prompt berbeda** pada ukuran blok statis kita — konsisten dengan minimum blok cache ±1.024 token, sedangkan blok statis kita ±550–700 token. Implikasi:
+1. Reorder dipertahankan (layout yang benar untuk penyedia dengan prefix caching penuh; tanpa biaya), tetapi klaim hemat biayanya untuk OpenCode Go adalah **repeat identik saja**.
+2. Penghemat utama untuk beban kerja mingguan tetap **cache grup konten-ter-address** (lampiran 4, ~36%) — request hilang utuh, bukan sekali diskon.
+3. Untuk memperbesar prefix-shared hit perlu blok statis >1.024 token — berarti menambah teks statis ke setiap request (memboroskan token non-cache); tidak diambil. Alternatif yang lebih sehat: hitung ulang bila pindah ke penyedia dengan prefix caching penuh (OpenAI/Anthropic-style).
+
+Status keputusan: lapisan 2 selesai dieksekusi dan diukur; penghematan realistis tercatat jujur.

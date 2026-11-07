@@ -171,7 +171,7 @@ async function extract(buffer, store, overrides = {}) {
       projectId: overrides.projectId ?? "project-1",
       documentId: overrides.documentId ?? "document-w4",
       fileName: "weekly.xlsx",
-      title: "Weekly workbook",
+      title: overrides.title ?? "Weekly workbook",
       documentTypeHint: null,
       documentDateHint: null,
       reportingPeriodHint: null,
@@ -265,4 +265,52 @@ test("rows from a different project never satisfy a group", async () => {
     extract(buffer, store, { documentId: "document-mine", projectId: "project-mine", jobId: "cache-job-mine" }));
   assert.equal(otherProject.ok, true, otherProject.ok ? undefined : otherProject.errorMessage);
   assert.equal(counter.groupCalls, coldGroupCalls, "cache rows from another project are not reusable");
+});
+
+function commonPrefixLength(left, right) {
+  let index = 0;
+  while (index < left.length && index < right.length && left[index] === right[index]) index += 1;
+  return index;
+}
+
+test("task prompts lead with byte-identical static content so the provider prefix cache can hit", async () => {
+  // The prompt layout is the caching contract: the shared preamble plus each
+  // task's static block must precede everything that varies, so requests from
+  // DIFFERENT documents share a long exact prefix (ending before the document
+  // context), and two groups of one document diverge only at the group scope
+  // line — after the document context.
+  const captured = [];
+  const counter = { groupCalls: 0, documentId: "document-a" };
+  const bufferA = await workbookBuffer({ week: "W4", percent: "12.5%" });
+  const bufferB = await workbookBuffer({ week: "W4", percent: "12.5%" });
+  await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isGroupPrompt(prompt)) captured.push({ document: counter.documentId, prompt });
+    return countingFetchMock(counter)(_url, init);
+  }, async () => {
+    counter.documentId = "document-a";
+    await extract(bufferA, memoryGroupStore(), { documentId: "document-a", jobId: "prefix-a", title: "Alpha weekly workbook" });
+    counter.documentId = "document-b";
+    counter.groupCalls = 0;
+    await extract(bufferB, memoryGroupStore(), { documentId: "document-b", jobId: "prefix-b", title: "Beta weekly workbook" });
+  });
+  const analysisPrompts = captured
+    .filter((entry) => entry.prompt.startsWith("Extract grounded") && entry.prompt.includes("Task: analyze this bounded group"))
+    .map((entry) => entry.prompt);
+  assert.ok(analysisPrompts.length >= 4, "two documents times at least two groups each");
+  const [first] = analysisPrompts;
+  const crossDocument = commonPrefixLength(first, analysisPrompts[analysisPrompts.length - 1]);
+  assert.ok(crossDocument > 2000, `cross-document shared prefix too short: ${crossDocument}`);
+  assert.ok(first.slice(0, crossDocument).includes("Required JSON schema"), "the static task block precedes the divergence");
+  assert.ok(!first.slice(0, crossDocument).includes("Alpha weekly workbook"), "no document-specific text inside the cross-document prefix");
+  const unflaggedSameDocument = analysisPrompts.filter((prompt) =>
+    prompt !== first && !prompt.includes('"sheet_interpretation": {"interpretation_status"'));
+  assert.ok(unflaggedSameDocument.length >= 1, "at least one sibling group of the first document");
+  const withinDocument = commonPrefixLength(first, unflaggedSameDocument[0]);
+  assert.ok(
+    withinDocument > crossDocument &&
+      first.slice(0, withinDocument).includes("Document context:") &&
+      first.slice(0, withinDocument).endsWith("This request contains group "),
+    "within a document the divergence starts exactly at the group number, after the shared document context",
+  );
 });
