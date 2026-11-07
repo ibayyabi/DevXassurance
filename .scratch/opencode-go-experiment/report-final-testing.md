@@ -155,3 +155,9 @@ Faktor yang mengubah angka: (1) **loop koreksi** +20–50% request (teramati 1 l
 | 12_BISMA | −18 (43%) | −20 (48%) | −8 (19%) |
 
 Rata-rata **~36% panggilan grup hemat per upload mingguan** (≈60–100k token/minggu/subsistem pada sampel live). Tiga faktor yang menahan di bawah potensi chunk-level (64–86%): nilai % berubah tersebar di banyak grup Workplan; grup ambigu gagal-closed harus diekstrak ulang tiap minggu (butuh `sheet_interpretation` baru); transisi W6→W7 menggeser boundary chunk (29→31, 27→28, 44→45) sehingga grup lintas pergeseran meleset. Levyer lanjutan yang tersisa: chunking struktural yang stabil antar minggu dan remap index — dicatat sebagai kerja berikutnya, bukan bagian ronde ini.
+
+## Lampiran 5: sign-off ground truth (reviewer manusia) + status
+
+Reviewer (pemilik proyek) meninjau `ground-truth-review-11-pengelolaan.md` dan menerima hasilnya ("sudah cukup baik", 2026-11-07): nilai progress/milestone deterministik cocok dengan workbook, evolusi W4→W7 masuk akal, dan tipe fakta live diterima termasuk toleransi atas contoh mislabel "periode diketik milestone".
+
+**Status yang dibenarkan oleh bukti gabungan**: `READY WITH HUMAN REVIEW` untuk **jalur deterministic-first (progress + milestone) pada korpus mingguan ITB** — didukung 408+248 baris tervalidasi, cross-check XML independen 8/8, dan tinjauan manusia ini. Yang TETAP di luar klaim: cost/risk observations (jalur model, belum ditinjau manusia per baris), file baseline & MoM, run live penuh satu workbook, dan pengukuran biaya provider (prompt caching penyedia belum diverifikasi — dikerjakan di lampiran 6).
