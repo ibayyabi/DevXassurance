@@ -485,8 +485,13 @@ function percentShapedClaimText(cell: ParsedSourceCell): string | null {
 // plus due/event-column dates, after 8 of 21 live groups on a real workbook
 // failed exactly on those three classes; cached /42 rows are re-extracted once.
 export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/43";
-const MAX_GROUP_CHARACTERS = 10_000;
-const MAX_GROUP_CHUNKS = 3;
+// Group density is tunable per deployment: smaller groups (fewer chunks each)
+// reduce the model's row-confusion in dense tables at the cost of repeating
+// the prompt scaffolding once more per group. The group key binds the resulting
+// chunk texts and range, so changing these limits re-partitions groups and
+// naturally invalidates old keys without a schema-version bump.
+const MAX_GROUP_CHARACTERS = Number(process.env.XASS_EXTRACTION_MAX_GROUP_CHARACTERS ?? "10000");
+const MAX_GROUP_CHUNKS = Number(process.env.XASS_EXTRACTION_MAX_GROUP_CHUNKS ?? "3");
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
 const MAX_GROUP_ATTEMPTS = 2;
 // Exact ownership of each merged group field: the analysis task must return the

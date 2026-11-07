@@ -260,3 +260,14 @@ Verifikasi offline: 315/315, tsc, lint ✓. Verifikasi live dilakukan murah via 
 3. Terima sebagai desain: grup gagal = needs_review + keputusan reviewer (USERFLOW C2/C4) — pipeline sudah benar; beban reviewer inilah metrik yang dipantau rencana overview.
 
 Status klaim TETAP lampiran 5 (READY WITH HUMAN REVIEW, terbatas). Bukti live dokumen asli (lampiran 10) tidak berubah.
+
+## Lampiran 12: kurva kepadatan grup pada workbook asli + batas grup dapat dikonfigurasi
+
+Batas grup kini dapat diatur via `XASS_EXTRACTION_MAX_GROUP_CHUNKS` / `XASS_EXTRACTION_MAX_GROUP_CHARACTERS` (default tetap 10.000/3). Kunci grup mengikat teks chunk + range, jadi perubahan limit mempartisi ulang kunci secara alami tanpa bump versi.
+
+Kurva pada `07_Air_Bersih_Weekly` (21 grup, mock, 0 token; total termasuk retry koreksi mock):
+- chunks=3 (kini): 1,10M char ≈ 274k tok; prompt terbesar 47,4k
+- chunks=2: +3% total; prompt terbesar −19% (38,5k)
+- chunks=1: +16% total; prompt terbesar −41% (27,9k)
+
+Trade-off terukur: memperkecil kepadatan menaikkan total biaya moderat (scaffolding terduplikasi) tetapi memangkas prompt terbesar drastis. Apakah kepadatan rendah benar-benar memperbaiki kelas numeric-mismatch hanya bisa dibuktikan live (est. ±320k token untuk chunks=1) — menunggu keputusan anggaran; fallback Gemini free-tier (desain sadar-kelas di diskusi) tetap jalurnya bila lever ini tidak cukup.
