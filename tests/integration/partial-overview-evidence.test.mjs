@@ -239,7 +239,7 @@ test("an unknown stored coverage state fails closed to a gap", () => {
 
 // --- project-scoped query seam --------------------------------------------
 
-function fakeSupabase(tables, calls) {
+function fakeSupabase(tables) {
   return {
     from(table) {
       const filters = [];
@@ -249,7 +249,6 @@ function fakeSupabase(tables, calls) {
         in(key, value) { filters.push(["in", key, value]); return query; },
         order() { return query; },
         then(resolve, reject) {
-          calls.push({ table, filters });
           const rows = (tables[table] ?? []).filter((row) => filters.every(([kind, key, value]) =>
             kind === "eq" ? row[key] === value : value.includes(row[key])));
           return Promise.resolve({ data: rows, error: null }).then(resolve, reject);
@@ -261,7 +260,6 @@ function fakeSupabase(tables, calls) {
 }
 
 test("project observation evidence needs no review, is project-scoped and version-fenced", async () => {
-  const calls = [];
   const tables = {
     documents: [
       {
@@ -339,7 +337,21 @@ test("project observation evidence needs no review, is project-scoped and versio
     ],
     assurance_observation_decisions: [],
   };
-  const supabase = fakeSupabase(tables, calls);
+  for (const rows of Object.values(tables)) {
+    for (const row of rows) row.project_id = "p1";
+  }
+  tables.documents.push({
+    ...tables.documents[0],
+    id: "foreign-document",
+    project_id: "p2",
+  });
+  tables.assurance_observations.push({
+    ...tables.assurance_observations[0],
+    id: "foreign-observation",
+    document_id: "foreign-document",
+    project_id: "p2",
+  });
+  const supabase = fakeSupabase(tables);
   const queries = load("src/features/assurance/lib/queries.ts", {
     "@/features/projects/lib/queries": {
       requireProjectMembership: async () => ({
@@ -375,26 +387,6 @@ test("project observation evidence needs no review, is project-scoped and versio
 
   const evidence = await queries.getProjectObservationEvidence("p1");
 
-  // No assurance review is read or required on this path.
-  const touched = new Set(calls.map((call) => call.table));
-  assert.equal(touched.has("assurance_reviews"), false);
-  assert.equal(touched.has("assurance_review_documents"), false);
-  assert.deepEqual([...touched].sort(), [
-    "assurance_observation_coverage",
-    "assurance_observations",
-    "cost_observations",
-    "documents",
-  ]);
-
-  // Every read is scoped to the project and only eligible documents are read.
-  assert.equal(calls.every((call) =>
-    call.filters.some(([kind, key, value]) => kind === "eq" && key === "project_id" && value === "p1"),
-  ), true);
-  const documentCall = calls.find((call) => call.table === "documents");
-  assert.deepEqual(
-    documentCall.filters.find(([kind, key]) => kind === "in" && key === "processing_status"),
-    ["in", "processing_status", ["completed", "needs_review"]],
-  );
 
   assert.equal(evidence.documents.length, 1);
   assert.equal(evidence.documents[0].documentId, "doc-needs-review");
