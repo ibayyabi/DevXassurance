@@ -1,5 +1,22 @@
 # Laporan: ronde pengujian final — robustness pipeline terhadap file input yang ada
 
+## Lampiran 2: validasi live terarah pada konten smart-building-itb (disetujui pengguna, maks 8 request)
+
+Pertanyaan: apakah seluruh perubahan valid untuk keluarga fixture `smart-building-itb`? Bukti offline (61/61 file, derivasi 408+248) sudah ada; yang belum adalah **jalur model live dengan konten ITB**. `itb-live-targeted.mjs` menguji dua grup nyata dari `11_Pengelolaan_Utilitas_Subcontractor_Weekly.xlsx` (W4): satu grup **ambigu** (wajib `sheet_interpretation` valid) dan satu grup **terstruktur** (berinteraksi dengan baris deterministik /39).
+
+**Terpakai: 5/8 request** — 16.217 in / 3.519 out token (`glm-5.3-flash`). Rincian: ambigu analysis 1.960/1.047, ambigu domain 2.643/52, terstruktur analysis 3.600/1.612 (dua kali — run ulang karena cap karakter dinaikkan bertahap 12k→16k→18k mengikuti ukuran prompt nyata; 1 request terpakai untuk discovery itu), terstruktur domain 4.414/71. Artefak: `.local-evaluation/final-testing/itb-live/`.
+
+**Hasil:**
+
+1. **Grup ambigu lolos live**: respons `sheet_interpretation` live diterima pipeline; satu kandidat header invalid **dieksklusi konservatif** oleh validator (warning eksplisit), grup checkpoint `completed`. Fail-closed bekerja pada keluaran model nyata.
+2. **Grup terstruktur menaati kontrak deterministic-first**: model live mengembalikan array kosong untuk milestone/progress (yang memang sudah diturunkan deterministik — prompt melarang re-report) dan merge menghasilkan 8 baris progress deterministik + checkpoint `completed` tanpa duplikasi.
+3. **Prompt /40 bekerja di konten ITB**: tidak ada `period_label`/`as_of_date`/`snapshot_date` fabrikasi pada kedua grup.
+4. **Temuan false-negative yang terdokumentasi**: fakta live `"Reporting period stated as Sep–Dec 2026"` diketik `milestone` oleh model — guard milestone-progress tidak mencakupnya (tanpa persen) dan validator menerima (sitasi valid). Ini contoh nyata kelas "mislabel non-progress" yang tetap terbuka; dampaknya terbatas (fakta tampil di review dengan sitasi), dicatat sebagai kandidat iterasi berikutnya.
+5. Ukuran prompt nyata: prompt domain grup terstruktur 17,8k char (~4,4k token) — relevan untuk perencanaan biaya per file (48 workbook × ~22 grup × 2 task).
+
+**Status validasi ITB setelah lampiran ini:** offline penuh (61 file) + jalur model live terbukti untuk grup ambigu dan grup terstruktur pada satu workbook representatif. Yang tetap belum: run live penuh satu workbook (~44–58 request/file — butuh anggaran terpisah), ground truth manusia, dan file baseline/MoM ITB (jalur modelnya belum disentuh live).
+
+
 ## Lampiran: iterasi prompt tanggal (langkah 2, setelah ronde final)
 
 Setelah ronde final, langkah lanjutan menutup temuan live #2 (fabrikasi tanggal oleh model):
