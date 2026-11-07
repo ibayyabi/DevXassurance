@@ -215,3 +215,19 @@ Pengguna mengungkapkan bahwa `smart-building-itb` fixtures semi-generated; dokum
 **Ukuran prompt workbook asli** (01_Alarm, 26 grup): 990.568 char ≈ **~248k input token per workbook** — masalah anotasi formula raksasa sama dengan fixtures (grup terbesar 40,5k char). Lever kompresi anotasi formula berulang berlaku sama (potensi 40–60%).
 
 **Implikasi**: arsitektur saat ini valid secara offline untuk dokumen PMO asli. Test live pada dokumen asli membutuhkan (a) persetujuan eksplisit pengiriman konten dokumen nyata ke provider, dan (b) sebaiknya setelah kompresi anotasi formula agar biaya test akhir turun 40–60%.
+
+## Lampiran 9: koreksi komposisi prompt pada dokumen asli (pengukuran eksak)
+
+Hipotesis lampiran 7/8 ("anotasi formula raksasa mendominasi") terbukti **spesifik fixtures** — di workbook asli (01_Alarm, 26 grup), formula kecil. Pengukuran prompt terbesar dokumen asli (d14, 40.531 char, 94 referensi):
+
+| Komponen | Char | Share |
+|---|---|---|
+| Kerangka statis (preamble+rules+schema) | 10.725 | 26% |
+| `source_location` JSON (94 ref) | 11.942 | 30% |
+| Overhead JSON referensi | 6.853 | 17% |
+| modelText (bukti) | 10.988 | 27% |
+| Anotasi formula | **812** | **2%** |
+
+Implikasi jujur: tidak ada satu lever aman yang dramatis untuk dokumen asli. Kompresi `source_location`/overhead JSON menyentuh bentuk sitasi yang mengalir ke persistensi dan read model; slimming kerangka menyentuh rules fail-closed yang diperoleh dari insiden. Kombinasi realistis ±20–25% dengan risiko kontrak sedang — **tidak dikerjakan sekarang**. Biaya workbook asli ±250k token; cache `/41` memangkas ±36% untuk upload mingguan berikutnya. Kompresi anotasi formula TETAP berharga untuk keluarga fixtures (formula RAG raksasa generator) tapi bukan prioritas dokumen asli.
+
+Status akhir "menerima file asli sebaik mungkin": **terpenuhi secara offline** (30/30 file, derivasi terverifikasi independen, disiplin kosong-vs-nol, gate label) dan fail-closed untuk live. Test live dokumen asli menunggu persetujuan konten + anggaran dari pengguna.
