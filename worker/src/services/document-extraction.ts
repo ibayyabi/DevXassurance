@@ -467,7 +467,10 @@ function percentShapedClaimText(cell: ParsedSourceCell): string | null {
 // /39: deterministic progress claims accept percent-formatted numeric cells
 // via their display value, restrict as-of variants to record-dated columns,
 // and propose only progress-proving labels; cached /38 rows are re-extracted.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/39";
+// /40: task prompts require verbatim ISO record dates for snapshot_date and
+// as_of_date, and treat stage-counter wording as a label, not a period;
+// cached /39 rows are re-extracted once.
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/40";
 const MAX_GROUP_CHARACTERS = 10_000;
 const MAX_GROUP_CHUNKS = 3;
 const MAX_CONCURRENT_PROVIDER_REQUESTS = 2;
@@ -2131,7 +2134,7 @@ Required JSON schema:
 }
 
 Return at most 50 facts, 20 alerts, and 20 actions.
-For health snapshots, return exactly one entry per dimension. Use green, amber, or red only when that dimension has a literal source-reported status field in the cited excerpt (for example, Schedule Status: Green); do not infer a RAG status from narrative, progress, or sentiment. Copy the exact source phrase into status_text and source_summary, and cite it with source_id. Always set score and evidence_coverage to null; no score or evidence coverage is inferred. snapshot_date must be an explicitly cited record/cut-off date, never a due date or document hint. Without an explicit dimension status, use insufficient_evidence, null score/coverage/date/source ID, and a neutral explanation.
+For health snapshots, return exactly one entry per dimension. Use green, amber, or red only when that dimension has a literal source-reported status field in the cited excerpt (for example, Schedule Status: Green); do not infer a RAG status from narrative, progress, or sentiment. Copy the exact source phrase into status_text and source_summary, and cite it with source_id. Always set score and evidence_coverage to null; no score or evidence coverage is inferred. snapshot_date must be an explicitly cited record/cut-off date sent as ISO YYYY-MM-DD whose digit-for-digit form appears verbatim in the cited excerpt; never a due date, deadline, document date, or a reformatted locale date the source does not literally contain. Without such a verbatim date, return null. Without an explicit dimension status, use insufficient_evidence, null score/coverage/date/source ID, and a neutral explanation.
 Group metadata suggestions are limited to document date, reporting period, and workstream. Every non-null suggestion requires a valid source_id.
 Report document dates as YYYY-MM-DD and reporting periods as their first day YYYY-MM-01.
 sheet_interpretation is candidate-only and may appear only for parser-flagged ambiguous XLSX groups. Never invent cells, sheets, headers, cached values, dates, owners, or formula results. Cite each header, column role, and observation with source_ids from this group. The worker resolves those IDs to parser-authored sheet/cell/range locators; never provide locators yourself. Each header label and observation raw_value must be exact text present in its cited source. Normalized values remain candidates and must not replace raw evidence. If the group is not flagged ambiguous, omit the field.${correction}`;
@@ -2163,7 +2166,8 @@ Task rules:
 - cost_observations collect project cost evidence found anywhere in these sources, whatever the artifact's primary type. Report one entry per stated cost value, copying source_value exactly as written in its cited source, including its currency wording and digit separators. Never convert, total, or restate a value.
 - Choose the cost measure from what the source says: approved_baseline (an approved or controlled budget reference), actual_to_date (cost already incurred), committed (contractually committed or ordered cost), eac (an explicitly reported total forecast or estimate at completion). Never record an actual or committed value as eac, and never record a value whose meaning the source does not state. Return [] only after processing this complete group and finding no cost values.
 - assurance_observations collect every source-backed milestone date, explicitly reported progress value, and item-level risk snapshot in this group, whatever the artifact's primary type. Do not infer baseline/current role; reviewer selection assigns that role later. Keep source scope, period, raw wording, and exact excerpt. Return [] for each array only when this complete group contains no such observation.
-- Set period_label to null unless the cited source explicitly states a specific period attached to this observation. A generic document title such as "Weekly report" is not a period.
+- Set period_label to null unless the cited source explicitly states a specific period attached to this observation, in wording that appears verbatim in the cited excerpt. A generic document title such as "Weekly report" is not a period, and a stage/phase counter followed by a date (for example "Tahap 2 Januari 2026" or "Phase 3 15 Maret 2026") names a label, not a period — return null then.
+- Set as_of_date to null unless the cited text states an explicit cut-off or record date for the observation; send it as ISO YYYY-MM-DD exactly as the source's date appears in the excerpt. A deadline, due date, document date, or a date you normalize from other wording fails validation — return null instead.
 ${milestoneRule}
 ${progressRule}
 - Risk: report each item separately with its source risk ID, status, source rating label/value/scale, owner, mitigation, mitigation due date, WBS, and period when stated. raw_value and excerpt must be verbatim source text. A register statement may say no_open_high_or_critical only when it explicitly states that no open high or critical risks exist; otherwise use open_risk_reported only for an explicit open-risk statement.
