@@ -1,0 +1,7 @@
+# Regenerable outputs of run.mjs / isolated.mjs
+out-isolated/
+out/report-*.md
+out/results-*.json
+out/summary-*.json
+out/manifest.json
+out/history-*/
