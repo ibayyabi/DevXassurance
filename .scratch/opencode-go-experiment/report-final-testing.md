@@ -327,3 +327,9 @@ Fallback sadar-kelas tetap terbangun dan terverifikasi offline (lampiran 17); bu
 3. Kasus Duration (H5) computed 2 vs cached 8 butuh resolusi tanggal-teks -> belum dapat disimpulkan.
 
 **Kesimpulan sementara Level 2**: generator menyimpan formula cache + tanggal dengan cara yang tidak konsisten (sebagian serial, sebagian teks) - inkonsistensi ini nyata dan akan tertangkap oleh harness setelah resolusi tanggal-teks ditambahkan. Harness butuh satu iterasi: resolusi tanggal dari shared string (string ISO/serial) + normalisasi persen dua arah. Sifat fail-closed tidak berubah: selama belum terverifikasi, cache formula tetap jalur review.
+
+## Lampiran 20: Level 2 ronde 2 - keluarga aritmetika TERVERIFIKASI, sisanya butuh iterasi evaluator
+
+Setelah resolusi tanggal-teks: **Duration (G5-F5+1=8) dan Weighted Progress (I5*J5) cocok persis** dengan cache - keluarga aritmetika terverifikasi konsisten. 58 sel tersisa (referensi lintas-sheet yang menarik nilai teks + formula IF) belum terhitung evaluator ringkas - iterasi evaluator berlanjut sebagai pekerjaan tersisa (skrip probe tidak di-commit per preferensi pengguna; hasil saja).
+
+**Status Level 2**: parsial - keluarga aritmetika generator terbukti konsisten; keluarga IF/lintas-sheet menunggu evaluator lengkap. Temuan generator nyata sejauh ini: tanggal disimpan sebagai teks (kelas invalid-serial terkonfirmasi dari sisi artefak).
