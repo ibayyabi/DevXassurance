@@ -8,6 +8,57 @@ This workflow is designed around the app's Supabase schema. Supabase remains
 the source of truth; n8n only orchestrates the processing job and writes results
 back to the tables already used by the UI.
 
+## Automatic Assessment
+
+Import `x-assurance-automatic-assessment.json` into n8n.
+
+This workflow refreshes the published assessment for a project cut-off without
+anyone opening the dashboard, and it never calls a model:
+
+1. `public.complete_document_job` queues an assessment for the document's
+   reviewer-confirmed reporting period inside the same transaction that
+   publishes the observations. Reviewer decisions, approved baselines, accepted
+   mappings, rule approvals, and later backfills queue the affected cut-off and
+   every cut-off after it the same way.
+2. The workflow drains that queue through the app route
+   `/api/internal/assurance/assessment`. The route claims one cut-off per
+   project at a time with a rotating claim token, computes the same
+   deterministic findings a manual review would, and publishes an immutable
+   snapshot carrying its cut-off, source versions, coverage, and gaps.
+3. The five-minute schedule is the safety net: a missed webhook, an expired
+   lease, or a retry waiting on backoff is picked up automatically.
+
+Required n8n environment variables:
+
+```bash
+XASS_APP_URL=https://your-app-host
+XASS_ASSESSMENT_SECRET=same-value-as-the-root-app
+XASS_ASSESSMENT_WEBHOOK_SECRET=optional-shared-secret-for-the-webhook-entry
+XASS_ASSESSMENT_BATCH_LIMIT=5
+```
+
+Optional Supabase Database Webhook for low latency:
+
+- Table: `public.assurance_assessment_jobs`
+- Event: `INSERT`
+- Method: `POST`
+- URL: the production n8n webhook URL for `x-assurance-assessment-jobs`
+- Header, if using the optional secret:
+  `x-xass-assessment-webhook-secret: <XASS_ASSESSMENT_WEBHOOK_SECRET>`
+
+The root app `.env.local` also needs:
+
+```bash
+XASS_ASSESSMENT_SECRET=same-value-as-n8n
+```
+
+Only documents whose reviewer-confirmed reporting period and evidence role are
+set become assessment evidence; the upload date, the file name, the maximum
+observation date, and the document date are never used as a cut-off. A document
+without a confirmed period appears as an evidence gap, not as an assessment.
+Publishing a snapshot never rewrites an older one: newer input produces a new
+generation and marks the previous snapshot stale.
+
 ## VPS polling mode
 
 Use `x-assurance-supabase-document-polling.json` when Supabase cannot reach the

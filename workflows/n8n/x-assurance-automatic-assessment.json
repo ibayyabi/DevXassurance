@@ -1,0 +1,150 @@
+{
+  "name": "X-Assurance - Automatic Assessment",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "Automatic assurance assessment (no provider calls)\n\nTwo entry points, one job: drain public.assurance_assessment_jobs.\n\n1. Database Webhook (recommended): create a Supabase Database Webhook on public.assurance_assessment_jobs INSERT and point it at this workflow's webhook path. The queue row is written inside the final publication transaction of rpc/complete_document_job, so import a document, publish it, and the assessment runs without anyone opening the dashboard.\n2. Schedule (required safety net): runs every 5 minutes, so a missed webhook, an expired lease, or a retry that was waiting on backoff is picked up automatically.\n\nThis workflow calls rpc/claim_next_assurance_assessment_job through the app route, which only ever consumes published observations, coverage, provenance, and source versions. It never calls a model, never queues extraction, and never retries an extraction group.",
+        "height": 360,
+        "width": 420
+      },
+      "id": "assessment-setup-note",
+      "name": "Setup Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-720, 40]
+    },
+    {
+      "parameters": {
+        "content": "Required n8n environment variables\n\nXASS_APP_URL                 base URL of the Next.js app (no trailing slash)\nXASS_ASSESSMENT_SECRET       shared secret for /api/internal/assurance/assessment\nXASS_ASSESSMENT_WEBHOOK_SECRET  optional; when set, the webhook entry point rejects requests without it\n\nThe service-role key stays in the app and, for document processing, in its own workflow. Never send it to this webhook.",
+        "height": 260,
+        "width": 420,
+        "color": 5
+      },
+      "id": "assessment-env-note",
+      "name": "Environment Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-720, 440]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "x-assurance-assessment-jobs",
+        "responseMode": "onReceived",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "assessment-queue-webhook",
+      "name": "Assessment Queue Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [-240, -80],
+      "webhookId": "x-assurance-assessment-jobs"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "assessment-recovery-schedule",
+      "name": "Assessment Recovery Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-240, 120]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The webhook path is optional: a publication signal is enough reason to\n// drain the queue. When the shared webhook secret is configured, reject a\n// caller that cannot present it, then hand a bounded batch size downstream.\nconst input = $input.first();\nconst headers = input?.json?.headers ?? {};\nconst expectedSecret = $env.XASS_ASSESSMENT_WEBHOOK_SECRET;\n\nif (expectedSecret) {\n  const provided = headers['x-xass-assessment-webhook-secret'] ?? headers['X-Xass-Assessment-Webhook-Secret'];\n  if (provided !== expectedSecret) {\n    throw new Error('Invalid X-Assurance assessment webhook secret.');\n  }\n}\n\nconst limit = Number.isInteger($env.XASS_ASSESSMENT_BATCH_LIMIT)\n  ? Number($env.XASS_ASSESSMENT_BATCH_LIMIT)\n  : 5;\n\nreturn [{ json: { limit } }];"
+      },
+      "id": "assessment-build-request",
+      "name": "Build Assessment Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [80, 20]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.XASS_APP_URL + '/api/internal/assurance/assessment' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "x-xass-assessment-secret",
+              "value": "={{ $env.XASS_ASSESSMENT_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { limit: $json.limit } }}",
+        "options": {
+          "timeout": 300000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "assessment-run",
+      "name": "Run Automatic Assessment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [360, 20]
+    }
+  ],
+  "connections": {
+    "Assessment Queue Webhook": {
+      "main": [
+        [
+          {
+            "node": "Build Assessment Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assessment Recovery Schedule": {
+      "main": [
+        [
+          {
+            "node": "Build Assessment Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Assessment Request": {
+      "main": [
+        [
+          {
+            "node": "Run Automatic Assessment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

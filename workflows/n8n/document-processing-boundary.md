@@ -11,6 +11,8 @@ Story 2.3 establishes the workflow contract. Supabase remains the state source.
 
 Supabase remains the source of truth. n8n does not retry worker HTTP failures directly after the backend may have requeued the job. The chunk node reads the worker-persisted rows; transient database write retries happen at the worker boundary.
 
+A successful publication also queues automatic assessment work inside the same transaction: `complete_document_job` calls `signal_assurance_assessment_for_document`, which enqueues `public.assurance_assessment_jobs` for the document's reviewer-confirmed reporting period and every later known cut-off. That signal contains no extraction retry and no provider call, and a repeat publication (`already_completed`) queues nothing further. Worker checkpoints written before publication never queue an assessment on their own.
+
 ## Operator troubleshooting
 
 - **Deploy the polling workflow:** editing `x-assurance-supabase-document-polling.json` does not change live n8n. Import both updated workflows while inactive, let running executions drain, apply `202611020001_document_content_hash.sql` followed by `202611020002_document_job_fencing.sql`, then activate one entry point and deactivate the other. Preserve the existing single consumer. Migration `202611020002` drops `recover_and_fetch_document_job` and `reset_document_job_results`, so old executions fail loudly instead of bypassing fencing. Confirm the success chain is a single `Publish Results` call to `rpc/complete_document_job`.
