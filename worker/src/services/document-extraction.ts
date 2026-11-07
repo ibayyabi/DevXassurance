@@ -484,7 +484,12 @@ function percentShapedClaimText(cell: ParsedSourceCell): string | null {
 // cited text, not a whole row) and milestone prompts require proven WBS scope
 // plus due/event-column dates, after 8 of 21 live groups on a real workbook
 // failed exactly on those three classes; cached /42 rows are re-extracted once.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/43";
+// /44: cached formula results whose formula is pure self-contained arithmetic
+// are verified by recomputation from the row's own input cells — a match ends
+// the freshness review requirement (provenance: recomputed match), a mismatch
+// is an explicit inconsistency requiring review; complex formulas keep the
+// current behavior. Cached /43 rows are re-extracted once.
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/44";
 // Group density is tunable per deployment: smaller groups (fewer chunks each)
 // reduce the model's row-confusion in dense tables at the cost of repeating
 // the prompt scaffolding once more per group. The group key binds the resulting
@@ -1570,16 +1575,157 @@ function citedFormulaCacheStatusForValue(
       : cited.reference.cell
         ? [cited.reference.cell]
         : [];
-  const statuses = sourceCells
-    .filter((sourceCell) => sourceCellMatchesCandidate(sourceCell, candidate))
+  const matchedCells = sourceCells.filter((sourceCell) =>
+    sourceCellMatchesCandidate(sourceCell, candidate),
+  );
+  const statuses = matchedCells
     .map((sourceCell) => formulaCacheStatusForSourceCell(group, citation, sourceCell))
     .filter((status): status is string => status !== null);
-  if (statuses.includes("cached_value")) return "cached_value";
+  if (statuses.includes("cached_value")) {
+    // A stored cached result whose formula is pure self-contained arithmetic
+    // can be verified by recomputation from the row's own input cells: a match
+    // proves the cache is internally consistent, so the value no longer needs
+    // freshness review; a mismatch means either a stale save or a generator
+    // inconsistency and stays review-required.
+    const outcomes = matchedCells
+      .map((sourceCell) => verifyCachedFormulaResult(group, cited, sourceCell))
+      .filter((outcome) => outcome !== "not_verifiable");
+    if (outcomes.length && outcomes.every((outcome) => outcome === "match")) {
+      return "cached_value_verified_match";
+    }
+    if (outcomes.some((outcome) => outcome === "mismatch")) {
+      return "cached_value_recompute_mismatch";
+    }
+    return "cached_value";
+  }
   return statuses.find((status) => UNAVAILABLE_FORMULA_STATUSES.includes(status)) ?? null;
 }
 
 function sourceValueNeedsFormulaReview(status: string | null): boolean {
-  return status === "cached_value";
+  return status === "cached_value" || status === "cached_value_recompute_mismatch";
+}
+
+const formulaVerificationCache = new WeakMap<ChunkGroup, Map<string, string>>();
+
+// Recompute a stored formula result when the formula is pure self-contained
+// arithmetic (cell references, numbers, + - * / and parentheses only — no
+// functions, no cross-sheet references, no ranges) and every referenced cell
+// is available in this group. Deliberately conservative: anything the verifier
+// cannot resolve is "not_verifiable" and keeps the existing review-required
+// behavior. The cached value stays authoritative — recomputation only proves
+// internal consistency between the cache and the row's own inputs.
+function verifyCachedFormulaResult(
+  group: ChunkGroup,
+  cited: { chunk: ParsedChunk; reference: ParsedSourceReference },
+  sourceCell: ParsedSourceCell,
+): "match" | "mismatch" | "not_verifiable" {
+  const cacheKey = `${sourceCell.sheetName}!${sourceCell.cell}`;
+  let memo = formulaVerificationCache.get(group);
+  if (!memo) {
+    memo = new Map();
+    formulaVerificationCache.set(group, memo);
+  }
+  const memoized = memo.get(cacheKey);
+  if (memoized) return memoized as "match" | "mismatch" | "not_verifiable";
+  const outcome = computeVerifiedFormulaOutcome(group, cited, sourceCell);
+  memo.set(cacheKey, outcome);
+  return outcome;
+}
+
+function computeVerifiedFormulaOutcome(
+  group: ChunkGroup,
+  cited: { chunk: ParsedChunk; reference: ParsedSourceReference },
+  sourceCell: ParsedSourceCell,
+): "match" | "mismatch" | "not_verifiable" {
+  const formulaEntry = cited.chunk.formulaCells?.find(
+    (formula) =>
+      formula.sheetName === sourceCell.sheetName &&
+      formula.cellReference === sourceCell.cell &&
+      formula.rowStart <= sourceCell.row &&
+      formula.rowEnd >= sourceCell.row,
+  );
+  if (!formulaEntry?.formula || formulaEntry.formulaCacheRaw === null) return "not_verifiable";
+  const body = formulaEntry.formula.replace(/^\s*=/, "").trim();
+  if (!body) return "not_verifiable";
+  // Tokenize: cell references, numbers, operators, parentheses. Any other
+  // shape (function names, cross-sheet "!", strings, commas) is unsafe.
+  const tokenPattern = /(\$?[A-Z]{1,3}\$?\d+)|(\d+(?:\.\d+)?)|([+\-*/()])|(\s+)/giy;
+  const tokens: string[] = [];
+  let position = 0;
+  while (position < body.length) {
+    tokenPattern.lastIndex = position;
+    const match = tokenPattern.exec(body);
+    if (!match || match.index !== position) return "not_verifiable";
+    tokens.push(match[0].trim());
+    position = tokenPattern.lastIndex;
+  }
+  // Resolve referenced cell values from every source reference in the group.
+  const cellValues = new Map<string, number>();
+  for (const chunk of group.chunks) {
+    for (const source of sourceReferencesForChunk(chunk)) {
+      const sheetName = source.sourceLocation?.sheetName;
+      if (!sheetName) continue;
+      for (const cell of source.rowCells ?? []) {
+        const numeric = Number(cell.rawValue);
+        if (Number.isFinite(numeric)) cellValues.set(`${sheetName}!${cell.cell}`, numeric);
+      }
+      if (source.cell) {
+        const numeric = Number(source.cell.rawValue);
+        if (Number.isFinite(numeric)) cellValues.set(`${sheetName}!${source.cell.cell}`, numeric);
+      }
+    }
+  }
+  let cursor = 0;
+  const peek = () => tokens[cursor];
+  const parseFactor = (): number | null => {
+    const token = peek();
+    if (token === undefined) return null;
+    if (token === "-") { cursor += 1; const value = parseFactor(); return value === null ? null : -value; }
+    if (token === "(") {
+      cursor += 1;
+      const value = parseExpr();
+      if (value === null || peek() !== ")") return null;
+      cursor += 1;
+      return value;
+    }
+    if (/^\$?[A-Z]{1,3}\$?\d+$/.test(token)) {
+      cursor += 1;
+      return cellValues.get(`${sourceCell.sheetName}!${token.replace(/\$/g, "")}`) ?? null;
+    }
+    if (/^\d+(?:\.\d+)?$/.test(token)) { cursor += 1; return Number(token); }
+    return null;
+  };
+  const parseTerm = (): number | null => {
+    let left = parseFactor();
+    if (left === null) return null;
+    while (peek() === "*" || peek() === "/") {
+      const operator = peek();
+      cursor += 1;
+      const right = parseFactor();
+      if (right === null) return null;
+      left = operator === "*" ? left * right : right === 0 ? NaN : left / right;
+    }
+    return left;
+  };
+  const parseExpr = (): number | null => {
+    let left = parseTerm();
+    if (left === null) return null;
+    while (peek() === "+" || peek() === "-") {
+      const operator = peek();
+      cursor += 1;
+      const right = parseTerm();
+      if (right === null) return null;
+      left = operator === "+" ? left + right : left - right;
+    }
+    return left;
+  };
+  const computed = parseExpr();
+  if (computed === null || !Number.isFinite(computed) || cursor !== tokens.length) return "not_verifiable";
+  const cached = Number(formulaEntry.formulaCacheRaw);
+  if (!Number.isFinite(cached)) return "not_verifiable";
+  return Math.abs(computed - cached) <= Number.EPSILON * Math.max(1, Math.abs(computed), Math.abs(cached)) * 4
+    ? "match"
+    : "mismatch";
 }
 
 function formulaCandidateReviewError(
@@ -1588,10 +1734,13 @@ function formulaCandidateReviewError(
   candidate: string | null | undefined,
   path: string,
 ): string | null {
-  return candidate &&
-    sourceValueNeedsFormulaReview(citedFormulaCacheStatusForValue(group, citation, candidate))
-    ? `${path} cites a stored formula result whose freshness is not established; it remains source-reported evidence for review (${FORMULA_CACHE_REVIEW_MARKER})`
+  const status = candidate
+    ? citedFormulaCacheStatusForValue(group, citation, candidate)
     : null;
+  if (!candidate || !sourceValueNeedsFormulaReview(status)) return null;
+  return status === "cached_value_recompute_mismatch"
+    ? `${path} cites a stored formula result that does not match recomputation from its referenced inputs; the inconsistency requires review (${FORMULA_CACHE_REVIEW_MARKER})`
+    : `${path} cites a stored formula result whose freshness is not established; it remains source-reported evidence for review (${FORMULA_CACHE_REVIEW_MARKER})`;
 }
 function citationIsCachedFormulaCell(
   group: ChunkGroup,

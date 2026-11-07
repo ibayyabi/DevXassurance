@@ -296,3 +296,11 @@ File cost nyata satu-satunya di DOKUMEN ASLI ternyata yang terpadat: 8 grup deng
 3. Model biaya keluarga ini dikoreksi: file 8-grup ≈ **300k+ token** (rerata 10k token/request — terpadat sejauh ini).
 
 Status klaim tetap lampiran 5; domain cost pada dokumen asli = gap yang jujur sampai tabel bergeser tertangani.
+
+## Lampiran 16: Level 1 freshness tereksekusi (/44) - rekalkulasi verifikasi formula aritmetika
+
+Dengan persetujuan pelonggaran aturan "formulas are never evaluated" untuk subset aman: formula murni aritmetika self-contained (referensi sel + angka + +-*/() saja; tanpa fungsi, cross-sheet, range) kini **dihitung ulang dari sel input barisnya sendiri** dan dibandingkan dengan nilai cache:
+- **Cocok** -> status `cached_value_verified_match`: bebas freshness review, provenance "recomputed match" (Duration, Weighted Progress, Variance pada dokumen asli berhenti jadi gap)
+- **Tidak cocok** -> `cached_value_recompute_mismatch`: review-required dengan pesan inkonsistensi eksplisit di jalur error dedikasi
+- Di luar subset / tidak terverifikasi -> perilaku lama (review-required)
+Konservatif: cache tetap otoritatif; rekalkulasi hanya membuka gerbang bila konsisten. Nilai tak terhitung (teks, RAG IF kompleks) tetap jalur lama. Schema /43 -> /44. Verifikasi: 2 tes baru (match = terbit tanpa marker; mismatch = tereliminasi dengan review-required), suite penuh **319/319**, tsc bersih. Efek pada dokumen asli: kolom Duration/Weighted Progress/Variance ber-cache kini terverifikasi otomatis; RAG (IF) menunggu Level 2 (garansi generator tracker-web).
