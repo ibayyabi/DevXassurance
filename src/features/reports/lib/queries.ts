@@ -1,8 +1,15 @@
 import { requireProjectMembership } from "@/features/projects/lib/queries";
+import { canManageProject } from "@/features/projects/lib/roles";
 import type { ReportType } from "@/features/reports/lib/constants";
+import type { ReportManifest } from "@/features/reports/lib/snapshot";
+import {
+  listPublishedSnapshots,
+  type ReportSnapshotRef,
+} from "@/features/reports/lib/snapshot-source";
 
 export type ReportPreview = {
   id: string;
+  reviewId: string | null;
   reportType: ReportType;
   reportingPeriod: string;
   audience: string;
@@ -13,7 +20,13 @@ export type ReportPreview = {
   provenance: { label: string; source: string }[];
   reviewState: string;
   createdAt: string;
+  snapshotId: string | null;
+  snapshotCutoff: string | null;
+  snapshotVersion: string | null;
+  snapshotManifest: Partial<ReportManifest>;
 };
+
+export type { ReportSnapshotRef };
 
 export type ReportExport = {
   id: string;
@@ -25,24 +38,9 @@ export type ReportExport = {
   downloadUrl: string | null;
 };
 
-export type ReportEvidenceStats = {
-  documents: number;
-  chunks: number;
-  facts: number;
-  summaries: number;
-};
-
-export type ReportAssuranceReview = {
-  id: string;
-  title: string;
-  reportingPeriod: string;
-  status: string;
-  ready: boolean;
-  completedAt: string | null;
-};
-
 type ReportPreviewRow = {
   id: string;
+  assurance_review_id: string | null;
   report_type: ReportType;
   reporting_period: string;
   audience: string;
@@ -53,6 +51,10 @@ type ReportPreviewRow = {
   provenance: { label: string; source: string }[];
   review_state: string;
   created_at: string;
+  snapshot_id: string | null;
+  snapshot_cutoff: string | null;
+  snapshot_version: string | null;
+  snapshot_manifest: Partial<ReportManifest> | null;
 };
 
 type ReportExportRow = {
@@ -66,66 +68,43 @@ type ReportExportRow = {
   created_at: string;
 };
 
-export async function getReportsWorkspace(projectId: string) {
+const previewColumns =
+  "id, assurance_review_id, report_type, reporting_period, audience, detail_level, original_sections, edited_sections, included_evidence_counts, provenance, review_state, created_at, snapshot_id, snapshot_cutoff, snapshot_version, snapshot_manifest";
+
+export async function getReportsWorkspace(projectId: string, selectedPreviewId?: string) {
   const { supabase, membership } = await requireProjectMembership(projectId);
-  const [
-    { data, error },
-    { data: exportsData, error: exportsError },
-    { count: documentCount, error: documentCountError },
-    { count: chunkCount, error: chunkCountError },
-    { count: factCount, error: factCountError },
-    { count: summaryCount, error: summaryCountError },
-    { data: reviewData, error: reviewError },
-  ] =
+
+  const [{ data, error }, { data: exportsData, error: exportsError }, snapshots] =
     await Promise.all([
       supabase
         .from("report_previews")
+        .select(previewColumns)
+        .eq("project_id", projectId)
+        .order("created_at", { ascending: false })
+        .limit(12),
+      supabase
+        .from("report_exports")
         .select(
-          "id, report_type, reporting_period, audience, detail_level, original_sections, edited_sections, included_evidence_counts, provenance, review_state, created_at",
+          "id, export_format, storage_bucket, storage_path, file_name, file_size, status, created_at",
         )
         .eq("project_id", projectId)
         .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle(),
-      supabase
-        .from("report_exports")
-        .select("id, export_format, storage_bucket, storage_path, file_name, file_size, status, created_at")
-        .eq("project_id", projectId)
-        .order("created_at", { ascending: false })
         .limit(5),
-      supabase
-        .from("documents")
-        .select("id", { count: "exact", head: true })
-        .eq("project_id", projectId),
-      supabase
-        .from("document_chunks")
-        .select("id", { count: "exact", head: true })
-        .eq("project_id", projectId),
-      supabase
-        .from("extracted_facts")
-        .select("id", { count: "exact", head: true })
-        .eq("project_id", projectId),
-      supabase
-        .from("document_summaries")
-        .select("id", { count: "exact", head: true })
-        .eq("project_id", projectId),
-      supabase
-        .from("assurance_reviews")
-        .select("id, title, reporting_period, status, analysis_metadata")
-        .eq("project_id", projectId)
-        .order("reporting_period", { ascending: false })
-        .limit(1)
-        .maybeSingle(),
+      listPublishedSnapshots(supabase, projectId),
     ]);
 
   if (error) throw new Error(error.message);
   if (exportsError) throw new Error(exportsError.message);
-  if (documentCountError) throw new Error(documentCountError.message);
-  if (chunkCountError) throw new Error(chunkCountError.message);
-  if (factCountError) throw new Error(factCountError.message);
-  if (summaryCountError) throw new Error(summaryCountError.message);
-  if (reviewError) throw new Error(reviewError.message);
 
+  const previews = ((data ?? []) as unknown as ReportPreviewRow[]).map(mapPreview);
+  const preview =
+    (selectedPreviewId
+      ? previews.find((item) => item.id === selectedPreviewId)
+      : undefined) ??
+    previews[0] ??
+    null;
+
+  // Storage is signed per row; only the visible history is signed.
   const exports = await Promise.all(
     ((exportsData ?? []) as unknown as ReportExportRow[]).map(async (row) => {
       const { data: signed } = await supabase.storage
@@ -138,37 +117,37 @@ export async function getReportsWorkspace(projectId: string) {
     }),
   );
 
+  const pinnedSnapshotId = preview?.snapshotId ?? null;
+  const pinnedCutoff = preview?.snapshotCutoff ?? null;
+  const pinnedReviewId = preview?.reviewId ?? null;
+  const pinnedReview = pinnedReviewId
+    ? snapshots.find((snapshot) => snapshot.reviewId === pinnedReviewId)
+    : undefined;
+  // The pinned draft is superseded when its own review published a newer
+  // analysis, or when a snapshot with a later cut-off exists.
+  const superseded = Boolean(
+    pinnedSnapshotId && pinnedReview && pinnedReview.snapshotId !== pinnedSnapshotId,
+  );
+  const newerCutoff = Boolean(
+    pinnedCutoff && (snapshots[0]?.cutoff ?? "") > pinnedCutoff,
+  );
+
   return {
     membership,
-    preview: data ? mapPreview(data as unknown as ReportPreviewRow) : null,
+    canManage: canManageProject(membership.role),
+    preview,
+    previews,
     exports,
-    evidenceStats: {
-      documents: documentCount ?? 0,
-      chunks: chunkCount ?? 0,
-      facts: factCount ?? 0,
-      summaries: summaryCount ?? 0,
-    } satisfies ReportEvidenceStats,
-    review: reviewData
-      ? {
-          id: reviewData.id,
-          title: reviewData.title,
-          reportingPeriod: reviewData.reporting_period,
-          status: reviewData.status,
-          ready: ["findings_ready", "report_draft", "approved"].includes(
-            reviewData.status,
-          ),
-          completedAt:
-            typeof reviewData.analysis_metadata?.completed_at === "string"
-              ? reviewData.analysis_metadata.completed_at
-              : null,
-        } satisfies ReportAssuranceReview
-      : null,
+    snapshots,
+    latestSnapshotId: snapshots[0]?.snapshotId ?? null,
+    newerSnapshotAvailable: superseded || newerCutoff,
   };
 }
 
 function mapPreview(row: ReportPreviewRow): ReportPreview {
   return {
     id: row.id,
+    reviewId: row.assurance_review_id,
     reportType: row.report_type,
     reportingPeriod: row.reporting_period,
     audience: row.audience,
@@ -179,6 +158,10 @@ function mapPreview(row: ReportPreviewRow): ReportPreview {
     provenance: row.provenance,
     reviewState: row.review_state,
     createdAt: row.created_at,
+    snapshotId: row.snapshot_id,
+    snapshotCutoff: row.snapshot_cutoff,
+    snapshotVersion: row.snapshot_version,
+    snapshotManifest: row.snapshot_manifest ?? {},
   };
 }
 

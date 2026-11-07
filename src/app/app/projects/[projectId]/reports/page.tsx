@@ -5,33 +5,49 @@ import { getReportsWorkspace } from "@/features/reports/lib/queries";
 
 export default function ReportsPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ projectId: string }>;
+  searchParams: Promise<{ preview?: string }>;
 }) {
   return (
     <Suspense fallback={<ReportsLoading />}>
-      <ReportsContent params={params} />
+      <ReportsContent params={params} searchParams={searchParams} />
     </Suspense>
   );
 }
 
 async function ReportsContent({
   params,
+  searchParams,
 }: {
   params: Promise<{ projectId: string }>;
+  searchParams: Promise<{ preview?: string }>;
 }) {
   const { projectId } = await params;
-  const { membership, preview, exports, evidenceStats, review } =
-    await getReportsWorkspace(projectId);
+  const { preview: previewParam } = await searchParams;
+  const {
+    membership,
+    canManage,
+    preview,
+    previews,
+    exports,
+    snapshots,
+    latestSnapshotId,
+    newerSnapshotAvailable,
+  } = await getReportsWorkspace(projectId, previewParam);
 
   return (
     <ReportWorkspace
       projectId={projectId}
       projectName={membership.projectName}
+      canManage={canManage}
       preview={preview}
+      previews={previews}
       exports={exports}
-      evidenceStats={evidenceStats}
-      review={review}
+      snapshots={snapshots}
+      latestSnapshotId={latestSnapshotId}
+      newerSnapshotAvailable={newerSnapshotAvailable}
     />
   );
 }
