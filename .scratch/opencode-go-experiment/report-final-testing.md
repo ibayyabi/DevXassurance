@@ -310,3 +310,9 @@ Konservatif: cache tetap otoritatif; rekalkulasi hanya membuka gerbang bila kons
 Mekanisme di jalur partial-success (lokasi kegagalan fidelity yang sebenarnya): grup yang selesai dengan warning kelas fidelity (numeric-mismatch, milestone peran/kapasitas) di-retry SEKALI dengan Gemini sebelum di-checkpoint failed; kelas struktural (formula freshness, scope tak terbukti, header invalid) tidak pernah memicu fallback; porsi dibatasi `XASS_EXTRACTION_GEMINI_FALLBACK_GROUPS` (default 3/dokumen); provenance provider/model per grup mencatat model yang menghasilkan.
 
 Verifikasi offline: 2 tes baru - (1) fidelity gagal di flash -> retry Gemini -> grup selesai dengan provenance Gemini; (2) kegagalan struktural -> 0 panggilan Gemini, checkpoint failed. Suite penuh **321/321**, tsc + lint bersih. Verifikasi live: residu saja (gratis di free tier) - menunggu server Gemini lega.
+
+## Lampiran 18: re-run kontrol negatif Gemini - masih tertahan kapasitas
+
+Dengan kunci baru: kontrol positif lulus lagi (1 fakta grounded); kontrol negatif (grup padat) tetap tertahan "high demand" free tier - dua kali berturut-turut. Tidak diulang lagi sesi ini (anti-loop).
+
+Fallback sadar-kelas tetap terbangun dan terverifikasi offline (lampiran 17); bukti live kontrol negatif menunggu kapasitas Gemini - re-run gratis kapan pun via skrip yang sama.
