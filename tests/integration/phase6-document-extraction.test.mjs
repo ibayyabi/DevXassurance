@@ -2282,10 +2282,15 @@ test("a per-cell citation survives a sibling cell's unresolved formula while the
       // The unresolved formula cell itself.
       { fact_type: "milestone", extracted_text: "Topping off reached 25% complete", original_value: "Topping off reached 25% complete", confidence: 0.8, source_id: "c0s3" },
     ];
-    output.assurance_observations.progress = [{
+    const progressCandidate = (source_id) => ({
       raw_value: "25%", percent: 25, scope_level: "project", scope_label: null,
-      period_label: null, as_of_date: null, excerpt: "Progress: 25%", source_id: "c0s1",
-    }];
+      period_label: null, as_of_date: null, excerpt: "Progress: 25%", source_id,
+    });
+    output.assurance_observations.progress = [
+      progressCandidate("c0s1"),
+      progressCandidate("c0s0"),
+      progressCandidate("c0s3"),
+    ];
     return modelResponse(output);
   }, async () => {
     const result = await extractDocumentGroups(
@@ -2299,11 +2304,17 @@ test("a per-cell citation survives a sibling cell's unresolved formula while the
       result.extraction.facts.map((fact) => [fact.extracted_text, fact.evidence_chunk_index]),
       [["Topping off reached 25% complete", 0]],
     );
-    assert.equal(result.extraction.assurance_observations.progress[0]?.source_location?.cellRangeStart, "A12");
+    const progress = result.extraction.assurance_observations.progress;
+    assert.equal(progress.length, 1);
+    assert.equal(progress[0]?.source_location?.cellRangeStart, "A12");
+    assert.equal(progress[0]?.measure_kind, "unspecified");
+    assert.equal(progress[0]?.period_basis, null);
     const warnings = result.extraction.quality_warnings.join(" ");
     assert.doesNotMatch(warnings, /facts\[0\]/);
     assert.match(warnings, /facts\[1\] was excluded because facts\[1\]\.source_id cites formula_result_unavailable/);
     assert.match(warnings, /facts\[2\] was excluded because facts\[2\]\.source_id cites formula_result_unavailable/);
+    assert.match(warnings, /progress\[1\] was excluded/);
+    assert.match(warnings, /progress\[2\] was excluded/);
     // An unresolved formula still keeps every evidence domain unprocessed.
     assert.deepEqual(
       result.extraction.assurance_observation_coverage.map((row) => row.state),

@@ -8,6 +8,8 @@ import { documentTypes } from "../../../src/features/documents/lib/constants";
 import type { ParsedChunk, ParsedSourceCell, ParsedSourceReference } from "./document-parser";
 import { isRecord } from "../types/guards";
 import { citedTextSupportsNumericValue, containsNumericValue } from "../../../src/features/documents/lib/source-value-validation";
+import type { ProgressPeriodBasis } from "../../../src/features/assurance/lib/analysis";
+
 
 export type DocumentExtractionContext = {
   projectId: string;
@@ -154,10 +156,29 @@ export type ExtractedProgressObservation = {
   scope_label: string | null;
   scope_provenance?: ObservationScopeProvenance[];
   scope_source_id?: string;
+  /**
+   * The measurement kind the cited source itself proves: an explicit planned
+   * header/cue ("Planned %", "Rencana %") or actual cue ("Actual %",
+   * "Realisasi %"). A plain "Progress %" header is ambiguous and stays
+   * unspecified. Role or magnitude never implies the kind.
+   */
+  measure_kind: "actual" | "planned" | "unspecified";
+  source_rag_claim: {
+    label: string;
+    evidence_chunk_index: number;
+    excerpt: string;
+    page_number: number | null;
+    section_label: string | null;
+    freshness: "source_literal" | "cached_formula_unverified";
+    source_location?: ParsedSourceReference["sourceLocation"];
+  } | null;
   period_label: string | null;
+  period_basis: ProgressPeriodBasis | null;
   as_of_date: string | null;
   evidence_chunk_index: number;
   excerpt: string;
+  /** Exact percent cell resolved from the cited row, separate from that citation's raw location. */
+  value_source_location?: ParsedSourceReference["sourceLocation"];
   source_location?: ParsedSourceReference["sourceLocation"];
 };
 
@@ -489,7 +510,9 @@ function percentShapedClaimText(cell: ParsedSourceCell): string | null {
 // the freshness review requirement (provenance: recomputed match), a mismatch
 // is an explicit inconsistency requiring review; complex formulas keep the
 // current behavior. Cached /43 rows are re-extracted once.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/44";
+// /45: retain cited planned/actual measurement kinds and source RAG claims;
+// cached /44 groups lack these fields and must be re-extracted.
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/45";
 // Group density is tunable per deployment: smaller groups (fewer chunks each)
 // reduce the model's row-confusion in dense tables at the cost of repeating
 // the prompt scaffolding once more per group. The group key binds the resulting
@@ -1813,6 +1836,7 @@ function citedPercentCellForClaim(
   citation: SourceCitation | null | undefined,
   rawValue: string | null | undefined,
   percentValue: number,
+  valueSourceLocation?: ParsedSourceReference["sourceLocation"] | null,
 ): ParsedSourceCell | null {
   if (!rawValue) return null;
   const cited = citedReference(group, citation);
@@ -1820,22 +1844,209 @@ function citedPercentCellForClaim(
   const sourceCells = cited.reference.cell
     ? [cited.reference.cell]
     : cited.reference.rowCells ?? [];
+  // A claim that names its own single value cell is resolved against that
+  // exact cell when the cited reference contains it. The coordinate can only
+  // narrow the search: the cell must still pass every unit, header, and value
+  // proof below, so declaring a coordinate never widens what a citation proves.
+  const declaredLocator = valueSourceLocation?.kind === "xlsx" &&
+    typeof valueSourceLocation.sheetName === "string" &&
+    typeof valueSourceLocation.cellRangeStart === "string" &&
+    valueSourceLocation.cellRangeStart === valueSourceLocation.cellRangeEnd
+    ? sourceCells.filter((cell) =>
+      cell.sheetName === valueSourceLocation.sheetName &&
+      cell.cell === valueSourceLocation.cellRangeStart)
+    : [];
+  const candidates = declaredLocator.length ? declaredLocator : sourceCells;
   const percentHeader = /(?:%|\bpercent(?:age)?\b|\bpersen\b)/iu;
-  const progressHeader = /\b(?:actual|progress|complete|completed|completion|realisasi|kemajuan)\b/iu;
+  const progressHeader = /\b(?:planned|actual|progress|complete|completed|completion|rencana|realisasi|kemajuan)\b/iu;
   const nonProgressHeader = /\b(?:risk|likelihood|probability|rating|impact|severity)\b/iu;
-  const matches = sourceCells.filter(
-    (cell) =>
-      percentHeader.test(cell.label ?? "") &&
+  const matches = candidates.filter((cell) => {
+    const explicitUnit = percentHeader.test(cell.label ?? "") ||
+      /(?:%|\bpercent(?:age)?\b|\bpersen\b)/iu.test(`${cell.value} ${cell.rawValue}`);
+    return explicitUnit &&
       progressHeader.test(cell.label ?? "") &&
       !nonProgressHeader.test(cell.label ?? "") &&
       // A numeric percent cell stores "0.125" raw and displays "12.5%"; a
       // claim carries the display shape, so match either representation.
       (cell.rawValue.trim() === rawValue.trim() || cell.value.trim() === rawValue.trim()) &&
       (citedTextSupportsNumericValue(String(percentValue), cell.rawValue) ||
-        citedTextSupportsNumericValue(String(percentValue), cell.value)),
-  );
+        citedTextSupportsNumericValue(String(percentValue), cell.value) ||
+        citedTextSupportsNumericValue(`${percentValue}%`, cell.value));
+  });
   return matches.length === 1 ? matches[0] : null;
 }
+
+function citedPercentTextSupportsClaim(
+  group: ChunkGroup,
+  citation: SourceCitation | null | undefined,
+  rawValue: string | null | undefined,
+  percentValue: number,
+): boolean {
+  const cited = citedReference(group, citation);
+  if (!cited || !rawValue) return false;
+  const location = cited.reference.sourceLocation;
+  const sourceText = cited.reference.text;
+  const cellRangeStart = location?.cellRangeStart;
+  if (
+    location?.kind !== "xlsx" ||
+    typeof location.sheetName !== "string" ||
+    typeof location.rowStart !== "number" ||
+    location.rowStart !== location.rowEnd ||
+    typeof cellRangeStart !== "string" ||
+    cellRangeStart !== location.cellRangeEnd ||
+    typeof sourceText !== "string" ||
+    !sourceText.includes(rawValue.trim()) ||
+    !/\b(?:actual|planned|progress|complete|completed|completion|rencana|realisasi|kemajuan)\b/iu.test(sourceText) ||
+    /\b(?:risk|likelihood|probability|rating|impact|severity)\b/iu.test(sourceText) ||
+    /(?:=|;\s*formula cache:)/iu.test(sourceText) ||
+    !/(?:%|\bpercent(?:age)?\b|\bpersen\b)/iu.test(rawValue) ||
+    !citedTextSupportsNumericValue(rawValue, sourceText) ||
+    !citedTextSupportsNumericValue(`${percentValue}%`, sourceText)
+  ) {
+    return false;
+  }
+  return !(cited.chunk.formulaCells ?? []).some((formula) =>
+    formula.sheetName === location.sheetName &&
+    normalizedCellReference(formula.cellReference) === normalizedCellReference(cellRangeStart)
+  );
+}
+
+function normalizedCellReference(reference: string): string {
+  return reference.replace(/\$/gu, "").toUpperCase();
+}
+
+function progressVarianceOperands(
+  formula: string,
+): { actualCell: string; plannedCell: string } | null {
+  const expression = formula.replace(/^\s*=/u, "").replace(/\s+/gu, "");
+  const reference = "\\$?[A-Z]{1,3}\\$?\\d+";
+  const direct = expression.match(new RegExp(`^(${reference})-(${reference})$`, "iu"));
+  if (direct) return { actualCell: direct[1], plannedCell: direct[2] };
+  const guarded = expression.match(
+    new RegExp(`^IF\\((${reference})="","",(${reference})-(${reference})\\)$`, "iu"),
+  );
+  if (!guarded || normalizedCellReference(guarded[1]) !== normalizedCellReference(guarded[2])) {
+    return null;
+  }
+  return { actualCell: guarded[2], plannedCell: guarded[3] };
+}
+
+function progressHeaderProvesPercentKind(
+  cell: ParsedSourceCell,
+  kind: "actual" | "planned",
+): boolean {
+  const label = cell.label ?? "";
+  return progressMeasureKindFromCue(label) === kind &&
+    /(?:%|\bpercent(?:age)?\b|\bpersen\b)/iu.test(label) &&
+    !/\b(?:risk|likelihood|probability|rating|impact|severity)\b/iu.test(label);
+}
+
+/** Formula syntax proves only the pair; cached formula values are never read. */
+function progressVarianceFormulaSupportsCell(
+  group: ChunkGroup,
+  citation: SourceCitation | null | undefined,
+  citedCell: ParsedSourceCell,
+): boolean {
+  const cited = citedReference(group, citation);
+  const location = cited?.reference.sourceLocation;
+  if (
+    !cited ||
+    location?.kind !== "xlsx" ||
+    location.sheetName !== citedCell.sheetName ||
+    location.rowStart !== citedCell.row ||
+    location.rowEnd !== citedCell.row
+  ) {
+    return false;
+  }
+  const rowCells = cited.reference.rowCells ??
+    (cited.reference.cell ? [cited.reference.cell] : []);
+  const currentCell = normalizedCellReference(citedCell.cell);
+  const currentKind = progressMeasureKindFromCue(citedCell.label);
+  if (!rowCells.some((cell) =>
+    cell.sheetName === citedCell.sheetName &&
+    cell.row === citedCell.row &&
+    normalizedCellReference(cell.cell) === currentCell
+  )) {
+    return false;
+  }
+
+  return (cited.chunk.formulaCells ?? []).some((formulaCell) => {
+    if (
+      formulaCell.sheetName !== citedCell.sheetName ||
+      formulaCell.rowStart !== citedCell.row ||
+      formulaCell.rowEnd !== citedCell.row
+    ) {
+      return false;
+    }
+    const operands = progressVarianceOperands(formulaCell.formula);
+    if (!operands) return false;
+    const actualRef = normalizedCellReference(operands.actualCell);
+    const plannedRef = normalizedCellReference(operands.plannedCell);
+    if (actualRef === plannedRef) return false;
+    const actual = rowCells.find((cell) =>
+      cell.sheetName === citedCell.sheetName &&
+      cell.row === citedCell.row && normalizedCellReference(cell.cell) === actualRef
+    );
+    const planned = rowCells.find((cell) =>
+      cell.sheetName === citedCell.sheetName &&
+      cell.row === citedCell.row && normalizedCellReference(cell.cell) === plannedRef
+    );
+    const variance = rowCells.find((cell) =>
+      cell.sheetName === citedCell.sheetName &&
+      cell.row === citedCell.row &&
+      normalizedCellReference(cell.cell) === normalizedCellReference(formulaCell.cellReference)
+    );
+    if (
+      !actual ||
+      !planned ||
+      !variance ||
+      !/\b(?:variance|delta|selisih|deviasi)\b/iu.test(variance.label ?? "") ||
+      !progressHeaderProvesPercentKind(actual, "actual") ||
+      !progressHeaderProvesPercentKind(planned, "planned")
+    ) {
+      return false;
+    }
+    return currentKind === "actual"
+      ? currentCell === actualRef
+      : currentKind === "planned" && currentCell === plannedRef;
+  });
+}
+
+function progressPeriodBasisForCell(
+  group: ChunkGroup,
+  citation: SourceCitation | null | undefined,
+  cell: ParsedSourceCell | null,
+): ProgressPeriodBasis | null {
+  if (!cell) return null;
+  const label = cell.label ?? "";
+  if (/\b(?:cumulative|to[\s-]?date|overall|kumulatif)\b/iu.test(label)) {
+    return "cumulative";
+  }
+  if (/\b(?:weekly|week|mingguan|minggu)\b/iu.test(label)) return "weekly";
+  if (/\b(?:monthly|month|bulanan|bulan)\b/iu.test(label)) return "monthly";
+  if (/\b(?:daily|day|harian|hari)\b/iu.test(label)) return "daily";
+  return progressVarianceFormulaSupportsCell(group, citation, cell)
+    ? "paired_variance_formula"
+    : null;
+}
+
+
+function progressCellSourceLocation(
+  citation: SourceCitation | null,
+  cell: ParsedSourceCell,
+): ParsedSourceReference["sourceLocation"] {
+  const location = citation?.source_location;
+  return location?.kind === "xlsx"
+    ? {
+        ...location,
+        rowStart: cell.row,
+        rowEnd: cell.row,
+        cellRangeStart: cell.cell,
+        cellRangeEnd: cell.cell,
+      }
+    : location;
+}
+
 const NARRATIVE_PROGRESS_TERM_PATTERN =
   "(?:progress|progres|kemajuan|completion|complete|completed|actual|aktual|realisasi|penyelesaian|selesai|tercapai)";
 const NARRATIVE_QUALIFIER_PATTERN =
@@ -2019,6 +2230,149 @@ function milestoneFactClaimIsPureProgressStatement(claim: string): boolean {
     .replace(/\d+(?:[.,]\d+)?\s*(?:%|percent(?:age)?|persen)/giu, " ")
     .replace(MILESTONE_CLAIM_SCAFFOLDING_PATTERN, " ");
   return !/\p{L}/u.test(remainder);
+}
+
+const PROGRESS_PLANNED_CUE =
+  /\b(?:planned|rencana)\b/iu;
+const PROGRESS_ACTUAL_CUE =
+  /\b(?:actual|realisasi)\b/iu;
+
+/**
+ * The measurement kind a progress header or narrative cue proves. An explicit
+ * planned or actual word decides; both at once (or neither) stays
+ * unspecified. Never derived from role or magnitude.
+ */
+function progressMeasureKindFromCue(cue: string | null | undefined): "actual" | "planned" | "unspecified" {
+  if (!cue) return "unspecified";
+  const planned = PROGRESS_PLANNED_CUE.test(cue);
+  const actual = PROGRESS_ACTUAL_CUE.test(cue);
+  return planned === actual ? "unspecified" : planned ? "planned" : "actual";
+}
+
+/**
+ * The measurement-kind cue text the citation itself proves. For an XLSX
+ * citation this is only the cited cell's own header label (a sibling
+ * "Planned %" column never labels this cell's value); for narrative sources it
+ * is the cited excerpt. Null when the citation cannot be resolved.
+ */
+function citedProgressMeasureCue(
+  group: ChunkGroup,
+  citation: SourceCitation | null,
+  rawValue: string,
+): string | null {
+  if (!citation || !rawValue) return null;
+  const cited = citedReference(group, citation);
+  if (!cited) return null;
+  const location = cited.reference.sourceLocation;
+  if (location?.kind === "xlsx") {
+    const exactCell =
+      cited.reference.cell &&
+      location.cellRangeStart === cited.reference.cell.cell &&
+      location.cellRangeEnd === cited.reference.cell.cell
+        ? cited.reference.cell
+        : null;
+    const sourceCells = exactCell
+      ? [exactCell]
+      : cited.reference.rowCells?.length
+        ? cited.reference.rowCells
+        : cited.reference.cell
+          ? [cited.reference.cell]
+          : [];
+    const candidate = rawValue.trim().toLocaleLowerCase();
+    const labels = sourceCells
+      .filter((cell) =>
+        [cell.rawValue, cell.value].some((value) => value.trim().toLocaleLowerCase() === candidate))
+      .map((cell) => cell.label ?? "")
+      .filter(Boolean);
+    return labels.length ? labels.join(" ") : null;
+  }
+  return citation.excerpt;
+}
+
+function sourceRagClaimFromCandidate(
+  group: ChunkGroup,
+  valueCitation: SourceCitation | null,
+  candidate: unknown,
+  allowedSources: Map<string, SourceCitation>,
+  path: string,
+  qualityWarnings: string[],
+  fromCache: boolean,
+): ExtractedProgressObservation["source_rag_claim"] {
+  if (candidate === null || candidate === undefined) return null;
+  if (!isRecord(candidate)) {
+    qualityWarnings.push(`${path}.source_rag_claim was dropped because it is not an object.`);
+    return null;
+  }
+  const errors: string[] = [];
+  const label = boundedString(candidate.label, `${path}.source_rag_claim.label`, errors, 200);
+  const citation = requiredCitation(
+    candidate,
+    allowedSources,
+    `${path}.source_rag_claim`,
+    errors,
+    fromCache,
+  );
+  const excerpt = nullableBoundedString(
+    candidate.excerpt ?? null,
+    `${path}.source_rag_claim.excerpt`,
+    errors,
+    1200,
+  );
+  if (excerpt && citation && !citation.excerpt.includes(excerpt)) {
+    errors.push(`${path}.source_rag_claim.excerpt is not present in the cited source`);
+  }
+  const rag = citedReference(group, citation);
+  const value = citedReference(group, valueCitation);
+  let supported = Boolean(label && citation && rag && value);
+  let freshness: "source_literal" | "cached_formula_unverified" = "source_literal";
+  if (supported && rag!.reference.sourceLocation?.kind === "xlsx") {
+    const location = rag!.reference.sourceLocation;
+    const cell = rag!.reference.cell;
+    const valueLocation = value!.reference.sourceLocation;
+    const exactCell = cell &&
+      location.cellRangeStart === cell.cell &&
+      location.cellRangeEnd === cell.cell
+      ? cell
+      : null;
+    supported = Boolean(
+      exactCell &&
+      valueLocation?.kind === "xlsx" &&
+      valueLocation.sheetName === location.sheetName &&
+      valueLocation.rowStart === location.rowStart &&
+      valueLocation.rowEnd === location.rowEnd &&
+      location.rowStart === location.rowEnd &&
+      /\brag\b/iu.test(exactCell.label ?? "") &&
+      [exactCell.rawValue, exactCell.value].some((sourceValue) => sourceValue.trim() === label),
+    );
+    const formulaStatus = exactCell
+      ? formulaCacheStatusForSourceCell(group, citation, exactCell)
+      : null;
+    if (supported && formulaStatus && formulaStatus !== "not_formula") {
+      freshness = "cached_formula_unverified";
+    }
+  } else if (supported) {
+    supported = Boolean(
+      citation!.excerpt &&
+      valueCitation!.excerpt === citation!.excerpt &&
+      /\b(?:rag|progress\s+status|progress\s+condition)\b/iu.test(citation!.excerpt) &&
+      citation!.excerpt.includes(label!),
+    );
+  }
+  if (errors.length || !supported) {
+    qualityWarnings.push(
+      `${path}.source_rag_claim was dropped because its cited literal label is not a same-row progress RAG/status source.`,
+    );
+    return null;
+  }
+  return {
+    label: label!,
+    evidence_chunk_index: citation!.evidence_chunk_index,
+    excerpt: citation!.excerpt,
+    page_number: rag?.chunk.pageNumber ?? null,
+    section_label: rag?.chunk.sectionLabel ?? null,
+    freshness,
+    ...(citation!.source_location ? { source_location: citation!.source_location } : {}),
+  };
 }
 
 function citedProgressPercentSemanticsError(
@@ -2419,6 +2773,8 @@ Task rules:
 - cost_observations collect project cost evidence found anywhere in these sources, whatever the artifact's primary type. Report one entry per stated cost value, copying source_value exactly as written in its cited source, including its currency wording and digit separators. Never convert, total, or restate a value.
 - Choose the cost measure from what the source says: approved_baseline (an approved or controlled budget reference), actual_to_date (cost already incurred), committed (contractually committed or ordered cost), eac (an explicitly reported total forecast or estimate at completion). Never record an actual or committed value as eac, and never record a value whose meaning the source does not state. Return [] only after processing this complete group and finding no cost values.
 - assurance_observations collect every source-backed milestone date, explicitly reported progress value, and item-level risk snapshot in this group, whatever the artifact's primary type. Do not infer baseline/current role; reviewer selection assigns that role later. Keep source scope, period, raw wording, and exact excerpt. Return [] for each array only when this complete group contains no such observation.
+- Progress measurement kind: set measure_kind to planned only when the cited source itself labels the value as planned (for example a "Planned %" or "Rencana %" header), and to actual only when it labels it actual (for example "Actual %", "Realisasi %"); a generic progress header or a value whose kind the source does not state is unspecified — never infer the kind from the row's other columns, the document role, or the magnitude. Planned and actual percentages on the same source row are separate observations. For XLSX, cite that row reference, including the same-row cut-off/period context; the worker resolves each exact value/header cell from parser metadata and retains its cell coordinate. Do not cite a value-only cell when that omits the same-row cut-off/period.
+- Source-reported progress RAG is separate from any computed condition. Return source_rag_claim only when the source explicitly reports a literal progress RAG/status label; cite its exact cell on the same sheet row as the cited percentage, or the same narrative clause. Never infer RAG from the progress value or borrow it from another row, document, or computed rule.
 - Set period_label to null unless the cited source explicitly states a specific period attached to this observation, in wording that appears verbatim in the cited excerpt. A generic document title such as "Weekly report" is not a period, and a stage/phase counter followed by a date (for example "Tahap 2 Januari 2026" or "Phase 3 15 Maret 2026") names a label, not a period — return null then.
 - Set as_of_date to null unless the cited text states an explicit cut-off or record date for the observation; send it as ISO YYYY-MM-DD exactly as the source's date appears in the excerpt. A deadline, due date, document date, or a date you normalize from other wording fails validation — return null instead.
 - Risk: report each item separately with its source risk ID, status, source rating label/value/scale, owner, mitigation, mitigation due date, WBS, and period when stated. raw_value and excerpt must be verbatim source text. A register statement may say no_open_high_or_critical only when it explicitly states that no open high or critical risks exist; otherwise use open_risk_reported only for an explicit open-risk statement.
@@ -2430,7 +2786,7 @@ Required JSON schema:
   "cost_observations": [{"measure":"approved_baseline|actual_to_date|committed|eac","source_value":"exact source text of the amount","scope_level":"project|wbs","scope_label":null,"scope_source_id":null,"wbs_code":null,"wbs_parent_code":null,"wbs_name":null,"scope_description":null,"period_label":null,"as_of_date":null,"status_label":null,"source_id":"..."}],
   "assurance_observations": {
     "milestones": [{"label":"exact event label","raw_date":null,"date":null,"scope_level":"project|wbs|unknown","scope_label":null,"scope_source_id":null,"period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}],
-    "progress": [{"raw_value":"exact percentage wording","percent":0,"scope_level":"project|wbs|unknown","scope_label":null,"scope_source_id":null,"period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}],
+    "progress": [{"raw_value":"exact percentage wording","percent":0,"measure_kind":"planned|actual|unspecified","scope_level":"project|wbs|unknown","scope_label":null,"scope_source_id":null,"period_label":null,"as_of_date":null,"source_rag_claim":{"label":"literal source RAG","source_id":"..."},"excerpt":"verbatim source excerpt","source_id":"..."}],
     "risk_snapshots": [{"risk_id":null,"name":null,"description":null,"status":null,"rating_label":null,"rating_value":null,"scale_label":null,"owner":null,"mitigation":null,"mitigation_due_date":null,"raw_mitigation_due_date":null,"wbs":null,"period_label":null,"as_of_date":null,"raw_value":"verbatim source text","excerpt":"verbatim source excerpt","source_id":"..."}],
     "risk_register_statements": [{"state":"no_open_high_or_critical|open_risk_reported","raw_value":"verbatim source text","period_label":null,"as_of_date":null,"excerpt":"verbatim source excerpt","source_id":"..."}]
   }
@@ -2818,8 +3174,22 @@ function deterministicCellClaims(group: ChunkGroup): {
         percent: numeric,
         scope_level: scopeFields.scope_level ?? "unknown",
         scope_label: scopeFields.scope_label ?? null,
+        // The measurement kind and the period basis are derived with exactly
+        // the proofs the validator applies to this same citation, so the
+        // derived row and the validated row can never disagree about what the
+        // cited source states.
+        measure_kind: progressMeasureKindFromCue(citedProgressMeasureCue(group, target, percentText)),
+        // A literal progress RAG label is never inferred from a percent cell:
+        // the deterministic pass proves the value, not a source-stated RAG.
+        source_rag_claim: null,
         period_label: periodFields.period_label ?? null,
+        period_basis: progressPeriodBasisForCell(group, target, cell),
         as_of_date: asOfDate,
+        // The exact percent cell this claim proves. The validator resolves the
+        // value cell by matching the cited row, so handing it the coordinate
+        // the parser already gave us keeps the derived row provable instead of
+        // being dropped as a citation without an explicit percent unit.
+        value_source_location: progressCellSourceLocation(target, cell),
         ...target,
         // The claim's excerpt IS the cited source's model text, so the
         // persisted excerpt equals what the citation proves (the validator
@@ -4360,9 +4730,41 @@ function validateGroupExtraction(
     if (scopeLevel !== "wbs" && scopeLabel) rowErrors.push(`${path}.scope_label is only valid for WBS scope`);
     if (percentValue === null || percentValue === undefined) rowErrors.push(`${path}.percent must be a source-backed percentage`);
     if (rawValue && !excerpt?.includes(rawValue)) rowErrors.push(`${path}.raw_value is not present in the cited excerpt`);
+    // The measurement kind comes only from the citation itself: the cited
+    // cell's own header label, or the narrative excerpt. The row's other
+    // columns, the evidence role, and the value's magnitude never decide it.
+    const measureCue = citedProgressMeasureCue(group, citation, rawValue ?? "");
+    // The model's claimed kind is advisory: the stored row uses only the kind
+    // the citation itself proves. A contradicting claim is dropped as a
+    // quality warning rather than trusted.
+    const claimedMeasureKind = stringField(item.measure_kind ?? null);
+    const measureKind = progressMeasureKindFromCue(measureCue);
+    if (
+      claimedMeasureKind &&
+      ["actual", "planned", "unspecified"].includes(claimedMeasureKind) &&
+      claimedMeasureKind !== measureKind
+    ) {
+      qualityWarnings.push(
+        measureKind === "unspecified"
+          ? `${path}.measure_kind "${claimedMeasureKind}" was dropped because the cited source does not prove the measurement kind.`
+          : `${path}.measure_kind "${claimedMeasureKind}" was dropped because the citation proves "${measureKind}".`,
+      );
+    }
     const citedPercentCell = percentValue === null || percentValue === undefined
       ? null
-      : citedPercentCellForClaim(group, citation, rawValue, percentValue);
+      // A claim may name the exact value cell it proves (the deterministic pass
+      // always does); the declared cell is only accepted when it exists in the
+      // cited reference and still passes every unit, header, and value proof.
+      : citedPercentCellForClaim(
+        group,
+        citation,
+        rawValue,
+        percentValue,
+        (item.value_source_location ?? null) as ParsedSourceReference["sourceLocation"] | null,
+      );
+    const citedPercentText = percentValue === null || percentValue === undefined
+      ? false
+      : citedPercentTextSupportsClaim(group, citation, rawValue, percentValue);
     if (percentValue !== null && percentValue !== undefined && citation && rawValue) {
       const progressSemanticsError = citedProgressPercentSemanticsError(
         group,
@@ -4373,9 +4775,17 @@ function validateGroupExtraction(
       );
       if (progressSemanticsError) rowErrors.push(progressSemanticsError);
     }
-    if (percentValue !== null && percentValue !== undefined && excerpt &&
+    const citationIsXlsx = Boolean(
+      citation && citedReference(group, citation)?.reference.sourceLocation?.kind === "xlsx",
+    );
+    if (
+      percentValue !== null && percentValue !== undefined &&
+      citationIsXlsx && !citedPercentCell && !citedPercentText
+    ) {
+      rowErrors.push(`${path}.percent has no explicit, source-backed percentage unit`);
+    } else if (percentValue !== null && percentValue !== undefined && excerpt &&
       !citedTextSupportsNumericValue(`${percentValue}%`, rawValue ?? "") &&
-      !citedPercentCell) {
+      !citedPercentCell && !citedPercentText) {
       rowErrors.push(`${path}.percent does not match a percentage in the cited excerpt`);
     }
     if (
@@ -4419,6 +4829,9 @@ function validateGroupExtraction(
     checkPeriodLabel(citation, periodLabel, `${path}.period_label`, rowErrors, rawValue);
     const asOfDate = checkedDate(item.as_of_date ?? null, excerpt, `${path}.as_of_date`, rowErrors, citation);
     checkDate(citation, asOfDate, `${path}.as_of_date`, rowErrors, "record");
+    const sourceRagClaim = sourceRagClaimFromCandidate(
+      group, citation, item.source_rag_claim, allowedSources, path, qualityWarnings, fromCache,
+    );
     if (rowErrors.length) {
       warnObservationInvalidRow("progress", path, rowErrors);
       return;
@@ -4428,12 +4841,18 @@ function validateGroupExtraction(
       percent: percentValue as number,
       scope_level: scopeLevel as ExtractedProgressObservation["scope_level"],
       scope_label: scopeLabel!,
+      measure_kind: measureKind,
+      source_rag_claim: sourceRagClaim,
       ...(scopeEvidence ? { scope_provenance: scopeEvidence } : {}),
       ...(scopeEvidence && scopeSourceId ? { scope_source_id: scopeSourceId } : {}),
       period_label: periodLabel!,
+      period_basis: progressPeriodBasisForCell(group, citation, citedPercentCell),
       as_of_date: asOfDate ?? null,
       evidence_chunk_index: citation!.evidence_chunk_index,
       source_location: citation!.source_location,
+      ...(citedPercentCell
+        ? { value_source_location: progressCellSourceLocation(citation, citedPercentCell) }
+        : {}),
       excerpt: excerpt!,
     });
   });
@@ -5101,7 +5520,7 @@ function aggregateGroups(
     progress: uniqueBy(
       groups.flatMap((group) => group.value.assurance_observations.progress),
       (item) =>
-        `${item.evidence_chunk_index}\0${JSON.stringify(item.source_location)}\0${item.excerpt}\0${item.raw_value}\0${item.scope_level}\0${item.scope_label ?? ""}\0${item.scope_source_id ?? ""}\0${item.period_label}\0${item.as_of_date}`,
+        `${item.evidence_chunk_index}\0${JSON.stringify(item.source_location)}\0${item.excerpt}\0${item.raw_value}\0${item.scope_level}\0${item.scope_label ?? ""}\0${item.scope_source_id ?? ""}\0${item.measure_kind}\0${item.period_label}\0${item.as_of_date}\0${JSON.stringify(item.source_rag_claim)}`,
     ),
     risk_snapshots: uniqueBy(
       groups.flatMap((group) => group.value.assurance_observations.risk_snapshots),

@@ -2280,8 +2280,6 @@ test("a stale group cache version is not reused and a cache hit re-derives prove
     location,
   );
 
-  // Every completed row records the parser and validation versions that produced
-  // it, so a rule change can never be reused under an older version.
   const cached = [...store.rows.values()][0];
   assert.equal(cached.parserVersion, "document-parser/18");
 

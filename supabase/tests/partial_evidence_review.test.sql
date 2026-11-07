@@ -6,7 +6,7 @@
 --   psql -v ON_ERROR_STOP=1 -f supabase/tests/partial_evidence_review.test.sql
 
 begin;
-select extensions.plan(45);
+select extensions.plan(68);
 
 insert into auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, created_at, updated_at)
 values
@@ -427,6 +427,257 @@ select throws_ok(
   'P0001',
   'A needs-review document is selectable only with observation coverage for its current source version.',
   'stale needs_review document loses its selectability'
+);
+
+-- ---------------------------------------------------------------------------
+-- Progress RAG rules are claimed references and rule writes stale both
+-- published results and in-flight attempts.
+-- ---------------------------------------------------------------------------
+create temp table progress_rule_before as
+select (public.assurance_reference_snapshot(
+  '50000000-0000-4000-8000-000000000003',
+  '50000000-0000-4000-8000-000000000021'
+)->>'fingerprint') as fingerprint;
+
+create or replace function pg_temp.publish_progress_rule_analysis(
+  p_attempt_id uuid,
+  p_rule jsonb,
+  p_progress_statuses jsonb
+)
+returns boolean language sql as $$
+  select public.finish_assurance_analysis_with_decision_fingerprint(
+    '50000000-0000-4000-8000-000000000003',
+    '50000000-0000-4000-8000-000000000021',
+    p_attempt_id,
+    jsonb_build_array(
+      jsonb_build_object(
+        'domain', 'budget', 'condition', 'more_evidence_required', 'severity', 'information',
+        'headline', 'Budget fixture', 'explanation', 'Rule fencing fixture',
+        'requiredEvidence', '[]'::jsonb, 'sourceExcerpts', '[]'::jsonb, 'confidence', 0.5
+      ),
+      jsonb_build_object(
+        'domain', 'schedule', 'condition', 'more_evidence_required', 'severity', 'information',
+        'headline', 'Schedule fixture', 'explanation', 'Rule fencing fixture',
+        'requiredEvidence', '[]'::jsonb, 'sourceExcerpts', '[]'::jsonb, 'confidence', 0.5
+      ),
+      jsonb_build_object(
+        'domain', 'risk', 'condition', 'more_evidence_required', 'severity', 'information',
+        'headline', 'Risk fixture', 'explanation', 'Rule fencing fixture',
+        'requiredEvidence', '[]'::jsonb, 'sourceExcerpts', '[]'::jsonb, 'confidence', 0.5
+      )
+    ),
+    '[]'::jsonb,
+    '{}'::jsonb,
+    jsonb_build_object(
+      'progress_rag_rule', p_rule,
+      'progress_computed_statuses', p_progress_statuses
+    )
+  );
+$$;
+
+create temp table progress_rule_claim_unassessed as
+select public.claim_assurance_analysis(
+  '50000000-0000-4000-8000-000000000003',
+  '50000000-0000-4000-8000-000000000021'
+) as claim;
+select ok(
+  (select claim->'progress_rag_rule' = 'null'::jsonb from progress_rule_claim_unassessed),
+  'an unassessed claim snapshots no active progress rule'
+);
+select is(
+  pg_temp.publish_progress_rule_analysis(
+    (select (claim->>'attempt_id')::uuid from progress_rule_claim_unassessed),
+    (select claim->'progress_rag_rule' from progress_rule_claim_unassessed),
+    '[{"reason":"no_approved_rule"}]'::jsonb
+  ),
+  true,
+  'an analysis without an approved rule can publish unassessed progress'
+);
+select is(
+  public.assurance_analysis_is_current(
+    '50000000-0000-4000-8000-000000000003',
+    '50000000-0000-4000-8000-000000000021'
+  ),
+  true,
+  'the no-rule result is current before rule creation'
+);
+
+insert into public.progress_rag_rules
+  (id, project_id, rule_version, thresholds, approved_by)
+values
+  ('51000000-0000-4000-8000-000000000001',
+   '50000000-0000-4000-8000-000000000003',
+   'progress-test-v1', '{"amber_below_pp":5,"red_below_pp":-5}'::jsonb,
+   '50000000-0000-4000-8000-000000000001');
+select ok(
+  not has_table_privilege('authenticated', 'public.progress_rag_rules', 'insert')
+    and not has_table_privilege('authenticated', 'public.progress_rag_rules', 'update'),
+  'rule changes remain privileged until a reviewer-facing write boundary is implemented'
+);
+select ok(
+  (select (public.assurance_reference_snapshot(
+    '50000000-0000-4000-8000-000000000003',
+    '50000000-0000-4000-8000-000000000021'
+  )->>'fingerprint') is distinct from fingerprint from progress_rule_before),
+  'creating an approved rule changes the reference fingerprint'
+);
+select is(
+  (select status::text from public.assurance_reviews where id = '50000000-0000-4000-8000-000000000021'),
+  'evidence_ready',
+  'rule creation invalidates an already-published no-rule result'
+);
+select is(
+  public.assurance_analysis_is_current(
+    '50000000-0000-4000-8000-000000000003',
+    '50000000-0000-4000-8000-000000000021'
+  ),
+  false,
+  'the old progress result is not current after rule creation'
+);
+select is(
+  (select analysis_metadata->'progress_computed_statuses'->0->>'reason'
+    from public.assurance_reviews where id = '50000000-0000-4000-8000-000000000021'),
+  'no_approved_rule',
+  'old status metadata remains stored but is stale and must be hidden by the review-status gate'
+);
+select is(
+  (public.assurance_reference_snapshot(
+    '50000000-0000-4000-8000-000000000003',
+    '50000000-0000-4000-8000-000000000021'
+  )->'progress_rag_rule'->>'rule_version'),
+  'progress-test-v1',
+  'reference snapshot includes the active approved rule version'
+);
+select is(
+  (public.assurance_reference_snapshot(
+    '50000000-0000-4000-8000-000000000003',
+    '50000000-0000-4000-8000-000000000021'
+  )->'progress_rag_rule'->'thresholds'->>'red_below_pp'),
+  '-5',
+  'reference snapshot includes the approved thresholds'
+);
+
+create temp table progress_rule_claim_v1 as
+select public.claim_assurance_analysis(
+  '50000000-0000-4000-8000-000000000003',
+  '50000000-0000-4000-8000-000000000021'
+) as claim;
+select is(
+  (select claim->'progress_rag_rule'->>'rule_version' from progress_rule_claim_v1),
+  'progress-test-v1',
+  'the atomic analysis claim returns the exact rule used for computation'
+);
+select is(
+  (select claim->>'reference_fingerprint' from progress_rule_claim_v1),
+  (select (public.assurance_reference_snapshot(
+    '50000000-0000-4000-8000-000000000003',
+    '50000000-0000-4000-8000-000000000021'
+  )->>'fingerprint')),
+  'the claim fingerprints the same rule snapshot it returns'
+);
+select is(
+  pg_temp.publish_progress_rule_analysis(
+    (select (claim->>'attempt_id')::uuid from progress_rule_claim_v1),
+    (select claim->'progress_rag_rule' from progress_rule_claim_v1),
+    '[{"condition":"on_track","ruleVersion":"progress-test-v1"}]'::jsonb
+  ),
+  true,
+  'analysis publishes computed status from the claimed rule'
+);
+select is(
+  public.assurance_analysis_is_current(
+    '50000000-0000-4000-8000-000000000003',
+    '50000000-0000-4000-8000-000000000021'
+  ),
+  true,
+  'the versioned-rule result is current before supersession'
+);
+select is(
+  (select analysis_metadata->'progress_rag_rule'->>'rule_version'
+    from public.assurance_reviews where id = '50000000-0000-4000-8000-000000000021'),
+  'progress-test-v1',
+  'published progress metadata retains the claimed rule version'
+);
+
+update public.progress_rag_rules
+set state = 'superseded', superseded_at = clock_timestamp()
+where id = '51000000-0000-4000-8000-000000000001';
+select is(
+  (select status::text from public.assurance_reviews where id = '50000000-0000-4000-8000-000000000021'),
+  'evidence_ready',
+  'superseding a rule invalidates its published computed status'
+);
+select is(
+  public.assurance_analysis_is_current(
+    '50000000-0000-4000-8000-000000000003',
+    '50000000-0000-4000-8000-000000000021'
+  ),
+  false,
+  'the superseded-rule result is no longer current'
+);
+
+insert into public.progress_rag_rules
+  (id, project_id, rule_version, thresholds, approved_by)
+values
+  ('51000000-0000-4000-8000-000000000002',
+   '50000000-0000-4000-8000-000000000003',
+   'progress-test-v2', '{"amber_below_pp":6,"red_below_pp":-6}'::jsonb,
+   '50000000-0000-4000-8000-000000000001');
+create temp table progress_rule_claim_v2 as
+select public.claim_assurance_analysis(
+  '50000000-0000-4000-8000-000000000003',
+  '50000000-0000-4000-8000-000000000021'
+) as claim;
+select is(
+  (select claim->'progress_rag_rule'->>'rule_version' from progress_rule_claim_v2),
+  'progress-test-v2',
+  'a later claim snapshots the replacement rule version'
+);
+
+update public.progress_rag_rules
+set state = 'superseded', superseded_at = clock_timestamp()
+where id = '51000000-0000-4000-8000-000000000002';
+select is(
+  (select status::text from public.assurance_reviews where id = '50000000-0000-4000-8000-000000000021'),
+  'evidence_ready',
+  'a rule change during analysis invalidates the in-flight attempt'
+);
+select is(
+  (select analysis_metadata->'latest_attempt'->>'outcome'
+    from public.assurance_reviews where id = '50000000-0000-4000-8000-000000000021'),
+  'invalidated',
+  'the in-flight attempt cannot publish after rule supersession'
+);
+select is(
+  pg_temp.publish_progress_rule_analysis(
+    (select (claim->>'attempt_id')::uuid from progress_rule_claim_v2),
+    (select claim->'progress_rag_rule' from progress_rule_claim_v2),
+    '[{"condition":"on_track","ruleVersion":"progress-test-v2"}]'::jsonb
+  ),
+  false,
+  'finish rejects the in-flight result after its rule reference changes'
+);
+select throws_ok(
+  'delete from public.progress_rag_rules where id = ''51000000-0000-4000-8000-000000000002''',
+  'P0001',
+  'Approved progress RAG rule versions cannot be deleted.',
+  'approved rule versions cannot be deleted directly'
+);
+
+insert into public.projects (id, organization_id, name)
+values ('50000000-0000-4000-8000-000000000007', '50000000-0000-4000-8000-000000000002', 'Rule cascade project');
+insert into public.progress_rag_rules
+  (id, project_id, rule_version, thresholds, approved_by)
+values
+  ('51000000-0000-4000-8000-000000000003',
+   '50000000-0000-4000-8000-000000000007',
+   'cascade-v1', '{"amber_below_pp":5,"red_below_pp":-5}'::jsonb,
+   '50000000-0000-4000-8000-000000000001');
+delete from public.projects where id = '50000000-0000-4000-8000-000000000007';
+select is(
+  (select count(*) from public.progress_rag_rules where project_id = '50000000-0000-4000-8000-000000000007'),
+  0::bigint,
+  'project deletion cascades its immutable rule history'
 );
 
 select set_config('request.jwt.claims', '', true);
