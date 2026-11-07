@@ -6,6 +6,9 @@ import {
   formatReportPeriod,
   type ReportSnapshot,
   type ReportSnapshotRef,
+  type ReportSnapshotAction,
+  type ReportSnapshotGap,
+  type ReportSnapshotSource,
   type ReportSnapshotValue,
 } from "./snapshot";
 
@@ -18,8 +21,12 @@ import {
  * analysis attempt. When the assessment stream starts publishing cut-off
  * snapshots independently of a manually selected review, only this module
  * changes: `listPublishedSnapshots` must read the published snapshot rows and
- * `resolveReportSnapshot` must read its values and gaps instead of calling
- * `assurance_report_operation` with p_operation 'context'.
+ * `resolveReportSnapshot` must read their values, gaps, actions and sources.
+ *
+ * The snapshot *content* is never derived here. `assurance_report_operation`
+ * with p_operation 'context' returns the same server-derived snapshot that
+ * 'create' persists, so the rendered text and the stored manifest cannot
+ * disagree and no caller can supply the sources.
  */
 
 type ReviewRow = {
@@ -29,20 +36,17 @@ type ReviewRow = {
   analysis_metadata: { last_success?: { id?: string; completed_at?: string } } | null;
 };
 
-type FindingRow = {
-  domain: string;
-  condition: string;
-  headline: string;
-  explanation: string | null;
-  confirmation_state: string;
-  required_evidence: string[] | null;
-};
-
-type ActionRow = {
-  title: string;
-  owner_name: string | null;
-  due_date: string | null;
-  status: string;
+type SnapshotPayload = {
+  snapshotId: string;
+  snapshotVersion: string;
+  snapshotCutoff: string;
+  cutoffLabel: string;
+  reviewId: string;
+  evidenceCount: number;
+  values: ReportSnapshotValue[];
+  gaps: ReportSnapshotGap[];
+  actions: ReportSnapshotAction[];
+  sources: ReportSnapshotSource[];
 };
 
 const reviewColumns = "id, reporting_period, cutoff_precision, analysis_metadata";
@@ -90,61 +94,27 @@ export async function resolveReportSnapshot(
   if (error) throw new Error(error.message);
   const context = data as unknown as {
     attempt_id: string;
-    evidence_count: number;
-    findings: FindingRow[] | null;
-    actions: ActionRow[] | null;
+    snapshot: SnapshotPayload | null;
   } | null;
-  if (!context || context.attempt_id !== ref.snapshotId) {
+  const payload = context?.snapshot ?? null;
+  if (!context || context.attempt_id !== ref.snapshotId || payload?.snapshotVersion !== ref.snapshotId) {
     throw new Error(
       "The assessment snapshot changed while the report was prepared. Generate the report again.",
     );
   }
 
-  const findings = context.findings ?? [];
-  const values: ReportSnapshotValue[] = findings
-    .filter((finding) => finding.condition !== "more_evidence_required")
-    .map((finding) => ({
-      domain: finding.domain,
-      condition: finding.condition,
-      headline: finding.headline,
-      explanation: finding.explanation ?? "",
-      confirmationState: finding.confirmation_state,
-    }));
-  const gaps = findings
-    .filter((finding) => finding.condition === "more_evidence_required")
-    .map((finding) => ({
-      domain: finding.domain,
-      reason:
-        finding.headline ||
-        finding.explanation ||
-        (finding.required_evidence?.length
-          ? `Evidence still required: ${finding.required_evidence.join(", ")}`
-          : "The published evidence is not sufficient for this domain."),
-    }));
-
   return {
-    ...ref,
-    evidenceCount: context.evidence_count ?? 0,
-    values,
-    gaps,
-    actions: (context.actions ?? []).map((action) => ({
-      title: action.title,
-      ownerName: action.owner_name,
-      dueDate: action.due_date,
-      status: action.status,
-    })),
-    sources: [
-      {
-        label: "Assessment snapshot",
-        source: `assurance_reviews:${ref.reviewId}#${ref.snapshotId}`,
-      },
-      { label: "Evidence bound to the snapshot", source: "assurance_review_documents" },
-      {
-        label: "Budget, Schedule, and Risk findings",
-        source: `assurance_findings?review_id=${ref.reviewId}`,
-      },
-      { label: "Source-recorded management actions", source: "assurance_actions" },
-    ],
+    snapshotId: payload.snapshotId,
+    reviewId: payload.reviewId,
+    cutoff: payload.snapshotCutoff,
+    version: payload.snapshotVersion,
+    reportingPeriod: payload.cutoffLabel || formatReportPeriod(payload.snapshotCutoff),
+    publishedAt: ref.publishedAt,
+    evidenceCount: payload.evidenceCount,
+    values: payload.values ?? [],
+    gaps: payload.gaps ?? [],
+    actions: payload.actions ?? [],
+    sources: payload.sources ?? [],
   };
 }
 

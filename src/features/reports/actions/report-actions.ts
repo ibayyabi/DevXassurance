@@ -40,17 +40,17 @@ export async function generateReportPreview(formData: FormData) {
     p_review_id: snapshot.reviewId,
     p_operation: "create",
     p_attempt_id: snapshot.version,
+    // Presentation and the rendered text only. The database derives and stores
+    // the snapshot identity, cut-off, manifest and provenance itself, and
+    // rejects counts that do not match the published snapshot.
     p_payload: {
-      reporting_period: build.reportingPeriod,
       audience,
       detail_level: detailLevel,
       sections: build.sections,
       counts: build.counts,
-      provenance: snapshot.sources,
       snapshot_id: snapshot.snapshotId,
       snapshot_cutoff: snapshot.cutoff,
       snapshot_version: snapshot.version,
-      snapshot_manifest: build.manifest,
     },
   });
   if (previewError) throw new Error(previewError.message);

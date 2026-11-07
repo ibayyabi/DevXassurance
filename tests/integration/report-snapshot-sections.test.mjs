@@ -70,16 +70,35 @@ test("a draft names the snapshot and cut-off it was built from", () => {
   assert.match(build.sections.project_health, /Reporting period: October 2026 \(cut-off 2026-10-16\)/);
   assert.match(build.sections.project_health, /Snapshot: attempt-1 \(version attempt-1\)/);
   assert.match(build.sections.project_health, /Evidence in this snapshot: 2 document\(s\)/);
-  assert.deepEqual(build.manifest.values, snapshot().values);
-  assert.deepEqual(build.manifest.gaps, snapshot().gaps);
-  assert.equal(build.manifest.snapshotVersion, "attempt-1");
+  assert.deepEqual(build.counts, {
+    snapshot_documents: 2,
+    assessed_domains: 1,
+    evidence_gaps: 1,
+    critical_conditions: 0,
+    actions: 0,
+    confirmed_findings: 0,
+  });
 });
 
-test("a stored draft re-derives from its persisted manifest after later evidence", () => {
-  const original = buildReportSections(snapshot(), options);
-  // The snapshot the assessment publishes next is a different version; the
-  // stored manifest must still produce the original draft text.
-  const stored = JSON.parse(JSON.stringify(original.manifest));
+test("a stored draft re-derives from the manifest the database persisted", () => {
+  const full = snapshot();
+  const original = buildReportSections(full, options);
+  // Shape of report_previews.snapshot_manifest: identity plus the raw rows,
+  // written by assurance_report_operation, never supplied by a caller.
+  const stored = {
+    snapshotId: full.snapshotId,
+    snapshotCutoff: full.cutoff,
+    snapshotVersion: full.version,
+    cutoffLabel: full.reportingPeriod,
+    reviewId: full.reviewId,
+    audience: options.audience,
+    detailLevel: options.detailLevel,
+    evidenceCount: full.evidenceCount,
+    values: full.values,
+    gaps: full.gaps,
+    actions: full.actions,
+    sources: full.sources,
+  };
   const rehydrated = snapshotFromManifest(stored);
   assert.ok(rehydrated);
   const reread = buildReportSections(rehydrated, {
@@ -87,7 +106,29 @@ test("a stored draft re-derives from its persisted manifest after later evidence
     detailLevel: stored.detailLevel,
   });
   assert.deepEqual(reread.sections, original.sections);
-  assert.equal(reread.manifest.snapshotVersion, "attempt-1");
+  assert.equal(reread.snapshotId, "attempt-1");
+});
+
+test("a detailed draft cites the concrete evidence version, not a table name", () => {
+  const build = buildReportSections(
+    snapshot({
+      sources: [
+        { label: "Assessment snapshot", source: "assurance_reviews:review-1#attempt-1" },
+        {
+          label: "Evidence document",
+          source: "documents:doc-1",
+          documentId: "doc-1",
+          documentName: "baseline.pdf",
+          evidenceRole: "baseline",
+          contentHash: "c".repeat(64),
+          parserVersion: "parser/1",
+        },
+      ],
+    }),
+    { audience: "PMO", detailLevel: "Detailed" },
+  );
+  assert.match(build.sections.key_findings, /baseline\.pdf \[baseline\] documents:doc-1/);
+  assert.match(build.sections.key_findings, /cccccccccccc \(parser\/1\)/);
 });
 
 test("detail level changes verbosity without changing the pinned snapshot", () => {
@@ -97,6 +138,6 @@ test("detail level changes verbosity without changing the pinned snapshot", () =
   assert.doesNotMatch(executive.sections.key_findings, /Variance is within the approved range/);
   assert.match(detailed.sections.key_findings, /Variance is within the approved range/);
   assert.match(detailed.sections.key_findings, /assurance_reviews:review-1#attempt-1/);
-  assert.equal(executive.manifest.snapshotId, detailed.manifest.snapshotId);
-  assert.equal(executive.manifest.snapshotVersion, detailed.manifest.snapshotVersion);
+  assert.match(executive.sections.project_health, /Snapshot: attempt-1/);
+  assert.match(detailed.sections.project_health, /Snapshot: attempt-1/);
 });

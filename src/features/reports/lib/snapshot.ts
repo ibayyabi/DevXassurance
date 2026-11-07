@@ -41,6 +41,22 @@ export type ReportSnapshotValue = {
 /** A domain the snapshot could not assess. It is a limitation, not a zero. */
 export type ReportSnapshotGap = { domain: string; reason: string };
 
+/**
+ * Concrete origin of the snapshot. Document entries carry the evidence
+ * document identity and the source version it was read at, so a draft cites
+ * real rows instead of a table name.
+ */
+export type ReportSnapshotSource = {
+  label: string;
+  source: string;
+  documentId?: string;
+  documentName?: string;
+  evidenceRole?: string;
+  contentHash?: string | null;
+  parserVersion?: string | null;
+  contractVersion?: string | null;
+};
+
 export type ReportSnapshotAction = {
   title: string;
   ownerName: string | null;
@@ -53,7 +69,7 @@ export type ReportSnapshot = {
   values: ReportSnapshotValue[];
   gaps: ReportSnapshotGap[];
   actions: ReportSnapshotAction[];
-  sources: { label: string; source: string }[];
+  sources: ReportSnapshotSource[];
 } & ReportSnapshotRef;
 
 /** Frozen structured source of a draft, stored so history never depends on live tables. */
@@ -61,6 +77,7 @@ export type ReportManifest = {
   snapshotId: string;
   snapshotCutoff: string;
   snapshotVersion: string;
+  cutoffLabel: string;
   reviewId: string;
   audience: string;
   detailLevel: string;
@@ -68,14 +85,12 @@ export type ReportManifest = {
   values: ReportSnapshotValue[];
   gaps: ReportSnapshotGap[];
   actions: ReportSnapshotAction[];
-  sources: { label: string; source: string }[];
+  sources: ReportSnapshotSource[];
 };
 
 export type ReportBuild = {
-  reportingPeriod: string;
   sections: ReportSections;
   counts: Record<string, number>;
-  manifest: ReportManifest;
 };
 
 export function conditionLabel(value: string) {
@@ -141,7 +156,7 @@ export function buildReportSections(
     findingBlocks.push(
       "",
       "Sources of this snapshot:",
-      ...snapshot.sources.map((source) => `- ${source.label}: ${source.source}`),
+      ...snapshot.sources.map(describeSource),
     );
   }
 
@@ -169,7 +184,6 @@ export function buildReportSections(
       : "No action is recorded in this snapshot.";
 
   return {
-    reportingPeriod: snapshot.reportingPeriod,
     sections: {
       project_health: health.join("\n"),
       key_findings: findingBlocks.join("\n\n"),
@@ -185,19 +199,6 @@ export function buildReportSections(
       confirmed_findings: values.filter(
         (value) => value.confirmationState === "user_confirmed",
       ).length,
-    },
-    manifest: {
-      snapshotId: snapshot.snapshotId,
-      snapshotCutoff: snapshot.cutoff,
-      snapshotVersion: snapshot.version,
-      reviewId: snapshot.reviewId,
-      audience: options.audience,
-      detailLevel: options.detailLevel,
-      evidenceCount: snapshot.evidenceCount,
-      values,
-      gaps,
-      actions,
-      sources: snapshot.sources,
     },
   };
 }
@@ -217,7 +218,7 @@ export function snapshotFromManifest(
     reviewId: manifest.reviewId ?? "",
     cutoff: manifest.snapshotCutoff,
     version: manifest.snapshotVersion,
-    reportingPeriod: formatReportPeriod(manifest.snapshotCutoff),
+    reportingPeriod: manifest.cutoffLabel || formatReportPeriod(manifest.snapshotCutoff),
     publishedAt: null,
     evidenceCount: manifest.evidenceCount ?? 0,
     values: manifest.values ?? [],
@@ -231,4 +232,16 @@ function titleCase(value: string) {
   return value
     .replaceAll("_", " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+/**
+ * A document source is cited by its evidence identity and the content hash it
+ * was read at, so a distributed draft cannot be traced only to a table name.
+ */
+function describeSource(source: ReportSnapshotSource) {
+  if (!source.documentId) return `- ${source.label}: ${source.source}`;
+  const sourceVersion = source.contentHash
+    ? `${source.contentHash.slice(0, 12)} (${source.parserVersion ?? "parser not recorded"})`
+    : "version not recorded";
+  return `- ${source.label}: ${source.documentName ?? source.source} [${source.evidenceRole ?? "role not recorded"}] ${source.source} — ${sourceVersion}`;
 }

@@ -422,8 +422,20 @@ function ReportProvenance({ preview }: { preview: ReportPreview | null }) {
         {preview?.provenance.length ? (
           preview.provenance.map((item) => (
             <div key={`${item.label}-${item.source}`} className="rounded-xl bg-base px-3 py-3">
-              <p className="text-sm font-medium text-ink">{item.label}</p>
+              <p className="text-sm font-medium text-ink">
+                {item.label}
+                {item.evidenceRole ? (
+                  <span className="ml-1 text-xs font-normal text-ink-muted">[{item.evidenceRole}]</span>
+                ) : null}
+              </p>
               <p className="mt-1 break-all font-mono text-xs text-ink-muted">{item.source}</p>
+              {item.documentId ? (
+                <p className="mt-1 break-all font-mono text-xs text-ink-muted">
+                  {item.contentHash
+                    ? `source version ${item.contentHash.slice(0, 12)} (${item.parserVersion ?? "parser not recorded"})`
+                    : "source version not recorded"}
+                </p>
+              ) : null}
             </div>
           ))
         ) : (

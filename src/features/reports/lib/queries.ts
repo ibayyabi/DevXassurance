@@ -1,7 +1,7 @@
 import { requireProjectMembership } from "@/features/projects/lib/queries";
 import { canManageProject } from "@/features/projects/lib/roles";
 import type { ReportType } from "@/features/reports/lib/constants";
-import type { ReportManifest } from "@/features/reports/lib/snapshot";
+import type { ReportManifest, ReportSnapshotSource } from "@/features/reports/lib/snapshot";
 import {
   listPublishedSnapshots,
   type ReportSnapshotRef,
@@ -17,7 +17,7 @@ export type ReportPreview = {
   originalSections: Record<string, string>;
   editedSections: Record<string, string> | null;
   includedEvidenceCounts: Record<string, number>;
-  provenance: { label: string; source: string }[];
+  provenance: ReportSnapshotSource[];
   reviewState: string;
   createdAt: string;
   snapshotId: string | null;
@@ -48,7 +48,7 @@ type ReportPreviewRow = {
   original_sections: Record<string, string>;
   edited_sections: Record<string, string> | null;
   included_evidence_counts: Record<string, number>;
-  provenance: { label: string; source: string }[];
+  provenance: ReportSnapshotSource[];
   review_state: string;
   created_at: string;
   snapshot_id: string | null;
