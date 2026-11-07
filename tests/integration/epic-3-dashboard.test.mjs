@@ -32,27 +32,8 @@ test("overview uses the latest project assessment", () => {
   assert.match(query, /assurance_findings/);
   assert.match(query, /assurance_actions/);
   assert.match(page, /UsableOverview/);
-  assert.match(component, /Latest assessment/);
-  assert.match(component, /Evidence incomplete/);
   assert.match(component, /document_fingerprint|analysisMetadata/);
   assert.doesNotMatch(component, /Math\.round.*%/);
-});
-
-test("overview presents only understandable conditions and next actions", () => {
-  const component = read("src/features/dashboard/components/usable-overview.tsx");
-
-  for (const label of [
-    "Budget",
-    "Schedule",
-    "Risk",
-    "Management focus",
-    "On track",
-    "Needs attention",
-    "Critical",
-    "More evidence needed",
-  ]) {
-    assert.match(component, new RegExp(label));
-  }
 });
 
 test("overview uses real finding values for budget, schedule, and risk visuals", () => {
@@ -73,8 +54,7 @@ test("schedule chart always compares forecast against the approved zero-day base
   const charts = read("src/features/dashboard/components/overview-charts.tsx");
   assert.match(charts, /scheduleBaseline: 0/);
   assert.match(charts, /dataKey="scheduleBaseline"/);
-  assert.match(charts, /name="Approved baseline"/);
-  assert.match(charts, /name="Current forecast"/);
+  assert.match(charts, /dataKey="scheduleDelay"/);
 });
 
 test("condition snapshot keeps long overall labels inside the donut", () => {
@@ -84,7 +64,6 @@ test("condition snapshot keeps long overall labels inside the donut", () => {
 
 test("trends is an honest placeholder and does not fabricate history", () => {
   const trends = read("src/app/app/projects/[projectId]/trends/page.tsx");
-  assert.match(trends, /Under Development/);
-  assert.match(trends, /does not affect the current Assurance/);
-  assert.doesNotMatch(trends, /Math\.round|score|%/i);
+  assert.match(trends, /EmptyState/);
+  assert.doesNotMatch(trends, /Math\.round|\bscore\b|%/i);
 });

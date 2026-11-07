@@ -224,8 +224,14 @@ test('a sibling document with unprocessed schedule coverage does not blank out a
   ];
   const f=fixture({claim:{attempt_id:'attempt-1',sources,progress_decisions:[]}});
   await f.assurance.runAssuranceAnalysis(form());
-  const publication=f.calls.find(call=>call.name==='finish_assurance_analysis_with_results');
-  assert.equal(publication?.input.p_metadata.observation_coverage.byRole.current.schedule.state,'processed');
+  const publication=f.calls.find(call=>call.name==='finish_assurance_analysis_with_decision_fingerprint');
+  const coverage=publication?.input.p_metadata.observation_coverage.byRole.current.schedule;
+  assert.equal(coverage?.state,'processed');
+  assert.equal(coverage?.partial,true);
+  assert.match(coverage?.reason??'',/W4 Alarm Kebencanaan schedule groups remain unprocessed/);
+  assert.equal(publication?.input.p_metadata.observation_coverage.byRole.current.progress.state,'processed');
+  assert.deepEqual(publication?.input.p_metadata.source_versions.map(source=>source.document_id),
+    ['base','current-master-gantt','current-w4-alarm']);
   const schedule=publication?.input.p_findings.find(finding=>finding.domain==='schedule');
   assert.equal(schedule.condition,'critical');
   assert.ok(!schedule.headline.includes('coverage gap'),schedule.headline);

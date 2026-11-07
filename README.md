@@ -15,9 +15,9 @@ supported evidence files and calls the configured LLM when available.
   without discarding safe siblings.
 - PDF, TXT, CSV, DOCX, XLSX, and PPTX files plus PNG, JPEG/JPG, WEBP, TIF/TIFF,
   and BMP images are parsed. Legacy `.ppt` files can be retained for review but
-  are not automatically parsed. Image OCR and scanned-PDF OCR use local Tesseract
-  (and Ghostscript for PDF pages); missing tools or configured language data cause
-  an explicit failure, never an empty successful extraction.
+  are not automatically parsed. Image and scanned-PDF OCR use local PP-OCRv6
+  tiny (RapidOCR with ONNX Runtime CPU); scanned PDFs also require Ghostscript.
+  Missing local models or unreadable scans fail explicitly, not as empty successes.
 - Upload creates a `public.ai_jobs` row. n8n remains the queue/orchestrator and
   calls the Next.js worker at `/api/workers/parse-document`; the worker handles
   bounded per-document model calls and returns source-mapped chunks, facts,
@@ -38,8 +38,10 @@ supported evidence files and calls the configured LLM when available.
   assessed value with an attributed reason; the original extraction and its
   citations are unchanged.
 - New Assurance reviews use a reporting cut-off date; existing monthly reviews
-  retain their month-end assessment date. Apply migration
-  `202611030001_assurance_cutoff_period.sql` before deploying the application.
+  retain their month-end assessment date. The VPS Supabase target has all
+  repository migrations applied; deployers only provide environment values and
+  must not run migrations. For another target, the project owner must apply
+  pending migrations before release.
   Reviewers select evidence explicitly: choosing a cut-off does not filter
   documents automatically. Missing or unprocessed evidence remains a gap.
 - The Advisor searches fresh project evidence with active-review, role, and
@@ -59,17 +61,18 @@ supported evidence files and calls the configured LLM when available.
 
 - Install the official [RTK CLI](https://www.rtk-ai.app/docs/getting-started/installation/) and verify it with `rtk --version` and `rtk gain`. OMP loads the checked-in project extension at `.omp/extensions/rtk.ts`; it rewrites supported Bash tool commands when RTK is on `PATH` (minimum version: `0.23.0`).
 - Repository skills are consolidated under `.agents/skills/`: six selected Matt Pocock workflows (`grill-with-docs`, `handoff`, `implement`, `implement-spec`, `to-spec`, `to-tickets`) plus the project `ponytail` and `ui-skills` guidance.
+- Graphify is installed with `uv tool install "graphifyy[sql]"`; the SQL extra indexes Supabase migrations. Its shared skill is in `.agents/skills/graphify/`, Codex configuration is in `.codex/`, and project rules are in `AGENTS.md`. Build or refresh the local code graph with `graphify extract . --code-only` / `graphify update .`, then use `graphify query "<question>"`, `graphify explain "<symbol>"`, or `graphify path "<A>" "<B>"`. The shared graph and report are in `graphify-out/`.
 - See [Agent workflows](docs/agents/README.md) to continue PMO tickets or start a new objective. Start a new OMP session or run `/reload-plugins` after checkout or skill changes.
 
 ## Required Tools
 
 - Node.js 22.18 or newer (the test suite imports TypeScript modules directly;
   on an older Node 22, run the suite with `--experimental-strip-types`)
+- Python 3.11, pip, and venv for the local PP-OCRv6 CPU helper
 - Supabase development project (verify the linked project before any writes)
-- Docker Desktop and the included n8n workflow for queue/polling integration
-- A configured Ollama Cloud provider, or local Ollama for fully local model runs
-- Tesseract and (for scanned PDFs) Ghostscript for OCR; OCR language data is
-  installed separately and configured with `XASS_OCR_LANG`
+- Docker Desktop/Engine with Compose v2 and the included n8n workflow
+- A configured LLM provider, or local Ollama with a model for local runs
+- Ghostscript for scanned PDFs; see `worker/README.md` for OCR package/model setup
 
 ## 1. Install App Dependencies
 
@@ -97,7 +100,6 @@ XASS_LLM_PROVIDER=ollama_cloud
 OLLAMA_CLOUD_BASE_URL=https://ollama.com/api
 OLLAMA_API_KEY=your-ollama-api-key
 OLLAMA_CLOUD_MODEL=gpt-oss:20b
-XASS_OCR_LANG=eng
 ```
 
 `SUPABASE_SERVICE_ROLE_KEY` must stay server-only. Never put it in a
@@ -199,9 +201,9 @@ OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=qwen2.5:3b
 ```
 
-OCR uses `XASS_OCR_LANG=eng` by default. For Bahasa Indonesia and English,
-install both Tesseract traineddata files and set `XASS_OCR_LANG=ind+eng`.
-Missing language data is an explicit OCR failure, not an empty successful parse.
+Image OCR uses local PP-OCRv6 tiny on ONNX Runtime CPU; install its Python
+runtime and pinned model assets as described in `worker/README.md`. Scanned
+PDFs also require Ghostscript; no OCR language environment variable is needed.
 
 ## 5. Start the Next.js App
 
@@ -277,8 +279,8 @@ a public HTTPS tunnel and a matching `WEBHOOK_URL`; never use its
    and workstream hints. Hints remain distinct from AI suggestions and reviewer
    confirmations.
 5. Review the file state and extraction summary. PDF/TXT/CSV/DOCX/XLSX/PPTX and
-   supported images are parsed; image and scanned-PDF OCR requires Tesseract
-   language data and Ghostscript for PDF. Missing tools/languages, invalid
+   supported images are parsed; image OCR needs the PP-OCRv6 runtime and models.
+   Scanned PDFs also require Ghostscript. Missing runtime/models, invalid
    evidence, and work-limit breaches must remain Needs Review or Failed, never
    Ready.
 6. Correct the suggested artifact type and assign an evidence role:

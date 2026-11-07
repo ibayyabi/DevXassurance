@@ -1,317 +1,239 @@
-# Project Assurance Deployment Handoff
+# Project Assurance VPS Deployment Handoff
 
-## Purpose
+## Purpose and scope
 
-Project Assurance is a demo application that turns project evidence into
-structured assurance information. Users create projects, upload evidence, and
-review document summaries, extracted facts, health scores, anomalies,
-assistant answers, and reports.
+Provider-neutral preparation guide for a Linux VPS. It does not assume a specific VPS provider, IP address, domain, or existing server state. The baseline runs Next.js under PM2, n8n and its PostgreSQL database with Docker Compose, and uses the existing hosted Supabase project.
 
-This document describes the current VPS deployment. Do not put real secret
-values in this file, Git, screenshots, or chat messages.
+This deployment assumes Supabase migrations have already been applied by the project owner. The deployer needs the environment values below; **do not run Supabase migrations or `supabase db push` as part of this runbook**. If a future application release introduces a migration, stop and have the Supabase owner handle it before deploying that release.
 
-## Current Deployment
+Never commit or send secrets in Git, screenshots, or public chat. Transfer them through a password manager or another approved secret channel.
 
-| Component | Location | Responsibility |
+## What must be prepared
+
+### VPS and network
+
+- Linux VPS with SSH and `sudo` access for the deploy account. Use an architecture with compatible Node.js and ONNX Runtime packages; this repo does not define a minimum CPU, RAM, or disk size.
+- A domain and DNS records for the app and n8n are strongly recommended. Configure HTTPS before exposing either service.
+- Public ingress: SSH (restrict source IPs if possible), HTTP, and HTTPS. Do not expose app port `3000` or n8n port `5678` directly to the Internet.
+- Outbound HTTPS access to Supabase, the selected LLM provider, and package/model hosts during setup.
+- If reusing a VPS, inventory running PM2 apps, Docker containers, and volumes first. Preserve an existing n8n `N8N_ENCRYPTION_KEY` and volumes; never run `docker compose down -v` as routine cleanup.
+
+### Software to install
+
+| Component | Requirement | Why |
 |---|---|---|
-| Next.js | VPS, PM2, port `3000` | UI, authentication integration, server actions, file-processing worker, LLM calls |
-| n8n | VPS, Docker, port `5678` | Polls and orchestrates document-processing jobs |
-| n8n PostgreSQL | VPS, Docker internal network | Stores n8n configuration and executions |
-| Supabase | Hosted cloud project | Auth, PostgreSQL data, RLS, and file storage |
-| Ollama Cloud | Hosted API | Document analysis, assistant responses, and generated narrative |
-| Nginx | VPS, port `80` | Temporary HTTP access/reverse proxy for n8n administration |
+| Node.js and npm | Node.js `22.18+` | Build and run Next.js |
+| Python | Python `3.11` with `venv`/`pip` | Local OCR helper |
+| OCR packages | `worker/ocr/requirements.txt` (`rapidocr==3.10.0`, `onnxruntime==1.31.0`) | PP-OCRv6 CPU inference |
+| OCR model assets | Download once using `ppocr.py --prefetch` | The worker does not download models at request time |
+| Ghostscript | Install the OS package providing `gs` | Rasterizes scanned PDF pages; not needed for image files or text-based PDFs |
+| Docker Engine + Compose v2.24.4+ | Required | Runs n8n and its bundled PostgreSQL service; `!override` safely replaces the public port binding |
+| PM2 | Install with npm | Keeps Next.js running across restarts |
+| Nginx or Caddy | Reverse proxy with TLS | Publishes app and n8n through HTTPS |
+| Git | Required | Checks out the approved release |
 
-The current VPS public IP is `103.37.125.131`. This is a demo configuration
-without a domain or HTTPS. A public production deployment should use a domain,
-TLS, restricted n8n access, and rotated secrets.
+The current OCR is PP-OCRv6 tiny on ONNX Runtime CPU. It does **not** use Tesseract or CUDA. The configured `id` route is fixed configuration, not language detection. The worker README marks this OCR setup as a localhost pilot: before production use, validate Indonesian/English quality against a human-checked corpus and measure CPU throughput and memory on the actual VPS. No universal minimum VPS size is specified by the repository.
 
-## Data Flow
+### Values the project owner supplies
 
-```text
-Browser
-  -> Next.js upload
-  -> Supabase Storage + documents row + queued ai_jobs row
-  -> n8n polls ai_jobs every 60 seconds
-  -> n8n atomically changes one job from queued to processing
-  -> n8n calls the Next.js document worker
-  -> worker downloads and parses the source file
-  -> worker calls Ollama Cloud
-  -> n8n writes chunks, facts, summaries, health, alerts, actions, and anomalies
-  -> UI reads the resulting project-scoped Supabase records
-```
+- Supabase project URL, publishable key, and service-role key. The service-role key is required server-side by both the app and n8n; never expose it in a `NEXT_PUBLIC_*` variable.
+- The final app URL. Before handing off, the owner must ensure the Supabase Auth Site URL and allowed redirect URLs include it; then the deployer needs no Supabase dashboard access. No database migration is needed.
+- One configured LLM provider and its model/API credentials. Supported `XASS_LLM_PROVIDER` values: `ollama_cloud`, `ollama`, `openai-compatible`, `gemini`, or `groq`. Local `ollama` also requires Ollama and its model on the VPS. Hosted providers receive evidence text sent for analysis; choose one approved for that data. Provider failure is visible; there is no analysis fallback.
+- A strong `XASS_WORKER_SECRET`; use the same value in the app and n8n.
+- n8n internal PostgreSQL credentials and a persistent `N8N_ENCRYPTION_KEY`. Generate secrets, for example, with `openssl rand -hex 32`; keep the encryption key unchanged when reusing an n8n data volume.
+- App and n8n hostnames, timezone, and TLS/reverse-proxy configuration.
 
-The AI Assistant and report-generation server actions call the configured
-cloud LLM from Next.js. n8n does not host an AI model.
+## Runtime layout and data flow
 
-Supported extraction formats are PDF, TXT, CSV, DOCX, and XLSX. Other formats
-are stored as reference evidence and flagged as unsupported for extraction.
+- Next.js serves the UI and worker endpoint on port `3000` under PM2. It uses Supabase for Auth, database, and storage, and calls the selected LLM provider.
+- n8n runs in Docker and polls Supabase every 60 seconds for document jobs. It calls the Next.js worker through `http://host.docker.internal:3000/api/workers/parse-document`.
+- The worker parses supported evidence, uses the local OCR helper for images and scanned PDFs, and performs configured model calls. n8n completes the job through the database workflow.
+- The polling workflow needs no inbound Supabase webhook. Keep only one polling workflow active; disable the alternate webhook workflow and Supabase Database Webhook while polling is used.
 
-## Important Files
+The parser supports PDF, DOCX, XLSX, PPTX, CSV, TXT, and PNG/JPG/JPEG/WEBP/TIF/TIFF/BMP images. Scanned-PDF OCR requires both PP-OCRv6 assets and Ghostscript.
 
-| File | Purpose |
-|---|---|
-| `.env.local` | Next.js, Supabase, worker-secret, and LLM configuration |
-| `workflows/n8n/.env` | n8n database, Supabase, and worker configuration |
-| `workflows/n8n/docker-compose.yml` | n8n and its PostgreSQL service |
-| `workflows/n8n/x-assurance-supabase-document-polling.json` | Active VPS workflow |
-| `workflows/n8n/x-assurance-supabase-document-processing.json` | Optional webhook workflow |
-| `supabase/migrations/` | Database schema and RLS migrations |
+## Step-by-step deployment
 
-Never commit `.env.local` or `workflows/n8n/.env`.
+### 1. Confirm the target and record the release
 
-## Runtime Configuration
+Use a deploy account, not root, for app files and PM2. Before changing a reused VPS, check its current services and Docker volumes. Back up existing n8n data and retain its original encryption key if migrating an existing instance.
 
-The root `.env.local` requires:
+Choose a tested Git tag or commit supplied by the project owner. Do not deploy an unspecified moving branch such as `master`.
 
-```env
-NEXT_PUBLIC_SUPABASE_URL=https://PROJECT.supabase.co
-NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=...
-SUPABASE_SERVICE_ROLE_KEY=...
-XASS_WORKER_SECRET=...
+### 2. Install and verify the host prerequisites
 
-XASS_LLM_PROVIDER=ollama_cloud
-OLLAMA_CLOUD_BASE_URL=https://ollama.com/api
-OLLAMA_API_KEY=...
-OLLAMA_CLOUD_MODEL=gpt-oss:20b
-TZ=Asia/Jakarta
-```
+Install the software listed above using the official instructions for the VPS operating system. On Debian/Ubuntu, the Ghostscript package is named `ghostscript`; other distributions use their package manager's equivalent.
 
-The n8n `.env` requires:
-
-```env
-POSTGRES_USER=n8n_user
-POSTGRES_PASSWORD=...
-POSTGRES_DB=n8n
-N8N_HOST=103.37.125.131
-N8N_PORT=5678
-N8N_PROTOCOL=http
-WEBHOOK_URL=http://103.37.125.131/
-N8N_ENCRYPTION_KEY=...
-N8N_SECURE_COOKIE=false
-GENERIC_TIMEZONE=Asia/Jakarta
-TZ=Asia/Jakarta
-N8N_DIAGNOSTICS_ENABLED=false
-N8N_PERSONALIZATION_ENABLED=false
-N8N_DEFAULT_BINARY_DATA_MODE=filesystem
-N8N_RESTRICT_FILE_ACCESS_TO=/files
-N8N_BLOCK_ENV_ACCESS_IN_NODE=false
-
-SUPABASE_URL=https://PROJECT.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=...
-XASS_DOCUMENT_WORKER_URL=http://host.docker.internal:3000/api/workers/parse-document
-XASS_WORKER_SECRET=...
-```
-
-`XASS_WORKER_SECRET` must match in both files. Keep
-`N8N_ENCRYPTION_KEY` stable; changing it prevents n8n from decrypting stored
-credentials.
-
-## Normal Operations
-
-Check the application:
+Verify the installed tools:
 
 ```bash
-pm2 status
-pm2 logs xass --lines 100
+node --version
+npm --version
+python3.11 --version
+docker compose version
+pm2 --version
+gs --version
+```
+
+Confirm Node is `22.18` or newer and Docker Compose is `2.24.4` or newer. `!override` in the VPS-local Compose file requires this Compose version. `gs --version` is required when scanned PDFs will be processed. Docker Compose supplies the n8n PostgreSQL container; do not install a separate database for this stack.
+
+### 3. Configure DNS, HTTPS, and ingress
+
+Point the chosen app and n8n DNS names to the VPS. Configure the reverse proxy to terminate TLS and forward the app hostname to `http://127.0.0.1:3000` and the n8n hostname to `http://127.0.0.1:5678`.
+
+Keep `3000` unavailable to public clients while allowing the n8n Docker container to reach the host worker through `host.docker.internal`. Bind the published n8n port to loopback using the Compose override in step 8. Allow only the proxy's HTTPS endpoint publicly.
+Have the project owner set the Supabase Auth Site URL and redirect allowlist to the final app URL before the login check.
+
+### 4. Check out the approved application release
+
+Example path and command; replace `REPOSITORY_URL` and `RELEASE_TAG_OR_COMMIT` with values supplied by the owner:
+
+```bash
+mkdir -p ~/apps
+cd ~/apps
+git clone REPOSITORY_URL x-assurance
+cd x-assurance
+git checkout RELEASE_TAG_OR_COMMIT
+```
+
+### 5. Configure the app environment
+
+Create the app environment file and restrict its permissions:
+
+```bash
+cp .env.example .env.local
+chmod 600 .env.local
+```
+
+Set these values in `.env.local` before building:
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your-publishable-or-legacy-anon-key
+NEXT_PUBLIC_SITE_URL=https://app.example.com
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+XASS_WORKER_SECRET=the-shared-worker-secret
+XASS_LLM_PROVIDER=the-selected-provider
+```
+
+Add only the selected provider's matching credentials/model from `.env.example`. `XASS_OCR_PYTHON` is optional; the default is `.venv-ocr/bin/python`. `XASS_OCR_MODEL_DIR` is optional. The current OCR route is fixed in code; `XASS_OCR_LANG` is not needed.
+
+### 6. Install the OCR runtime and assets
+
+From the repository root:
+
+```bash
+python3.11 -m venv .venv-ocr
+.venv-ocr/bin/pip install -r worker/ocr/requirements.txt
+.venv-ocr/bin/python worker/ocr/ppocr.py --prefetch
+.venv-ocr/bin/python worker/ocr/ppocr.py --check
+```
+
+`--prefetch` downloads the three pinned ONNX model files and verifies their SHA-256 hashes. It requires outbound HTTPS access to the model host. Repeat these setup commands if the OCR virtual environment is recreated. The request path never downloads models. For scanned PDFs, also install Ghostscript and verify `gs --version` succeeds.
+
+### 7. Build and start Next.js
+
+From the repository root, with `.env.local` already configured:
+
+```bash
+npm ci
+npm run build
+pm2 start npm --name xass -- start
+pm2 startup
+pm2 save
+```
+
+Run the command printed by `pm2 startup` with `sudo` so the deploy account's process list is restored after reboot. Check the local app response before configuring the public proxy:
+
+```bash
 curl -I http://127.0.0.1:3000
+pm2 status
 ```
 
-Check n8n:
+### 8. Configure and start n8n
+
+From `workflows/n8n`:
 
 ```bash
-cd ~/apps/XAss/workflows/n8n
-docker compose ps
-docker compose logs --tail=100 n8n
-curl -I http://127.0.0.1:5678
+cp .env.example .env
+chmod 600 .env
 ```
 
-The polling workflow must be published. The old webhook workflow and Supabase
-Database Webhook should remain disabled while polling is active.
+Set the following in `.env`; keep `POSTGRES_PASSWORD` and `N8N_ENCRYPTION_KEY` private and stable:
 
-## Deploying Code Updates
+```env
+N8N_HOST=n8n.example.com
+N8N_PORT=5678
+N8N_PROTOCOL=https
+WEBHOOK_URL=https://n8n.example.com/
+N8N_SECURE_COOKIE=true
+N8N_ENCRYPTION_KEY=stable-random-secret
 
-Push tested changes to GitHub, then on the VPS:
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+XASS_DOCUMENT_WORKER_URL=http://host.docker.internal:3000/api/workers/parse-document
+XASS_WORKER_SECRET=the-same-shared-worker-secret
+N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+```
+
+Also replace the internal `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` values from the template. `XASS_N8N_WEBHOOK_SECRET` is for the alternate webhook mode; it is not used by the polling deployment.
+
+The checked-in Compose file publishes port `5678` on every host interface. Create a VPS-local override with `!override` so the public binding is replaced and only host-local services, including the reverse proxy, can reach n8n:
 
 ```bash
-cd ~/apps/XAss
-git pull origin master
+cat > docker-compose.override.yml <<'EOF'
+services:
+  n8n:
+    ports: !override
+      - "127.0.0.1:5678:5678"
+EOF
+
+docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.override.yml ps
+docker compose -f docker-compose.yml -f docker-compose.override.yml port n8n 5678
+```
+
+Confirm the reported binding is `127.0.0.1:5678`. Do not run `docker compose down -v`; it deletes n8n and PostgreSQL data volumes. When changing n8n environment values, recreate the service with `docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --force-recreate`.
+
+### 9. Import and activate the polling workflow
+
+Open the HTTPS n8n hostname, finish the initial account setup, then import `workflows/n8n/x-assurance-supabase-document-polling.json`. Configure/verify the environment values, save, and activate this workflow only. Keep the webhook workflow inactive and the Supabase Database Webhook disabled. One active poller is the normal setup.
+
+### 10. Run the deployment smoke check
+
+Use synthetic or otherwise approved test evidence; the selected hosted LLM provider receives submitted evidence text.
+
+1. Open the public app URL and sign in; confirm the Supabase redirect returns to the app.
+2. Upload a text-based document and confirm its job reaches `completed` through the n8n polling workflow.
+3. Upload a representative image and a scanned PDF. Confirm image OCR works; for the scanned PDF, confirm both Ghostscript rasterization and PP-OCRv6 OCR work.
+4. Check n8n Executions and app/worker logs for errors. Confirm there is only one active polling workflow.
+5. Verify app and n8n restart policies. During an approved maintenance window, reboot the VPS and confirm both return.
+
+Before production use of OCR, complete the human-checked quality and target-VPS CPU/memory validation described in `worker/README.md`. Repository docs do not claim OCR is production-validated on every VPS.
+
+## Normal update and recovery
+
+Deploy only a tested release tag/commit. After checkout, update dependencies and build, then restart Next.js:
+
+```bash
 npm ci
 npm run build
 pm2 restart xass --update-env
 pm2 save
 ```
 
-Run database migrations separately in Supabase when an update adds migration
-files. Workflow JSON changes are not automatically imported into n8n; import
-the updated JSON in the n8n editor and publish the new version.
+Import and activate an updated n8n workflow JSON separately; Git checkout does not update an imported workflow. Do not change database schema in this runbook. For a faulty app release, return the app to the previous known-good tag/commit and rebuild. Preserve n8n volumes and encryption key. Never delete persistent data as a routine rollback.
 
-### Document job fencing cutover (migrations 202611020001–002)
-
-Migration `202611020001_document_content_hash.sql` adds `documents.content_hash`
-so cached findings remain tied to current stored bytes. Apply it before
-`202611020002_document_job_fencing.sql`. The fencing migration adds
-`ai_jobs.claim_token` and redefines the claim/fail/retry RPCs so every durable
-write verifies the attempt token and an unexpired lease inside the same
-transaction. It also adds `complete_document_job` (one atomic publication
-transaction), `extend_document_job_lease`, `queue_document_parse_job`, and an
-updated `create_document_with_job`; it drops `recover_and_fetch_document_job`
-and `reset_document_job_results`. Cutover order:
-
-1. Import both updated workflow JSONs in n8n **while they are inactive**.
-2. Let running executions drain (wait until no job is `processing`).
-3. Apply `202611020001_document_content_hash.sql`, then
-   `202611020002_document_job_fencing.sql` in Supabase. In-flight old
-   executions that still call the dropped RPCs fail loudly instead of
-   bypassing fencing.
-4. Activate `x-assurance-supabase-document-polling` (active mode) or the
-   webhook workflow — not both uncontrolled. Deactivate the unused one.
-5. Verify one upload end-to-end on the VPS: document reaches `completed`, one
-   extraction run exists, and no duplicate job appears after a repeated
-   completion request.
-
-
-For Compose or n8n environment changes:
-
-```bash
-cd ~/apps/XAss/workflows/n8n
-docker compose up -d --force-recreate
-docker compose ps
-```
-
-Do not run `docker compose down -v` during normal operation. It deletes n8n and
-PostgreSQL volumes.
-
-## Changing VPS or IP
-
-When only the public IP changes:
-
-1. Update `N8N_HOST` and `WEBHOOK_URL` in `workflows/n8n/.env`.
-2. Update the Nginx `server_name` if it contains the old IP.
-3. Update Supabase Auth Site URL and allowed redirect URLs.
-4. Allow ports `22`, `80`, and `3000` in the VPS/provider firewall.
-5. Recreate n8n and restart Next.js.
-6. Test login, upload, polling, LLM extraction, assistant, and reports.
-
-Polling does not require Supabase to call the VPS, so no Supabase Database
-Webhook URL needs changing.
-
-When moving to a new VPS:
-
-1. Install Git, Node.js 20+, Docker Compose, PM2, and Nginx/Caddy.
-2. Clone the repository and restore both environment files securely.
-3. Preserve the existing n8n Docker volumes or export/import workflows.
-4. Preserve `N8N_ENCRYPTION_KEY`.
-5. Build Next.js and start it under PM2.
-6. Start n8n with Docker Compose and publish the polling workflow.
-7. Apply firewall and Supabase Auth URL changes.
-
-For a domain deployment, proxy the application and n8n through HTTPS. Set
-secure cookies back to `true` and avoid exposing ports `3000` and `5678`
-directly to the internet.
-
-## Troubleshooting
-
-### Site is unreachable
+Useful checks:
 
 ```bash
 pm2 status
 pm2 logs xass --lines 100
 curl -I http://127.0.0.1:3000
-sudo ss -lntp | grep 3000
-sudo ufw status
+cd ~/apps/x-assurance/workflows/n8n
+docker compose ps
+docker compose logs --tail=100 n8n
+curl -I http://127.0.0.1:5678
 ```
 
-If localhost works but the public URL does not, check the IDCloudHost firewall
-and public IP.
-
-### Document remains queued
-
-1. Confirm a queued row exists in Supabase `public.ai_jobs`.
-2. Confirm the polling workflow is published.
-3. Check n8n Executions for a run within the last 15 seconds.
-4. Verify n8n has `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and
-   `N8N_BLOCK_ENV_ACCESS_IN_NODE=false`.
-5. Confirm only one polling workflow is published.
-
-### Job remains processing or fails
-
-```bash
-docker compose logs --tail=150 n8n
-pm2 logs xass --lines 150
-docker exec aisx-n8n node -e "fetch('http://host.docker.internal:3000').then(r=>console.log(r.status)).catch(e=>{console.error(e.message);process.exit(1)})"
-```
-
-Check that `XASS_WORKER_SECRET` matches in both environments and that the
-document storage path still exists.
-
-### LLM fallback warning
-
-The LLM configuration belongs in root `.env.local`, not n8n `.env`.
-
-```bash
-cd ~/apps/XAss
-grep -E '^(XASS_LLM_PROVIDER|OLLAMA_CLOUD_BASE_URL|OLLAMA_CLOUD_MODEL)=' .env.local
-grep -q '^OLLAMA_API_KEY=.\+' .env.local && echo configured || echo missing
-```
-
-Test Ollama Cloud using the configured model:
-
-```bash
-set -a
-source .env.local
-set +a
-curl -sS https://ollama.com/api/chat \
-  -H "Authorization: Bearer $OLLAMA_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "{\"model\":\"$OLLAMA_CLOUD_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with OK\"}],\"stream\":false}"
-```
-
-After changing LLM variables:
-
-```bash
-pm2 restart xass --update-env
-```
-
-Re-upload a document because saved fallback outputs are not regenerated
-automatically.
-
-### n8n does not start
-
-```bash
-cd ~/apps/XAss/workflows/n8n
-docker compose ps -a
-docker compose logs --tail=150 postgres
-docker compose logs --tail=150 n8n
-```
-
-`ENOTFOUND postgres` means the PostgreSQL container/network is unavailable.
-An encryption-key mismatch means the configured key differs from the key used
-to create the existing n8n data volume. Restore the original key rather than
-deleting production volumes.
-
-### Login redirects incorrectly
-
-Update Supabase Authentication URL Configuration with the current public
-application URL. Confirm the Site URL and allowed redirect patterns both use
-the same scheme, host, and port.
-
-### Upload or database operations fail
-
-Check the Next.js PM2 error log, Supabase Storage bucket, RLS policies, and
-migration status. Confirm the publishable key is used in browser code and the
-service-role key is only present server-side.
-
-## Demo Acceptance Check
-
-Before handing the demo to users:
-
-1. Sign in and create or select a project.
-2. Upload a supported evidence file.
-3. Confirm its job moves `queued -> processing -> completed`.
-4. Confirm extracted facts and an LLM-backed summary appear.
-5. Refresh and inspect the dashboard.
-6. Open anomalies and verify evidence links.
-7. Ask the AI Assistant a project-scoped question.
-8. Generate and download a report.
-9. Add a project member and verify project access.
-10. Restart the VPS services and confirm they recover automatically.
+`curl` to port `5678` is a local host check, not a recommendation to expose that port publicly.

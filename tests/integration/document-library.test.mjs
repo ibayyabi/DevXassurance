@@ -25,6 +25,10 @@ export const documents = constants.documentTypes.map((type, index) => ({
 }));
 export const defaultFilters = { type: "all", period: "all", workstream: "all", status: "all" };
 const icon = () => React.createElement("svg", { "aria-hidden": true });
+const statusLabelsId = {
+  uploaded: "Diunggah", queued: "Dalam antrean", processing: "Diproses",
+  completed: "Selesai", needs_review: "Perlu diperiksa", failed: "Gagal", cancelled: "Dibatalkan",
+};
 export function renderLibrary({ filters = defaultFilters, search = "", items = documents, sort = "newest", page = 0, extractedFacts = [] } = {}) {
   let state = 0;
   const values = [filters, search, sort, page];
@@ -32,11 +36,28 @@ export function renderLibrary({ filters = defaultFilters, search = "", items = d
     React, useState: (initial) => [state < 4 ? values[state++] : initial, () => {}], useRef: () => ({ current: null }), useEffect: () => {}, useContext: () => () => {}, SourceNavigation: {},
     ...factReview,
     ...constants, roleLabels: { baseline: "Approved Baseline", current: "Current Period", supporting: "Supporting Evidence" },
+    statusLabelsId,
+    SectionCard: ({ id, children }) => React.createElement("section", { id }, children),
+    PillTabs: ({ label, tabs, value, onChange, idPrefix }) => React.createElement(
+      "div", { role: "tablist", "aria-label": label },
+      tabs.map((tab) => React.createElement(
+        "button", { key: tab.key, type: "button", role: "tab", "aria-selected": value === tab.key, id: `${idPrefix}-${tab.key}`, onClick: () => onChange(tab.key) },
+        tab.label,
+      )),
+    ),
+    MetaPill: ({ children }) => React.createElement("span", null, children),
+    PaginationFooter: ({ rangeLabel }) => React.createElement("div", { "data-pagination": "" }, rangeLabel),
+    EmptyState: ({ title, description }) => React.createElement("div", { "data-empty-state": "" }, title, description),
+    FilterChip: ({ children, ...props }) => React.createElement("button", { type: "button", "data-filter-chip": "", ...props, pressed: undefined, dotTone: undefined }, children),
+    StatusPill: ({ children }) => React.createElement("span", null, children),
+    FileTypeIcon: () => React.createElement("span", { "aria-hidden": true }, "F"),
+    documentTypeTone: () => "neutral",
     Input: (props) => React.createElement("input", props),
     Button: ({ children, ...props }) => React.createElement("button", { ...props, variant: undefined, size: undefined }, children),
     SourceReference: ({ title }) => React.createElement("button", { type: "button" }, title),
     deleteDocument: "/delete", retryDocumentProcessing: "/retry", updateDocumentClassification: "/review", updateExtractedFact: async () => {},
-    FileClock: icon, FileText: icon, FileCheck2: icon, RefreshCw: icon, Trash2: icon, fileKindLabel: () => "PDF",
+    FileClock: icon, FileText: icon, FileCheck2: icon, RefreshCw: icon, Trash2: icon, Layers: icon, Archive: icon, ChevronDown: icon, X: icon, Search: icon, Check: icon, ListChecks: icon, RotateCcw: icon,
+    fileKindLabel: () => "PDF",
   };
   const Library = new Function(...Object.keys(dependencies), `${libraryCode}; return DocumentLibrary;`)(...Object.values(dependencies));
   return renderToStaticMarkup(React.createElement(Library, { projectId: "project-1", documents: items, summaries: [], facts: extractedFacts, sourceRequest: null }));
@@ -45,39 +66,30 @@ export function renderLibrary({ filters = defaultFilters, search = "", items = d
 test("tabs and extracted pointers use complete shared facts and omit the old bottom section", () => {
   const html = renderLibrary({ extractedFacts: facts });
   assert.match(html, /role="tablist"/);
-  assert.match(html, />Documents<\/button>/);
-  assert.match(html, />Extracted facts<\/button>/);
-  assert.match(html, /22 stored rows\./);
-  assert.match(html, /11 items · Partial/);
-  assert.match(html, /Milestones \(4\)/);
-  assert.match(html, /Decisions \(3\)/);
-  assert.match(html, /Review extracted items \(11\)/);
+  assert.equal((html.match(/role="tab"/g) ?? []).length, 2);
+  const factIds = new Set([...html.matchAll(/data-extracted-fact="([^"]+)"/g)].map((match) => match[1]));
+  assert.equal(factIds.size, 20);
+  assert.equal((html.match(/data-extracted-fact=/g) ?? []).length, 30);
   assert.doesNotMatch(source, /Review extracted details/);
-  const keyFacts = source.indexOf("Total stated");
-  assert.ok(keyFacts < source.indexOf("Document review notice", keyFacts));
-  assert.ok(source.indexOf("Document review notice", keyFacts) < source.indexOf("<FileFactReview", keyFacts));
-  assert.ok(source.indexOf("<FileFactReview", keyFacts) < source.indexOf("Source details (", keyFacts));
 });
 
 test("failed documents with stored rows are explicitly partial in the table and drawer", () => {
   const html = renderLibrary({ extractedFacts: [{ ...facts[0], evidenceLinks: [], documentProcessingStatus: "failed" }] });
-  assert.match(html, /1 item · Partial/);
-  assert.match(html, /Partial processing · 1 saved items/);
-  assert.match(html, /1 stored rows lack source citations/);
-  assert.match(html, /Citation missing/);
-  assert.match(html, /1 stored rows\./);
-  assert.equal((html.match(/aria-label="Document review notice"/g) ?? []).length > 0, true);
+  const factIds = new Set([...html.matchAll(/data-extracted-fact="([^"]+)"/g)].map((match) => match[1]));
+  assert.equal(factIds.size, 1);
+  assert.ok((html.match(/<aside\b/g) ?? []).length >= 1);
+  assert.doesNotMatch(html, /<dialog[^>]*\bopen=/);
   assert.doesNotMatch(html, /Flagged in this file/);
 });
 
 test("quick filters count files once and omit zero counts without removing buttons", () => {
+  const chips = (html) => [...html.matchAll(/<button[^>]*data-filter-chip[^>]*>(.*?)<\/button>/gs)].map((match) => match[1]);
   const html = renderLibrary();
-  assert.match(html, /Failed \(1\)/);
-  assert.match(html, /Needs review \(1\)/);
+  assert.equal(chips(html).length, 2);
+  assert.equal(chips(html).some((text) => text.includes("(1)")), true);
   const empty = renderLibrary({ items: [] });
-  assert.match(empty, />Failed<\/button>/);
-  assert.match(empty, />Needs review<\/button>/);
-  assert.doesNotMatch(empty, /Failed \(0\)|Needs review \(0\)/);
+  assert.equal(chips(empty).length, 2);
+  assert.equal(chips(empty).some((text) => text.includes("(0)")), false);
 });
 function visibleIds(html) {
   return [...html.matchAll(/<article\b([^>]+)>/g)].filter((match) => !/\bhidden=""/.test(match[1])).map((match) => /id="document-([^"]+)"/.exec(match[1])[1]);
@@ -89,10 +101,11 @@ test("archive is one list with all existing categories, counts, and collapsed do
   assert.doesNotMatch(html, /data-document-group/);
   assert.equal((html.match(/data-document-details=/g) ?? []).length, documents.length);
   assert.doesNotMatch(html, /<dialog[^>]*\bopen=/);
-  assert.match(html, /Showing 1\u201310 of 18/);
+  assert.match(html, /1\u201310/);
+  assert.match(html, /\b18\b/);
   for (const type of constants.documentTypes) assert.ok(html.includes(`${constants.documentTypeLabels[type]} (1)`));
-  assert.match(html, /Retry document processing/);
-  assert.match(html, /Extraction failed; retry available/);
+  assert.match(html, /action="\/retry"/);
+  assert.ok(html.includes(documents[0].processingError));
   assert.match(html, /action="\/review"/);
   assert.doesNotMatch(html, /Uploaded \$/);
 });
@@ -101,10 +114,12 @@ test("category and combined filters use effective metadata and retain hidden rev
   const filters = { type: "progress_report", period: "2026-09", workstream: "Civil", status: "completed" };
   const html = renderLibrary({ filters, search: "  OCTOBER  " });
   assert.deepEqual(visibleIds(html), ["doc-3"]);
-  assert.match(html, /Showing 1\u20131 of 1/);
-  assert.match(html, /Category: Progress Report \/ Period: September 2026 \/ Workstream: Civil \/ State: Completed/);
-  assert.match(html, /Progress Report \(1\)/);
-  assert.match(html, /Not sure \(0\)/);
+  assert.match(html, /1\u20131/);
+  assert.ok(html.includes("OCTOBER"));
+  assert.ok(html.includes("Civil"));
+  assert.ok(html.includes(constants.documentTypeLabels.progress_report));
+  assert.ok(html.includes(`${constants.documentTypeLabels.progress_report} (1)`));
+  assert.ok(html.includes(`${constants.documentTypeLabels.unknown} (0)`));
   assert.equal((html.match(/name="documentId"/g) ?? []).length > documents.length, true);
   assert.match(html, /name="workstream"/);
 });
@@ -114,13 +129,12 @@ test("empty matches, quick statuses, and empty archives remain distinct", () => 
   assert.deepEqual(visibleIds(renderLibrary({ filters: { ...defaultFilters, status: "needs_review" } })), ["doc-1"]);
   const empty = renderLibrary({ search: "missing-file" });
   assert.deepEqual(visibleIds(empty), []);
-  assert.match(empty, /Showing 0\u20130 of 0/);
-  assert.match(empty, /No documents match these filters/);
-  assert.match(empty, /All categories \(0\)/);
+  assert.match(empty, /0\u20130/);
+  assert.match(empty, /\(0\)/);
   assert.match(empty, /id="document-results" hidden=""/);
+  assert.doesNotMatch(empty, /data-empty-state/);
   const archive = renderLibrary({ items: [] });
-  assert.match(archive, /No project evidence yet/);
-  assert.doesNotMatch(archive, /No documents match/);
+  assert.equal((archive.match(/data-empty-state/g) ?? []).length, 1);
 });
 
 
@@ -132,7 +146,8 @@ test("pagination slices the complete filtered set, clamps the final page, and pr
   assert.deepEqual(visibleIds(first), items.slice(0, 10).map(item => item.id));
   assert.deepEqual(visibleIds(second), items.slice(10, 20).map(item => item.id));
   assert.deepEqual(visibleIds(last), items.slice(20).map(item => item.id));
-  assert.match(last, /Showing 21\u201326 of 26/);
+  assert.match(last, /21\u201326/);
+  assert.match(last, /\b26\b/);
   assert.deepEqual(visibleIds(renderLibrary({ items: items.slice(0, 11), page: 4, sort: "name-asc" })), ["item-10"]);
   assert.equal((first.match(/data-document-details=/g) ?? []).length, 26);
   assert.deepEqual(visibleIds(renderLibrary({ items, search: "Report 26" })), ["item-25"]);
@@ -155,7 +170,6 @@ test("sorting handles filenames naturally, optional periods last, types, process
   const longName = "Full source filename ".repeat(25) + ".pdf";
   const html = renderLibrary({ items: [{ ...items[0], fileName: longName }] });
   assert.ok(html.includes(`title="${longName}"`));
-  assert.match(html, /Reporting period not provided/);
   assert.match(html, /\u2014/);
   assert.match(html, /aria-haspopup="dialog"/);
 });

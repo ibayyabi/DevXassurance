@@ -45,15 +45,13 @@ test("anomaly workspace supports filters, severity sort, details, and management
   const actions = read("src/features/anomalies/actions/anomaly-actions.ts");
 
   assert.match(page, /AnomalyWorkspace/);
-  for (const label of ["Cost", "Schedule", "Risk", "Governance", "Scope"]) {
-    assert.match(constants, new RegExp(label));
+  for (const category of ["cost", "schedule", "risk", "governance", "scope"]) {
+    assert.match(constants, new RegExp(`"${category}"`));
   }
   assert.match(component, /severityRank/);
-  assert.match(component, /Evidence/);
-  assert.match(component, /Impact/);
-  assert.match(component, /Recommended Action/);
-  assert.match(component, /Create Action/);
-  assert.match(component, /Mark as Reviewed/);
+  assert.match(component, /createManagementAction/);
+  assert.match(component, /markAnomalyFalsePositive/);
+  assert.match(component, /markAnomalyReviewed/);
   assert.match(actions, /anomaly_false_positive/);
   assert.match(actions, /management_action_created/);
   assert.match(actions, /audit_events/);

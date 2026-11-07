@@ -17,6 +17,9 @@
 /tools/demo-artifact-builder/node_modules/
 *.inspect.ndjson
 /.local-evaluation/
+# graphify
+/graphify-out/cache/
+/graphify-out/.graphify_root
 
 # next.js
 /.next/
