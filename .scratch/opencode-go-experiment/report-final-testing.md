@@ -197,3 +197,21 @@ Rencana: satu workbook ITB (11_Pengelolaan W4, 22 grup) end-to-end live tanpa mo
 - **Lever optimasi terbesar berikutnya teridentifikasi**: anotasi formula raksasa (RAG `IF(...)` berulang identik per baris) mendominasi source references — kompresi anotasi formula berulang berpotensi memangkas 40–60% prompt keluarga ini. Belum dikerjakan; tercatat sebagai kerja berikutnya.
 
 **Keputusan**: gerbang ditunda; integrasi kode ke arsitektur utama tetap didukung bukti yang ada (315/315 offline, ground truth manusia jalur deterministik, grup ITB ambigu+terstruktur live lulus, injection probe lulus, dokumen naratif selesai end-to-end). Produksi menjadi kelanjutan pembuktian dengan fail-closed menahan keluaran yang tak terbukti.
+
+## Lampiran 8: validasi offline pada DOKUMEN ASLI (PMO docs, bukan fixtures)
+
+Pengguna mengungkapkan bahwa `smart-building-itb` fixtures semi-generated; dokumen kerja PMO yang sebenarnya ada di `DOKUMEN ASLI/` (31 file: 12 folder subsistem dengan pasangan file progress, baseline, MoM gabungan, planning PPTX, proposal/standar PDF/DOCX; proyek baru ±2 minggu).
+
+**Sweep offline seluruh 30 file input (0 token): 30/30 parse + extract OK, 0 crash, 0 eksklusi validator.** Derivasi deterministik aktif di 20 file (progress) + 10 file (milestone).
+
+**Verifikasi independen nilai nyata** (`Progres Air Bersih.xlsx`, pembacaan XML mentah terpisah dari parser):
+- WBS 2.1: raw `0.9` berformat persen → **90%** — pipeline 2.1=90% ✓ MATCH
+- WBS 2.2: raw `0.3` → **30%** — pipeline 2.2=30% ✓ MATCH
+- Baris 2.3–2.7: kolom % complete kosong → **tidak ada klaim** (disiplin empty-vs-zero di data nyata) ✓
+- Kolom Bobot (0,16/0,14/0,18, format persen kustom) → **tidak dijadikan progress** (gate label) ✓
+
+**Pola pasangan file terkonfirmasi**: dua file per subsistem memang laporan BERBEDA — `*_Weekly.xlsx` adalah template mingguan subkontraktor (15 baris × 0% + 7 milestone, proyek baru), `Progres X.xlsx` adalah tracker PM dengan nilai nyata (1–3 baris: 80%, 95%, 100%, 90%...). Nama file dunia nyata menampilkan varian typo (`Pengondisian`/`Pengkondisian`, `Pengawasan`/`Pengawas`), duplikat unduhan `(1)`, dan nama orang (`Kelistrikan_Elisa`) — semua ditangani tanpa crash.
+
+**Ukuran prompt workbook asli** (01_Alarm, 26 grup): 990.568 char ≈ **~248k input token per workbook** — masalah anotasi formula raksasa sama dengan fixtures (grup terbesar 40,5k char). Lever kompresi anotasi formula berulang berlaku sama (potensi 40–60%).
+
+**Implikasi**: arsitektur saat ini valid secara offline untuk dokumen PMO asli. Test live pada dokumen asli membutuhkan (a) persetujuan eksplisit pengiriman konten dokumen nyata ke provider, dan (b) sebaiknya setelah kompresi anotasi formula agar biaya test akhir turun 40–60%.

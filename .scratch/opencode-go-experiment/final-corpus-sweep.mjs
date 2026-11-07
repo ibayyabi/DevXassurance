@@ -9,7 +9,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "n
 import { join, resolve, relative, extname } from "node:path";
 import { loadWorkerModules, REPO_ROOT } from "../../tests/integration/helpers/worker-modules.mjs";
 
-const OUT = resolve(".local-evaluation/final-testing/corpus-sweep");
+const OUT = resolve(process.env.SWEEP_OUT ?? ".local-evaluation/final-testing/corpus-sweep");
 mkdirSync(OUT, { recursive: true });
 
 // Collect every candidate input file under the fixture roots.
@@ -24,7 +24,7 @@ function collectFiles(dir, acc = []) {
   }
   return acc;
 }
-const FILES = collectFiles(join(REPO_ROOT, "demo-evidence-fixtures")).sort();
+const FILES = collectFiles(join(REPO_ROOT, process.env.SWEEP_ROOT ?? "demo-evidence-fixtures")).sort();
 
 const DIMENSIONS = ["overall", "schedule", "cost", "risk", "governance", "audit_readiness"];
 function baseGroupOutput(references) {
