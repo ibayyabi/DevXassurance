@@ -354,3 +354,11 @@ Verifikasi formula di-jalankan ke seluruh 12 workbook mingguan asli: **609 sel f
 3. Attestation reviewer hanya tersisa untuk file manual-edit.
 
 Ditutup sesuai preferensi: harness tetap working file (tidak di-commit), hasil di lampiran ini + `formula-verify-asli.json`.
+
+## Lampiran 23: Kelompok B ter-integrasi ke development (merge a8a67fd..9240a52)
+
+Merge `origin/userflow/automatic-assessment` (43 commit, 77 file) ke `development` + iterasi LLM (`/43`-`/44`, 4 commit) - divergensi di `c3aecaa` diselesaikan dengan merge commit tanpa konflik kode (hanya probe working-file yang dipindah sementara). Verifikasi gabungan: **413/413 tes**, tsc bersih.
+
+Klarifikasi: "PR #3-#8" di handoff Kelompok B adalah penamaan internal - GitHub hanya punya PR #1 (merged) dan #2 (closed); integrasi nyata dilakukan via merge git langsung.
+
+**Status integrasi akhir**: pipeline `/44` + deterministic-first + guard + cache konten + formula verification L1 + fallback Gemini dorman + antrean asesmen otomatis + snapshot pinning + overview parsial - seluruhnya di `development` (ter-push). Deployment & migrasi hosted menunggu keputusan terpisah. Sisa terbuka: drift-table (parser stream), runner dev (pemanggil berkala/n8n), keputusan produk USERFLOW.
