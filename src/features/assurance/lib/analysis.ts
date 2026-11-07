@@ -5,6 +5,14 @@ export type ReviewCondition =
   | "more_evidence_required";
 
 export type ReviewDomain = "budget" | "schedule" | "risk";
+export type ProgressPeriodBasis =
+  | "cumulative"
+  | "weekly"
+  | "monthly"
+  | "daily"
+  | "paired_variance_formula";
+
+
 
 /** Exact versioned evidence reference returned by the analysis claim. */
 export type AssuranceEvidenceReference = {
@@ -17,6 +25,8 @@ export type AssuranceEvidenceReference = {
   evidenceChunkIndex: number;
   pageNumber: number | null;
   sectionLabel: string | null;
+  /** Exact progress value cell resolved from the cited row, when available. */
+  valueSourceLocation?: Record<string, string | number> | null;
   sourceLocation: Record<string, string | number> | null;
   excerpt: string;
 };
@@ -40,18 +50,27 @@ export type MilestoneObservation = {
 };
 
 /**
- * A reported progress percentage at project or WBS level, preserved exactly as
- * one source states it. The role records which evidence group it came from so a
- * cross-period comparison can use the reviewer-selected current period against a
- * prior baseline period for the same scope. Progress is never aggregated from
- * WBS percentages into a project total and never converted into a forecast date.
+ * A normalized percentage at project or WBS level, preserved from one source.
+ * Role identifies the reviewer-selected evidence group: older dated
+ * current-role observations may provide a prior snapshot, while baseline-role
+ * evidence stays a separate approved baseline. Progress is never aggregated
+ * from WBS percentages into a project total or converted into a forecast date.
  */
 export type ProgressObservation = {
   role: "baseline" | "current";
   scopeLevel: "project" | "wbs" | "unknown";
   scopeLabel: string | null;
   percent: number | null;
+  /**
+   * The measurement kind the cited source itself proves (a "Planned %" or
+   * "Actual %"/"Realisasi %" header, or the same cue inside a narrative
+   * statement). Role or magnitude never implies it; "unspecified" values are
+   * preserved but never paired into a planned/actual comparison.
+   */
+  measureKind: "actual" | "planned" | "unspecified";
   periodLabel: string | null;
+  /** Source-proven measurement/period basis; absent legacy claims stay unassessed. */
+  periodBasis: ProgressPeriodBasis | null;
   asOfDate: string | null;
   excerpt: string | null;
   sourceRef: AssuranceEvidenceReference | null;

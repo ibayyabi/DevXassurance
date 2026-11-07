@@ -8,11 +8,11 @@
 -- open; B updates selected prior evidence or uses Storage API to delete/update
 -- its selected object. The after-trigger waits for project; A finishes against
 -- its captured MVCC source and commits; B then invalidates currentness. No
--- deadlock. pgTAP runs after migrations 202611050001, 202611050002, and 003.
+-- deadlock. pgTAP runs after migrations 202611050001, 003, and 006.
 --   psql -v ON_ERROR_STOP=1 -f supabase/tests/risk_snapshot_atomicity.test.sql
 begin;
 select set_config('storage.allow_delete_query', 'true', true);
-select extensions.plan(32);
+select extensions.plan(34);
 select ok(not exists (
   select 1 from unnest(array[
     'cost_baselines','wbs_mappings','milestone_mappings','risk_identity_mappings','risk_scale_mappings'
@@ -121,6 +121,14 @@ with changed as (
 select is((select count(*) from changed), 0::bigint,
   'direct review updates are unavailable outside project-first RPCs');
 reset role;
+insert into public.progress_rag_rules (id, project_id, rule_version, thresholds, approved_by)
+values (
+  '51000000-0000-4000-8000-000000000071',
+  '51000000-0000-4000-8000-000000000003',
+  'approved-v1',
+  '{"amber_below_pp": -2, "red_below_pp": -5}'::jsonb,
+  '51000000-0000-4000-8000-000000000001'
+);
 create temporary table risk_claims (stage integer primary key, claim jsonb not null);
 create function pg_temp.claim_current() returns jsonb language sql as $$
   select public.claim_assurance_analysis('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000022');
@@ -140,6 +148,14 @@ create function pg_temp.add_claim(stage integer) returns void language sql as $$
 $$;
 
 select pg_temp.add_claim(1);
+select is(
+  (select claim->'progress_rag_rule'->>'rule_version' from risk_claims where stage=1),
+  'approved-v1', 'the same claim carries the approved progress rule'
+);
+select is(
+  (select claim->'reference_versions'->>'progress_rag_rule_id' from risk_claims where stage=1),
+  '51000000-0000-4000-8000-000000000071', 'the progress rule is included in reference fencing'
+);
 select is(
   (select claim->'prior_risk_snapshot'->'review'->>'id' from risk_claims where stage=1),
   '51000000-0000-4000-8000-000000000021',

@@ -56,6 +56,7 @@ export function renderLibrary({ filters = defaultFilters, search = "", items = d
     Button: ({ children, ...props }) => React.createElement("button", { ...props, variant: undefined, size: undefined }, children),
     SourceReference: ({ title }) => React.createElement("button", { type: "button" }, title),
     deleteDocument: "/delete", retryDocumentProcessing: "/retry", updateDocumentClassification: "/review", updateExtractedFact: async () => {},
+    ProcessingStatusNote: ({ status }) => React.createElement("p", { "data-processing-note": status }, `Processing status: ${status}`),
     FileClock: icon, FileText: icon, FileCheck2: icon, RefreshCw: icon, Trash2: icon, Layers: icon, Archive: icon, ChevronDown: icon, X: icon, Search: icon, Check: icon, ListChecks: icon, RotateCcw: icon,
     fileKindLabel: () => "PDF",
   };
@@ -172,4 +173,86 @@ test("sorting handles filenames naturally, optional periods last, types, process
   assert.ok(html.includes(`title="${longName}"`));
   assert.match(html, /\u2014/);
   assert.match(html, /aria-haspopup="dialog"/);
+});
+
+test("job diagnostics render independently of review warnings and offer retry only for an expired lease", () => {
+  const diagnostic = {
+    jobId: "job-expired",
+    status: "processing",
+    errorCode: null,
+    errorMessage: null,
+    attemptCount: 2,
+    maxAttempts: 3,
+    retryPending: false,
+    leaseActive: false,
+    leaseExpired: true,
+    leaseUnknown: false,
+  };
+  const expired = {
+    ...documents[0],
+    id: "doc-expired",
+    processingStatus: "processing",
+    processingError: null,
+    jobDiagnostic: diagnostic,
+    jobDiagnosticReadFailed: false,
+  };
+  const expiredHtml = renderLibrary({ items: [expired] });
+  assert.match(expiredHtml, /Diagnostik job pemrosesan/);
+  assert.match(expiredHtml, /Antrekan ulang attempt kedaluwarsa/);
+  assert.match(expiredHtml, /aria-describedby="expired-lease-help-doc-expired"/);
+  assert.doesNotMatch(expiredHtml, /aria-label="Catatan peninjauan dokumen"/);
+
+  const cappedHtml = renderLibrary({
+    items: [{
+      ...expired,
+      id: "doc-capped",
+      jobDiagnostic: { ...diagnostic, jobId: "job-capped", attemptCount: 3, maxAttempts: 3 },
+    }],
+  });
+  assert.match(cappedHtml, /Tandai job gagal/);
+  assert.match(cappedHtml, /hasil\/checkpoint yang sudah tersimpan dipertahankan/);
+
+  const activeHtml = renderLibrary({
+    items: [{
+      ...expired,
+      id: "doc-active",
+      jobDiagnostic: { ...diagnostic, jobId: "job-active", leaseActive: true, leaseExpired: false },
+    }],
+  });
+  assert.match(activeHtml, /Lease masih aktif/);
+  assert.doesNotMatch(activeHtml, /Antrekan ulang attempt kedaluwarsa/);
+
+  const failedActiveHtml = renderLibrary({
+    items: [{
+      ...expired,
+      id: "doc-failed-active",
+      processingStatus: "failed",
+      jobDiagnostic: { ...diagnostic, jobId: "job-failed-active", leaseActive: true, leaseExpired: false },
+    }],
+  });
+  assert.match(failedActiveHtml, /Lease masih aktif/);
+  assert.doesNotMatch(failedActiveHtml, /Antrekan ulang attempt kedaluwarsa|Ulangi pemrosesan dokumen/);
+
+  const failedExpiredHtml = renderLibrary({
+    items: [{
+      ...expired,
+      id: "doc-failed-expired",
+      processingStatus: "failed",
+      jobDiagnostic: diagnostic,
+    }],
+  });
+  assert.doesNotMatch(failedExpiredHtml, /Antrekan ulang attempt kedaluwarsa|Ulangi pemrosesan dokumen/);
+
+  const unavailableHtml = renderLibrary({
+    items: [{
+      ...expired,
+      id: "doc-unavailable",
+      processingStatus: "queued",
+      jobDiagnostic: null,
+      jobDiagnosticReadFailed: true,
+    }],
+  });
+  assert.match(unavailableHtml, /Diagnostik job tidak dapat dimuat/);
+  assert.doesNotMatch(unavailableHtml, /Antrekan ulang attempt kedaluwarsa/);
+  assert.doesNotMatch(unavailableHtml, /aria-label="Catatan peninjauan dokumen"/);
 });

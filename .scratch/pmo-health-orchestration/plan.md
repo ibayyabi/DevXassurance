@@ -71,6 +71,8 @@ flowchart TD
 **Hasil:** planned/actual source-backed per komponen dan tanggal, snapshot sebelumnya terpisah dari approved baseline; tampilkan perubahan hanya jika scope/unit/periode terbukti sebanding.
 **Penerimaan:** W4/W5 SB01 12,50% → 20,40%, delta +7,90 pp, dengan sumber kedua cut-off. Test identik filename, data unit ambigu, metadata bulan saja, konflik, missing W4/W5, dan data masa depan; semua hasil ambigu/gap tanpa perubahan diam-diam. Perhitungan planned/actual dan status harus menggunakan aturan yang disetujui dan berversi.
 
+**Read model for ticket 06:** `analysis_metadata.progress_observations` is one row per proven scope/measure kind and retains current, dated prior snapshot, undated approved baseline, percentage-point delta/gap, and per-leg `sourceRef` (document ID/title, source hash, parser/contract versions, original citation location and excerpt, plus exact `valueSourceLocation` for the resolved XLSX percentage cell when available). `progress_source_rag_claims` preserves the source's separate exact-cell citation and formula-cache freshness; `progress_rag_rule` exposes only the active approved project version; `progress_computed_statuses` gives per-scope/cut-off status and rule version or an explicit unassessed reason. The full active rule identity, version, thresholds, and approval metadata are included in the atomic analysis reference fingerprint and claim. Rule changes invalidate completed and in-flight results; stale computed statuses are hidden until analysis is rerun. Authenticated rule access is read-only; privileged service-role provisioning is required. No WBS roll-up or default rule.
+
 ### 05 — Risk snapshot — blocker: 03; gunakan kontrak identitas dan periode dari 01
 
 **Owner:** satu agent memiliki risk comparator/panel; telusuri implementasi dan ticket 04 yang sudah ada sebelum mengubah. 
@@ -83,7 +85,7 @@ flowchart TD
 - The atomic claim returns `prior_risk_snapshot` (nearest earlier project-scoped `current` role, versions, observations, risk coverage, and matching decisions); the client must not re-query previous sources after claim.
 - Prior selection/evidence/decision changes and a newly nearer eligible review invalidate dependent in-flight or published analysis; project scoping and 03 decision fencing remain in force.
 - Missing prior review, incomplete coverage, absent/ambiguous/conflicting cutoffs, or unknown identity/scale remain visible gaps; no inferred closure or composite Risk score.
-- Migration order: `202611050001_assurance_observation_decisions.sql` → ticket 04 `202611050002_progress_rag_rules.sql` → `202611050003_risk_snapshot_atomicity.sql`; do not run/deploy from this ticket.
+- Migration order: `202611050001_assurance_observation_decisions.sql` → `202611050003_risk_snapshot_atomicity.sql` → ticket 07 `202611050004_atomic_expired_document_job_retry.sql` → ticket 04 `202611050006_progress_rag_rules.sql`. Merge ticket 07 before ticket 04; do not deploy without the integration handoff.
 
 ### 06 — Overview dan navigasi review — blocker: 04, 05
 
