@@ -1,7 +1,8 @@
 import { Suspense } from "react";
 
-import { getAssuranceWorkspace } from "@/features/assurance/lib/queries";
+import { getAssuranceWorkspace, getProjectObservationEvidence } from "@/features/assurance/lib/queries";
 import { UsableOverview } from "@/features/dashboard/components/usable-overview";
+import { buildPublishedEvidence, isAnalysisCurrent } from "@/features/dashboard/lib/overview";
 
 export default function DashboardPage({
   params,
@@ -28,14 +29,23 @@ async function DashboardContent({
   const { review: reviewParam } = await searchParams;
   const { membership, review, reviews, documents } =
     await getAssuranceWorkspace(projectId);
+  const selectedReview =
+    reviews.find((item) => item.id === reviewParam) ?? review;
+  // Published observations are the overview itself without a review, and the
+  // fallback whenever the selected review's analysis is stale.
+  const publishedEvidence =
+    !selectedReview || !isAnalysisCurrent(selectedReview)
+      ? buildPublishedEvidence(await getProjectObservationEvidence(projectId))
+      : null;
 
   return (
     <UsableOverview
       projectId={projectId}
       projectName={membership.projectName}
-      review={reviews.find((item) => item.id === reviewParam) ?? review}
+      review={selectedReview}
       reviews={reviews}
       documents={documents}
+      publishedEvidence={publishedEvidence}
     />
   );
 }

@@ -1,3 +1,5 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+
 import { resolveDocumentMetadata } from "@/features/documents/lib/metadata";
 import {
   costBaselineColumns,
@@ -193,6 +195,10 @@ export type CostObservationReviewRow = {
     cellReference: string;
     excerpt: string;
   }[] | null;
+  /** Source-reported period label, when the source states one. */
+  periodLabel: string | null;
+  /** Source-reported as-of date; null is unknown, never "today". */
+  asOfDate: string | null;
   excerpt: string;
   pageNumber: number | null;
   sectionLabel: string | null;
@@ -227,6 +233,14 @@ export type ObservationReviewDocument = {
   processingError: string | null;
   jobDiagnostic: JobDiagnostic | null;
   coverage: ObservationCoverageDisplayRow[];
+  /**
+   * Proven reporting period of the source (confirmed ?? detected ?? hint), raw
+   * and unnormalized: an unproven period stays null and is never inferred from
+   * upload date or file name.
+   */
+  reportingPeriod: string | null;
+  /** Content hash of the source version the shown observations belong to. */
+  contentHash: string | null;
 };
 
 export type AssuranceObservationReview = {
@@ -237,6 +251,41 @@ export type AssuranceObservationReview = {
 };
 
 const coverageDomains = ["budget", "schedule", "progress", "risk"] as const;
+
+type ObservationEvidenceDocumentRow = {
+  id: string;
+  title: string;
+  processing_status: string;
+  processing_error: string | null;
+  content_hash: string | null;
+  assurance_observation_parser_version: string | null;
+  assurance_observation_contract_version: string | null;
+  confirmed_reporting_period: string | null;
+  detected_reporting_period: string | null;
+  reporting_period_hint: string | null;
+};
+
+const observationEvidenceDocumentColumns =
+  "id, title, processing_status, processing_error, content_hash, assurance_observation_parser_version, assurance_observation_contract_version, confirmed_reporting_period, detected_reporting_period, reporting_period_hint";
+
+/**
+ * Every project document that can contribute published observations:
+ * completed and `needs_review` both count, and neither review linkage nor an
+ * approved baseline is required. A needs-review document never hides the
+ * current-version observations it already produced.
+ */
+async function fetchObservationEvidenceDocuments(
+  supabase: SupabaseClient,
+  projectId: string,
+): Promise<ObservationEvidenceDocumentRow[]> {
+  const { data, error } = await supabase
+    .from("documents")
+    .select(observationEvidenceDocumentColumns)
+    .eq("project_id", projectId)
+    .in("processing_status", ["completed", "needs_review"]);
+  if (error) throw new Error(error.message);
+  return (data ?? []) as ObservationEvidenceDocumentRow[];
+}
 
 /**
  * The per-observation review surface for one assurance review: current-version
@@ -251,7 +300,7 @@ export async function getAssuranceObservationReview(
 ): Promise<AssuranceObservationReview> {
   const { supabase } = await requireProjectMembership(projectId);
 
-  const [linksResult, reviewResult, documentsResult] = await Promise.all([
+  const [linksResult, reviewResult, documentRows] = await Promise.all([
     supabase
       .from("assurance_review_documents")
       .select("document_id, evidence_role")
@@ -266,34 +315,48 @@ export async function getAssuranceObservationReview(
     // Reviewable evidence is every project document whose processing allows
     // review, independent of review linkage: a PMO with one needs-review file
     // and no approved baseline can still inspect and decide its observations.
-    supabase
-      .from("documents")
-      .select(
-        "id, title, processing_status, processing_error, content_hash, assurance_observation_parser_version, assurance_observation_contract_version",
-      )
-      .eq("project_id", projectId)
-      .in("processing_status", ["completed", "needs_review"]),
+    fetchObservationEvidenceDocuments(supabase, projectId),
   ]);
   if (linksResult.error) throw new Error(linksResult.error.message);
   if (reviewResult.error) throw new Error(reviewResult.error.message);
-  if (documentsResult.error) throw new Error(documentsResult.error.message);
   if (!reviewResult.data) throw new Error("Assurance review was not found in this project.");
 
   const links = (linksResult.data ?? []) as {
     document_id: string;
     evidence_role: "baseline" | "current";
   }[];
-  type DocumentVersionRow = {
-    id: string;
-    title: string;
-    processing_status: string;
-    processing_error: string | null;
-    content_hash: string | null;
-    assurance_observation_parser_version: string | null;
-    assurance_observation_contract_version: string | null;
-  };
-  const documentRows = (documentsResult.data ?? []) as DocumentVersionRow[];
-  const roleByDocument = new Map(links.map((link) => [link.document_id, link.evidence_role]));
+  return loadPublishedObservationEvidence(
+    supabase,
+    projectId,
+    documentRows,
+    new Map(links.map((link) => [link.document_id, link.evidence_role])),
+  );
+}
+
+/**
+ * The same published observation surface without requiring a review: current
+ * version observations of every eligible project document plus per-domain
+ * coverage. A PMO with no review still sees valid partial evidence, its
+ * sources, and its gaps instead of an empty overview.
+ */
+export async function getProjectObservationEvidence(
+  projectId: string,
+): Promise<AssuranceObservationReview> {
+  const { supabase } = await requireProjectMembership(projectId);
+  return loadPublishedObservationEvidence(
+    supabase,
+    projectId,
+    await fetchObservationEvidenceDocuments(supabase, projectId),
+    new Map(),
+  );
+}
+
+async function loadPublishedObservationEvidence(
+  supabase: SupabaseClient,
+  projectId: string,
+  documentRows: ObservationEvidenceDocumentRow[],
+  roleByDocument: Map<string, "baseline" | "current">,
+): Promise<AssuranceObservationReview> {
   const documentIds = documentRows.map((row) => row.id);
   if (documentIds.length === 0) {
     return { documents: [], observations: [], costObservations: [], decisions: [] };
@@ -314,7 +377,7 @@ export async function getAssuranceObservationReview(
     supabase
       .from("cost_observations")
       .select(
-        "id, document_id, source_content_hash, parser_version, contract_version, measure, source_value, normalized_amount, currency, scope_level, scope_label, scope_provenance, evidence_chunk_index, excerpt, page_number, section_label, observation_fingerprint",
+        "id, document_id, source_content_hash, parser_version, contract_version, measure, source_value, normalized_amount, currency, scope_level, scope_label, scope_provenance, period_label, as_of_date, evidence_chunk_index, excerpt, page_number, section_label, observation_fingerprint",
       )
       .eq("project_id", projectId)
       .in("document_id", documentIds)
@@ -365,6 +428,12 @@ export async function getAssuranceObservationReview(
       processingStatus: row.processing_status,
       processingError: row.processing_error,
       jobDiagnostic: jobDiagnostics?.get(row.id) ?? null,
+      reportingPeriod:
+        row.confirmed_reporting_period ??
+        row.detected_reporting_period ??
+        row.reporting_period_hint ??
+        null,
+      contentHash: row.content_hash,
       coverage: coverageDomains.map((domain) => {
         const stored = ((coverageResult.data ?? []) as {
           document_id: string;
@@ -454,6 +523,8 @@ export async function getAssuranceObservationReview(
       cell_reference: string;
       excerpt: string;
     }[] | null;
+    period_label: string | null;
+    as_of_date: string | null;
     excerpt: string;
     page_number: number | null;
     section_label: string | null;
@@ -478,6 +549,8 @@ export async function getAssuranceObservationReview(
         cellReference: item.cell_reference,
         excerpt: item.excerpt,
       })) ?? null,
+      periodLabel: row.period_label,
+      asOfDate: row.as_of_date,
       excerpt: row.excerpt,
       pageNumber: row.page_number,
       sectionLabel: row.section_label,

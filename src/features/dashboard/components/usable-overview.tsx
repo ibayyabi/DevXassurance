@@ -36,6 +36,7 @@ import {
   ReviewEvidenceCard,
   ReviewNavigator,
 } from "@/features/dashboard/components/overview-sections";
+import { PublishedEvidenceOverview } from "@/features/dashboard/components/published-evidence-overview";
 import {
   buildComputedProgress,
   buildCoverageWarnings,
@@ -48,6 +49,7 @@ import {
   buildTrendPoints,
   isAnalysisCurrent,
   reviewCutoff,
+  type PublishedEvidence,
 } from "@/features/dashboard/lib/overview";
 
 export function UsableOverview({
@@ -56,50 +58,83 @@ export function UsableOverview({
   review,
   reviews,
   documents,
+  publishedEvidence,
 }: {
   projectId: string;
   projectName: string;
   review: AssuranceReview | null;
   reviews: AssuranceReview[];
   documents: AssuranceDocument[];
+  /**
+   * Published observations of the project, independent of any review. Present
+   * whenever the page can show evidence without a current review: no review
+   * exists, or the selected review's analysis is stale.
+   */
+  publishedEvidence: PublishedEvidence | null;
 }) {
   if (!review) {
     return (
-      <section className="mx-auto max-w-[1600px] overflow-hidden rounded-2xl border border-ui-border bg-surface shadow-sm">
-        <div className="grid lg:grid-cols-[1.25fr_0.75fr]">
-          <div className="p-7 md:p-10">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-ink-muted">
-              Mulai dari bukti
-            </p>
-            <h2 className="mt-3 max-w-2xl text-4xl font-semibold tracking-tight text-ink md:text-5xl">
-              Siapkan bukti, lalu tinjau dan lakukan asesmen.
-            </h2>
-            <p className="mt-4 max-w-2xl text-base leading-7 text-ink-muted">
-              Unggah bukti untuk {projectName}, tinjau metadata yang disarankan,
-              lalu pilih baseline disetujui dan bukti periode berjalan di
-              Assurance Review untuk menjalankan asesmen Anggaran, Jadwal, dan
-              Risiko.
-            </p>
-            <Button asChild className="mt-7">
-              <Link href={`/app/projects/${projectId}/documents`}>
-                Tambah bukti proyek <ArrowRight className="h-4 w-4" />
-              </Link>
-            </Button>
-          </div>
-          <div className="flex min-h-64 items-center justify-center border-t border-ui-border bg-base p-8 lg:border-l lg:border-t-0">
-            <div className="max-w-xs">
-              <FileSearch className="h-10 w-10 text-ink-muted" />
-              <p className="mt-5 text-xl font-semibold text-ink">
-                Dari bukti ke asesmen
+      <div className="mx-auto max-w-[1600px] space-y-6">
+        <section className="overflow-hidden rounded-2xl border border-l-4 border-ui-border bg-surface shadow-sm">
+          <div className="grid lg:grid-cols-[1.35fr_0.65fr]">
+            <div className="p-6 md:p-8">
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-ink-muted">
+                Ringkasan dari bukti terpublikasi
               </p>
-              <p className="mt-2 text-sm leading-6 text-ink-muted">
-                Unggah berkas, tinjau informasi hasil ekstraksi, pilih bukti dan
-                jalankan asesmen di Assurance Review, lalu siapkan laporan.
+              <h2 className="mt-3 text-4xl font-semibold tracking-tight text-ink md:text-5xl">
+                {projectName}
+              </h2>
+              <p className="mt-3 max-w-3xl text-base leading-7 text-ink-muted">
+                Ringkasan ini disusun dari observasi yang sudah terpublikasi beserta
+                cakupan per domainnya, tanpa membuat Tinjauan Assurance. Nilai yang
+                tampil adalah klaim bersumber dengan kutipan dan versinya;
+                kesenjangan bukti ditampilkan apa adanya dan tidak berarti nol atau
+                kondisi aman.
               </p>
+              <div className="mt-6 flex flex-wrap gap-3">
+                <Button asChild>
+                  <Link href={`/app/projects/${projectId}/documents`}>
+                    Tambah bukti proyek <ArrowRight className="h-4 w-4" />
+                  </Link>
+                </Button>
+                <Button asChild variant="outline">
+                  <Link href={`/app/projects/${projectId}/assurance`}>
+                    Tinjauan mendalam (opsional)
+                  </Link>
+                </Button>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-px border-t border-ui-border bg-ui-border lg:border-l lg:border-t-0">
+              <SummaryStat
+                label="Dokumen berkontribusi"
+                value={`${publishedEvidence?.documents.length ?? 0} berkas`}
+              />
+              <SummaryStat
+                label="Observasi terpublikasi"
+                value={String(publishedEvidence?.eligibleObservationCount ?? 0)}
+              />
+              <SummaryStat
+                label="Dikeluarkan peninjau"
+                value={String(publishedEvidence?.excludedObservationCount ?? 0)}
+              />
+              <SummaryStat label="Tinjauan assurance" value="Belum ada" />
             </div>
           </div>
-        </div>
-      </section>
+        </section>
+        {publishedEvidence ? (
+          <PublishedEvidenceOverview
+            projectId={projectId}
+            evidence={publishedEvidence}
+          />
+        ) : (
+          <section className="mx-auto max-w-[1600px]">
+            <EmptyState
+              title="Observasi terpublikasi tidak tersedia"
+              description="Muat ulang halaman. Tanpa bukti, tidak ada kondisi proyek yang disimpulkan."
+            />
+          </section>
+        )}
+      </div>
     );
   }
 
@@ -208,6 +243,12 @@ export function UsableOverview({
         <p className="rounded-xl bg-status-warn-bg px-3 py-2 text-sm text-status-warn-text" aria-roledescription="Peringatan">
           Hasil analisis tidak mutakhir — nilai per domain tidak disajikan sebagai kondisi terkini. Lihat banner peringatan.
         </p>
+      )}
+      {publishedEvidence && (
+        <PublishedEvidenceOverview
+          projectId={projectId}
+          evidence={publishedEvidence}
+        />
       )}
       <section aria-label={analysisCurrent ? "Indikator proyek terkini" : "Indikator proyek (tidak mutakhir)"}>
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
