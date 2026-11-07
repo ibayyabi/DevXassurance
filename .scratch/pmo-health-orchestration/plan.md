@@ -85,7 +85,7 @@ flowchart TD
 - The atomic claim returns `prior_risk_snapshot` (nearest earlier project-scoped `current` role, versions, observations, risk coverage, and matching decisions); the client must not re-query previous sources after claim.
 - Prior selection/evidence/decision changes and a newly nearer eligible review invalidate dependent in-flight or published analysis; project scoping and 03 decision fencing remain in force.
 - Missing prior review, incomplete coverage, absent/ambiguous/conflicting cutoffs, or unknown identity/scale remain visible gaps; no inferred closure or composite Risk score.
-- Migration order: `202611050001_assurance_observation_decisions.sql` → `202611050003_risk_snapshot_atomicity.sql` → ticket 04 `202611050006_progress_rag_rules.sql`; do not run/deploy from this ticket.
+- Migration order: `202611050001_assurance_observation_decisions.sql` → `202611050003_risk_snapshot_atomicity.sql` → ticket 07 `202611050004_atomic_expired_document_job_retry.sql` → ticket 04 `202611050006_progress_rag_rules.sql`. Merge ticket 07 before ticket 04; do not deploy without the integration handoff.
 
 ### 06 — Overview dan navigasi review — blocker: 04, 05
 
