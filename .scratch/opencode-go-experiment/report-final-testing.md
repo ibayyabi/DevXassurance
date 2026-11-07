@@ -316,3 +316,14 @@ Verifikasi offline: 2 tes baru - (1) fidelity gagal di flash -> retry Gemini -> 
 Dengan kunci baru: kontrol positif lulus lagi (1 fakta grounded); kontrol negatif (grup padat) tetap tertahan "high demand" free tier - dua kali berturut-turut. Tidak diulang lagi sesi ini (anti-loop).
 
 Fallback sadar-kelas tetap terbangun dan terverifikasi offline (lampiran 17); bukti live kontrol negatif menunggu kapasitas Gemini - re-run gratis kapan pun via skrip yang sama.
+
+## Lampiran 19: Level 2 dari artefak - harness verifikasi formula dibangun, temuan generator pertama
+
+`tools/tracker-web` tidak ada di repo ini (hanya di sebutkan di dalam file), jadi verifikasi Level 2 bekerja dari artefak: harness Python (`formula-verify-harness.py`) membaca XML mentah (shared strings, styles, pemetaan sheet agnostik urutan atribut), mengevaluasi ulang 5 bentuk formula (referensi lintas sheet, aritmetika, IF, MAX/MIN), dan membandingkan dengan cache.
+
+**Hasil pertama pada 07_Air_Bersih (60 sel formula): 58 not_computable, 2 mismatch, 0 match** - dan akarnya adalah temuan generator yang nyata:
+1. **Tanggal baseline disimpan sebagai shared string** (F5/G5 = indeks teks, bukan serial angka) - konsisten dengan anotasi `invalid Excel serial` yang dilihat parser. Resolver numerik sederhana tidak dapat mengevaluasi `G5-F5+1` dari teks tanggal.
+2. K5 Weighted Progress cached `0%` vs computed 0.0 - bug normalisasi persen milik harness (string vs angka), bukan generator.
+3. Kasus Duration (H5) computed 2 vs cached 8 butuh resolusi tanggal-teks -> belum dapat disimpulkan.
+
+**Kesimpulan sementara Level 2**: generator menyimpan formula cache + tanggal dengan cara yang tidak konsisten (sebagian serial, sebagian teks) - inkonsistensi ini nyata dan akan tertangkap oleh harness setelah resolusi tanggal-teks ditambahkan. Harness butuh satu iterasi: resolusi tanggal dari shared string (string ISO/serial) + normalisasi persen dua arah. Sifat fail-closed tidak berubah: selama belum terverifikasi, cache formula tetap jalur review.
