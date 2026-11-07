@@ -1,0 +1,259 @@
+{
+  "pipeline": {
+    "progress": [
+      {
+        "scope": "1.1",
+        "percent": 12.5,
+        "as_of": null,
+        "period": null,
+        "sheet": "Workplan & Gantt",
+        "cells": "J5..J5",
+        "excerpt": "% Complete: 12.5% [number format: 0%]"
+      },
+      {
+        "scope": "2.1",
+        "percent": 0,
+        "as_of": null,
+        "period": null,
+        "sheet": "Workplan & Gantt",
+        "cells": "J6..J6",
+        "excerpt": "% Complete: 0% [number format: 0%]"
+      },
+      {
+        "scope": "3.1",
+        "percent": 0,
+        "as_of": null,
+        "period": null,
+        "sheet": "Workplan & Gantt",
+        "cells": "J7..J7",
+        "excerpt": "% Complete: 0% [number format: 0%]"
+      },
+      {
+        "scope": "4.1",
+        "percent": 0,
+        "as_of": null,
+        "period": null,
+        "sheet": "Workplan & Gantt",
+        "cells": "J8..J8",
+        "excerpt": "% Complete: 0% [number format: 0%]"
+      },
+      {
+        "scope": "5.1",
+        "percent": 0,
+        "as_of": null,
+        "period": null,
+        "sheet": "Workplan & Gantt",
+        "cells": "J9..J9",
+        "excerpt": "% Complete: 0% [number format: 0%]"
+      },
+      {
+        "scope": "6.1",
+        "percent": 0,
+        "as_of": null,
+        "period": null,
+        "sheet": "Workplan & Gantt",
+        "cells": "J10..J10",
+        "excerpt": "% Complete: 0% [number format: 0%]"
+      },
+      {
+        "scope": "7.1",
+        "percent": 0,
+        "as_of": null,
+        "period": null,
+        "sheet": "Workplan & Gantt",
+        "cells": "J11..J11",
+        "excerpt": "% Complete: 0% [number format: 0%]"
+      },
+      {
+        "scope": "8.1",
+        "percent": 0,
+        "as_of": null,
+        "period": null,
+        "sheet": "Workplan & Gantt",
+        "cells": "J12..J12",
+        "excerpt": "% Complete: 0% [number format: 0%]"
+      }
+    ],
+    "milestones": [
+      {
+        "scope": "1.1",
+        "label": "Utility inventory approved",
+        "date": "2026-09-18",
+        "sheet": "Workplan & Gantt",
+        "cells": "A5..P5"
+      },
+      {
+        "scope": "1.1",
+        "label": "Utility inventory approved",
+        "date": "2026-09-25",
+        "sheet": "Workplan & Gantt",
+        "cells": "A5..P5"
+      },
+      {
+        "scope": "1.1",
+        "label": "Utility inventory approved",
+        "date": "2026-10-09",
+        "sheet": "Workplan & Gantt",
+        "cells": "A5..P5"
+      },
+      {
+        "scope": "2.1",
+        "label": "Design approved",
+        "date": "2026-09-28",
+        "sheet": "Workplan & Gantt",
+        "cells": "A6..P6"
+      },
+      {
+        "scope": "2.1",
+        "label": "Design approved",
+        "date": "2026-10-09",
+        "sheet": "Workplan & Gantt",
+        "cells": "A6..P6"
+      },
+      {
+        "scope": "2.1",
+        "label": "Design approved",
+        "date": "2026-10-23",
+        "sheet": "Workplan & Gantt",
+        "cells": "A6..P6"
+      },
+      {
+        "scope": "3.1",
+        "label": "Platform/material ready",
+        "date": "2026-10-12",
+        "sheet": "Workplan & Gantt",
+        "cells": "A7..P7"
+      },
+      {
+        "scope": "4.1",
+        "label": "Infrastructure ready",
+        "date": "2026-11-02",
+        "sheet": "Workplan & Gantt",
+        "cells": "A8..P8"
+      },
+      {
+        "scope": "5.1",
+        "label": "Utility data operational",
+        "date": "2026-11-10",
+        "sheet": "Workplan & Gantt",
+        "cells": "A9..P9"
+      },
+      {
+        "scope": "6.1",
+        "label": "Integrated data verified",
+        "date": "2026-11-16",
+        "sheet": "Workplan & Gantt",
+        "cells": "A10..P10"
+      },
+      {
+        "scope": "7.1",
+        "label": "Test cases passed",
+        "date": "2026-11-30",
+        "sheet": "Workplan & Gantt",
+        "cells": "A11..P11"
+      },
+      {
+        "scope": "8.1",
+        "label": "Handover complete",
+        "date": "2026-12-07",
+        "sheet": "Workplan & Gantt",
+        "cells": "A12..P12"
+      }
+    ]
+  },
+  "crossCheck": [
+    {
+      "scope": "1.1",
+      "percent": 12.5,
+      "rawPercent": "12.5%",
+      "rawCellRow": 5,
+      "match": true
+    },
+    {
+      "scope": "2.1",
+      "percent": 0,
+      "rawPercent": "0%",
+      "rawCellRow": 6,
+      "match": true
+    },
+    {
+      "scope": "3.1",
+      "percent": 0,
+      "rawPercent": "0%",
+      "rawCellRow": 7,
+      "match": true
+    },
+    {
+      "scope": "4.1",
+      "percent": 0,
+      "rawPercent": "0%",
+      "rawCellRow": 8,
+      "match": true
+    },
+    {
+      "scope": "5.1",
+      "percent": 0,
+      "rawPercent": "0%",
+      "rawCellRow": 9,
+      "match": true
+    },
+    {
+      "scope": "6.1",
+      "percent": 0,
+      "rawPercent": "0%",
+      "rawCellRow": 10,
+      "match": true
+    },
+    {
+      "scope": "7.1",
+      "percent": 0,
+      "rawPercent": "0%",
+      "rawCellRow": 11,
+      "match": true
+    },
+    {
+      "scope": "8.1",
+      "percent": 0,
+      "rawPercent": "0%",
+      "rawCellRow": 12,
+      "match": true
+    }
+  ],
+  "deltas": [
+    {
+      "session": "2026-10-09_w4",
+      "progress": 8,
+      "milestones": 12,
+      "values": "1.1=12.5%, 2.1=0%, 3.1=0%, 4.1=0%, 5.1=0%, 6.1=0%, 7.1=0%, 8.1=0%"
+    },
+    {
+      "session": "2026-10-16_w5",
+      "progress": 8,
+      "milestones": 14,
+      "values": "1.1=43.75%, 2.1=0%, 3.1=0%, 4.1=0%, 5.1=0%, 6.1=0%, 7.1=0%, 8.1=0%"
+    },
+    {
+      "session": "2026-10-23_w6",
+      "progress": 8,
+      "milestones": 14,
+      "values": "1.1=87.5%, 2.1=0%, 3.1=0%, 4.1=0%, 5.1=0%, 6.1=0%, 7.1=0%, 8.1=0%"
+    },
+    {
+      "session": "2026-10-30_w7",
+      "progress": 8,
+      "milestones": 12,
+      "values": "1.1=100%, 2.1=40%, 3.1=0%, 4.1=0%, 5.1=0%, 6.1=0%, 7.1=0%, 8.1=0%"
+    }
+  ],
+  "liveFacts": [
+    {
+      "fact_type": "issue",
+      "extracted_text": "SUBCONTRACTOR WEEKLY PROGRESS REPORT - PENGELOLAAN UTILITAS is a template for each subcontractor to report to the Project Manager"
+    },
+    {
+      "fact_type": "milestone",
+      "extracted_text": "Reporting period stated as Sep–Dec 2026"
+    }
+  ],
+  "matchRate": "8/8"
+}

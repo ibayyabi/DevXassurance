@@ -112,3 +112,24 @@ Model: `glm-5.3-flash` (temperature 0, `response_format json_object`). Kunci tid
 ## Keputusan
 
 Pipa ekstraksi terhadap file input yang ada kini terbukti: **tidak crash, tidak fabrikasi, fail-closed pada semua kasus tepi yang diuji, dan jalur deterministic-first benar-benar bekerja di korpus nyata** (penghematan beban model: ±408+248 baris tidak lagi memerlukan model). Klaim `READY` produksi tetap **BELUM** — menunggu ground truth manusia dan perbaikan atribusi tanggal model.
+
+## Lampiran 3: ground truth review siap + estimasi biaya per file (gratis, offline)
+
+### Ground truth review — menunggu tinjauan Anda
+
+File: `.scratch/opencode-go-experiment/ground-truth-review-11-pengeloaan.md` (11_Pengelolaan_Utilitas W4). Isinya: 8 baris progress deterministik + 12 milestone dengan sel sumber persisnya, **cross-check otomatis 8/8 cocok** terhadap pembacaan XML mentah workbook yang independen dari parser pipeline (termasuk mapping number-format persen), evolusi W4→W7, dan 2 fakta live dari grup ambigu (termasuk contoh mislabel "periode diketik milestone" untuk dinilai reviewer). Skrip: `ground-truth-review.mjs`; data: `ground-truth-data.json`. Catatan perbaikan kecil: pembacaan styles.xml independen harus membatasi ke blok `cellXfs` (blok `cellStyleXfs` menggeser indeks — sumber mismatch semu 7/8 sebelum diperbaiki, pipeline-nya benar).
+
+### Estimasi biaya run live penuh (dari sweep 100 file + sampel live nyata, provider-reported)
+
+| Tipe file | File | Req/file (rata-rata) | Est. input token/file | Est. output token/file | Est. total korpus |
+|---|---|---|---|---|---|
+| XLSX mingguan ITB | 48 | 50 (22–29 grup × 2 task + 2) | ~159k | ~29k | **~9,0M** |
+| XLSX baseline ITB | 4 | 44 | ~140k | ~26k | ~0,66M |
+| DOCX (MoM + demo) | 21 | 9 | ~24k | ~4,5k | ~0,6M |
+| TXT/CSV | 12 | 4 | ~8k | ~1,4k | ~0,11M |
+| PDF | 6 | 4 | ~8k | ~1,4k | ~0,06M |
+| **Total korpus 100 file** | **100** | **2.846 request** | | | **~10,4M token (±87% input)** |
+
+Sampel dasar per panggilan (rata-rata terukur): classification 936/137, analysis naratif 1.582/1.020, analysis XLSX 3.053/1.132, domain naratif 2.282/308, domain XLSX 3.528/62, summary 512/136. Satuan token, bukan biaya uang.
+
+Faktor yang mengubah angka: (1) **loop koreksi** +20–50% request (teramati 1 loop pada Amber naratif; grup ITB lolos attempt pertama); (2) **prompt caching penyedia** berpotensi memangkas biaya input secara besar (pilot melihat input cached) — belum diukur; (3) reasoning token dihitung provider ke `max_tokens`. Penurunan biaya paling menjanjikan berikutnya: memangkas ukuran prompt source-reference dan mengeksplorasi caching — bukan bagian ronde ini.
