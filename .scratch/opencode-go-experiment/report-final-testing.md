@@ -271,3 +271,11 @@ Kurva pada `07_Air_Bersih_Weekly` (21 grup, mock, 0 token; total termasuk retry 
 - chunks=1: +16% total; prompt terbesar −41% (27,9k)
 
 Trade-off terukur: memperkecil kepadatan menaikkan total biaya moderat (scaffolding terduplikasi) tetapi memangkas prompt terbesar drastis. Apakah kepadatan rendah benar-benar memperbaiki kelas numeric-mismatch hanya bisa dibuktikan live (est. ±320k token untuk chunks=1) — menunggu keputusan anggaran; fallback Gemini free-tier (desain sadar-kelas di diskusi) tetap jalurnya bila lever ini tidak cukup.
+
+## Lampiran 13: Opsi A — gerbang kepadatan-rendah (chunks=1) pada workbook asli
+
+80 request, 334k in / 64k out (±398k token). Hasil: `ok: true` — **13/27 grup completed, 14 gagal**. Pembanding dengan chunks=3 (lampiran 10: 13/21 completed, 8 gagal):
+
+**Kepadatan rendah TIDAK menurunkan rasio kegagalan** — bahkan naik (14/27 = 52% vs 8/21 = 38%; jumlah grup memang bertambah karena partisi). Kelas numeric-mismatch tetap muncul (×4), header candidate (×3), milestone (×3) — model tetap memparafrase angka meski konteks jarang. Yang ikut naik: jumlah request (+27) dan total token (+130k vs chunks=3).
+
+**Kesimpulan keputusan**: lever kepadatan konteks **terbukti tidak efektif** untuk kelas gagal ini pada model ini — biaya lebih tinggi, rasio gagal tidak membaik. Sisa jalur: fallback Gemini flash generasi-3.8 (desain sadar-kelas, free tier) atau terima needs_review sebagai desain. Grup completed tersimpan di cache /41.
