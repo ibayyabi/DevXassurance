@@ -240,7 +240,7 @@ test("a published source snapshot runs the real pipeline and carries its provena
     assert.equal(outcome.status, "published");
     const published = recorder.calls.find((call) => call.name === "publish_assurance_assessment_snapshot");
     const domains = published.args.p_findings.map((finding) => finding.domain).sort();
-    assert.deepEqual(domains, ["budget", "schedule", "risk"]);
+    assert.deepEqual(domains, ["budget", "risk", "schedule"]);
     assert.ok(
       Array.isArray(published.args.p_metadata.results.progress_observations),
       "reported progress is published beside the computed findings",

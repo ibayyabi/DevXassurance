@@ -32,7 +32,6 @@ import {
   mapRiskMappingRow,
   mapWbsMappingRow,
   milestoneMappingColumns,
-  riskMappingColumns,
   wbsMappingColumns,
   type CostBaselineRow,
   type CostObservationRow,
@@ -165,6 +164,22 @@ export type PreviousRiskSelection = {
   coverageComplete: boolean;
   cutoffComplete: boolean;
   gapReason: string | null;
+};
+export type ClaimRiskMapping = {
+  id: string;
+  project_id: string;
+  source_label: string;
+  canonical_label: string;
+  state: "proposed" | "accepted" | "rejected";
+  proposed_by_model: boolean;
+  note: string | null;
+  created_by: string | null;
+  accepted_by: string | null;
+  accepted_at: string | null;
+};
+export type ClaimRiskMappings = {
+  risk_identity_mappings: ClaimRiskMapping[];
+  risk_scale_mappings: ClaimRiskMapping[];
 };
 export type PriorRiskSnapshotClaim = {
   current_cutoff: string | null;
@@ -348,34 +363,25 @@ export async function buildScheduleComparison(
 /**
  * Item-level risk comparison for this review. Risks are matched only by exact
  * source ID or a reviewer-accepted identity mapping, and ratings compare only
- * within the same scale or an accepted scale mapping; both mapping sets are
- * reusable within the project. No project Risk score or composite is produced —
- * the Risk domain condition stays separate.
+ * within the same scale or an accepted scale mapping. The applied mappings
+ * come from the atomic claim — all accepted project-scoped mappings, exactly
+ * the set its reference fingerprint captured — never a post-claim table read,
+ * so a change after claim cannot silently alter the comparison. No project
+ * Risk score or composite is produced — the Risk domain condition stays
+ * separate.
  */
-export async function buildRiskSnapshotComparison(
-  supabase: SupabaseClient,
-  projectId: string,
+export function buildRiskSnapshotComparison(
+  claimMappings: ClaimRiskMappings | undefined,
   extraction: ReviewExtraction,
   previous: PreviousRiskSelection,
   currentCoverageComplete: boolean,
-): Promise<RiskSnapshotComparisonResult> {
-  const [identityResult, scaleResult] = await Promise.all([
-    supabase
-      .from("risk_identity_mappings")
-      .select(riskMappingColumns)
-      .eq("project_id", projectId)
-      .eq("state", "accepted"),
-    supabase
-      .from("risk_scale_mappings")
-      .select(riskMappingColumns)
-      .eq("project_id", projectId)
-      .eq("state", "accepted"),
-  ]);
-  if (identityResult.error) throw new Error(identityResult.error.message);
-  if (scaleResult.error) throw new Error(scaleResult.error.message);
-
-  const identityMappings = ((identityResult.data ?? []) as RiskMappingRow[]).map(mapRiskMappingRow);
-  const scaleMappings = ((scaleResult.data ?? []) as RiskMappingRow[]).map(mapRiskMappingRow);
+): RiskSnapshotComparisonResult {
+  const identityMappings = (claimMappings?.risk_identity_mappings ?? [])
+    .filter((row) => row.state === "accepted")
+    .map((row) => mapRiskMappingRow(row as unknown as RiskMappingRow));
+  const scaleMappings = (claimMappings?.risk_scale_mappings ?? [])
+    .filter((row) => row.state === "accepted")
+    .map((row) => mapRiskMappingRow(row as unknown as RiskMappingRow));
   const currentSnapshots = extraction.riskItems.currentSnapshots;
   const comparison = buildRiskComparison({
     previousSnapshots: previous.snapshots,

@@ -20,6 +20,7 @@ import {
   summarizeObservationDecisions,
   validRiskCutoff,
   type AssuranceSource,
+  type ClaimRiskMappings,
   type ObservationDecision,
   type PriorRiskSnapshotClaim,
   type ProgressRagRuleSnapshot,

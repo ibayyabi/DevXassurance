@@ -96,9 +96,9 @@ before(() => {
     insert into public.projects(id,organization_id,name) values('${project}','${id(9)}','Test'),('${otherProject}','${id(9)}','Other');
     insert into public.project_members(project_id,user_id,role) values
       ('${project}','${user}','admin'),('${otherProject}','${user}','admin'),('${project}','${reviewer}','pmo_reviewer');
-    insert into public.assurance_reviews(id,project_id,reporting_period,title,created_by)
-      values('${review}','${project}','2026-10-16','October','${user}'),
-            ('${otherReview}','${otherProject}','2026-10-16','Other','${user}');
+    insert into public.assurance_reviews(id,project_id,reporting_period,cutoff_precision,title,created_by)
+      values('${review}','${project}','2026-10-16','date','October','${user}'),
+            ('${otherReview}','${otherProject}','2026-10-16','date','Other','${user}');
     insert into public.documents(id,project_id,uploader_id,document_type,title,file_name,file_size,mime_type,storage_path,processing_status,content_hash)
       select x,'${project}','${user}','progress_report','Evidence','evidence.pdf',10,'application/pdf',x::text,'completed',repeat('a',64)
       from unnest(array['${base}','${current}','${alternate}']::uuid[]) x;

@@ -32,6 +32,7 @@ import {
   summarizeObservationCoverage,
   summarizeObservationDecisions,
   type AssuranceSource,
+  type ClaimRiskMappings,
   type ObservationCoverageSummary,
   type ObservationDecision,
   type PriorRiskSnapshotClaim,
@@ -57,6 +58,7 @@ export type AutomaticAssessmentClaim = {
   references: Record<string, unknown> | null;
   progress_rag_rule: ProgressRagRuleSnapshot;
   prior_risk_snapshot?: PriorRiskSnapshotClaim;
+  risk_mappings?: ClaimRiskMappings;
 };
 
 export type AutomaticAssessmentOutcome =
@@ -145,8 +147,8 @@ export async function assessClaimedJob(
       supabase, claim.project_id, claim.cutoff, reviewData.extraction,
       claim.progress_rag_rule ?? null,
     );
-    const risk = await buildRiskSnapshotComparison(
-      supabase, claim.project_id, reviewData.extraction, previousRisk, currentRiskCoverageComplete,
+    const risk = buildRiskSnapshotComparison(
+      claim.risk_mappings, reviewData.extraction, previousRisk, currentRiskCoverageComplete,
     );
     reviewData.extraction.risk = buildRiskAssessment(
       reviewData.extraction, risk.comparison, reviewData.riskStatements,

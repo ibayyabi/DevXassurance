@@ -53,7 +53,7 @@ insert into public.documents (
    repeat('b', 64), 'xass/1', 'pmo-assurance-observations/1', 'current', '2026-02-28'),
   -- needs_review with validated coverage contributes valid partial evidence.
   ('80000000-0000-4000-8000-000000000012', '80000000-0000-4000-8000-000000000003',
-   '80000000-0000-4000-8000-000000000001', 'mom', 'Week 2 minutes', 'w2-mom.pdf',
+   '80000000-0000-4000-8000-000000000001', 'meeting_minutes', 'Week 2 minutes', 'w2-mom.pdf',
    10, 'application/pdf', '80000000-0000-4000-8000-000000000003/w2-mom.pdf', 'needs_review',
    repeat('c', 64), 'xass/1', 'pmo-assurance-observations/1', 'current', '2026-02-28'),
   -- needs_review without coverage: published text, but not eligible evidence.

@@ -22,6 +22,15 @@ const wbsComparison = load('src/features/assurance/lib/wbs-comparison.ts', {'./c
 const scheduleComparison = load('src/features/assurance/lib/schedule-comparison.ts', {'./analysis':analysis,'./wbs-comparison':wbsComparison});
 const riskComparison = parse('src/features/assurance/lib/risk-comparison.ts');
 const reviewPeriod = parse('src/features/assurance/lib/review-period.ts');
+const analysisPipeline = load('src/features/assurance/lib/analysis-pipeline.ts', {
+  './analysis': analysis,
+  './cost-evidence': costEvidence,
+  './cost-queries': costQueries,
+  './risk-comparison': riskComparison,
+  './schedule-comparison': scheduleComparison,
+  './wbs-comparison': wbsComparison,
+  './review-period': reviewPeriod,
+});
 const role = parse('src/features/projects/lib/roles.ts');
 function fixture(options = {}) {
   const calls = [], uploads = [], removals = [], renders = [], inserts = [], mutations = [];
@@ -29,6 +38,13 @@ function fixture(options = {}) {
     attempt_id: 'attempt-1', evidence_count: 2,
     findings: ['budget','schedule','risk'].map(domain => ({ domain, condition: 'more_evidence_required',
       headline: 'Missing evidence', explanation: 'More evidence required', confirmation_state: 'ai_extracted' })), actions: [],
+    snapshot: {
+      snapshotId: 'attempt-1', snapshotVersion: 'attempt-1', snapshotCutoff: '2026-10-31',
+      cutoffLabel: 'October 2026', reviewId: 'review-1', evidenceCount: 2,
+      values: [], gaps: ['budget','schedule','risk'].map(domain => ({ domain, reason: 'Missing evidence' })),
+      actions: [],
+      sources: [{ label: 'Assessment snapshot', source: 'assurance_reviews:review-1#attempt-1' }],
+    },
   };
   const coverage = ['budget','schedule','progress','risk'].map(domain => ({
     domain, state:'processed', total_groups:1, processed_groups:1, reason:null,
@@ -63,7 +79,7 @@ function fixture(options = {}) {
         update(values){mutations.push({table,operation:'update',values});return this},
         delete(){mutations.push({table,operation:'delete'});return this},
         insert(row){mutations.push({table,operation:'insert',row});inserts.push({table,row});return Promise.resolve({data:null,error:options.insertError})},
-        then(resolve){const data=table==='assurance_reviews'?[{id:'review-1',reporting_period:'2026-10-01',title:'October',status:'findings_ready'}]:rows;
+        then(resolve){const data=table==='assurance_reviews'?[{id:'review-1',reporting_period:'2026-10-01',title:'October',status:'findings_ready',cutoff_precision:'month',analysis_metadata:{last_success:{id:'attempt-1'}}}]:rows;
           return Promise.resolve({data,error:options.queryError}).then(resolve)}};
       assert.ok(['assurance_reviews','report_previews','cost_baselines','cost_observations','wbs_mappings','milestone_mappings','risk_identity_mappings','risk_scale_mappings'].includes(table),`Unexpected table access ${table}`);
       return query;
@@ -82,6 +98,10 @@ function fixture(options = {}) {
     '@/features/assurance/lib/schedule-comparison':scheduleComparison,
     '@/features/assurance/lib/risk-comparison':riskComparison,
     '@/features/assurance/lib/review-period':reviewPeriod,
+    '@/features/assurance/lib/analysis-pipeline':analysisPipeline,
+    '@/features/reports/lib/constants':parse('src/features/reports/lib/constants.ts'),
+    '@/features/reports/lib/snapshot':load('src/features/reports/lib/snapshot.ts', {'@/features/assurance/lib/review-period':reviewPeriod}),
+    '@/features/reports/lib/snapshot-source':load('src/features/reports/lib/snapshot-source.ts', {'@/features/assurance/lib/review-period':reviewPeriod,'./snapshot':parse('src/features/reports/lib/snapshot.ts')}),
     '@/features/reports/lib/render-report':{renderReportPdf:async(input)=>{renders.push(input);return Buffer.from('PDF')},
       renderReportDocx:async(input)=>{renders.push(input);return Buffer.from('DOCX')}},
   };
@@ -258,16 +278,17 @@ test('overlap claim errors prevent publication and publication errors are not ig
   assert.equal(broken.calls.at(-1).input.p_error,'Publication rollback');
 });
 test('report generation checks context then persists with the same successful analysis',async()=>{
-  const f=fixture();await f.reports.generateReportPreview(form({assuranceReviewId:'review-1',audience:'Sponsor',detailLevel:'Concise'}));
+  const f=fixture();await f.reports.generateReportPreview(form({assuranceReviewId:'review-1',audience:'PMO',detailLevel:'Standard'}));
   assert.equal(f.calls[0].input.p_operation,'context');assert.equal(f.calls[1].input.p_operation,'create');
   assert.equal(f.calls[1].input.p_attempt_id,'attempt-1');
-  assert.match(f.calls[1].input.p_payload.sections.project_health,/More Evidence Required/);
+  assert.match(f.calls[1].input.p_payload.sections.key_findings,/Gap - Budget: Missing evidence/);
+  assert.equal(f.calls[1].input.p_payload.snapshot_id,'attempt-1');
 });
 test('stale report context and stale approval are rejected before further writes',async()=>{
   const f=fixture({rpc:()=>({error:{message:'Analysis is not current'}})});
-  await assert.rejects(()=>f.reports.generateReportPreview(form({audience:'Sponsor',detailLevel:'Concise'})),/not current/);
+  await assert.rejects(()=>f.reports.generateReportPreview(form({audience:'PMO',detailLevel:'Standard'})),/not current/);
   await assert.rejects(()=>f.reports.markReportReviewed(form({previewId:'preview-1'})),/not current/);
-  const legacy=fixture({legacy:true});await assert.rejects(()=>legacy.reports.markReportReviewed(form({previewId:'preview-1'})),/current analysis/);
+  const legacy=fixture({legacy:true});await assert.rejects(()=>legacy.reports.markReportReviewed(form({previewId:'preview-1'})),/published assessment snapshot/);
   assert.equal(legacy.calls.length,0);
 });
 test('export validates before rendering, revalidates after upload, and cleans obsolete output',async()=>{
@@ -283,7 +304,7 @@ test('export validates before rendering, revalidates after upload, and cleans ob
 test('restricted server action callers cannot claim or approve',async()=>{
   const f=fixture({role:'pmo_reviewer'});
   await assert.rejects(()=>f.assurance.runAssuranceAnalysis(form()),/cannot manage/);
-  await assert.rejects(()=>f.reports.markReportReviewed(form({previewId:'preview-1'})),/cannot manage/);
+  await assert.rejects(()=>f.reports.markReportReviewed(form({previewId:'preview-1'})),/cannot (manage|review) reports?/);
   assert.equal(f.calls.length,0);
 });
 test('unregistered upload cleanup failures are explicit without changing storage permissions',async()=>{

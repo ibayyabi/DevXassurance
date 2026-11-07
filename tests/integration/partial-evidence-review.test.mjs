@@ -34,6 +34,15 @@ const scheduleComparison = load("src/features/assurance/lib/schedule-comparison.
 });
 const riskComparison = parse("src/features/assurance/lib/risk-comparison.ts");
 const reviewPeriod = parse("src/features/assurance/lib/review-period.ts");
+const analysisPipeline = load("src/features/assurance/lib/analysis-pipeline.ts", {
+  "./analysis": analysis,
+  "./cost-evidence": costEvidence,
+  "./cost-queries": costQueries,
+  "./risk-comparison": riskComparison,
+  "./schedule-comparison": scheduleComparison,
+  "./wbs-comparison": wbsComparison,
+  "./review-period": reviewPeriod,
+});
 const role = parse("src/features/projects/lib/roles.ts");
 
 const coverageRow = (domain, state, total = 1, processed = 1, reason = null) => ({
@@ -135,6 +144,7 @@ function fixture(options = {}) {
     "@/features/assurance/lib/schedule-comparison": scheduleComparison,
     "@/features/assurance/lib/risk-comparison": riskComparison,
     "@/features/assurance/lib/review-period": reviewPeriod,
+    "@/features/assurance/lib/analysis-pipeline": analysisPipeline,
   };
   return {
     assurance: load("src/features/assurance/actions/assurance-actions.ts", dependencies),
