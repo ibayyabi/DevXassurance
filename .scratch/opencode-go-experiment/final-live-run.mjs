@@ -19,12 +19,14 @@ const ts = require("typescript");
 const MAX_REQUESTS = Number(process.env.LIVE_MAX_REQUESTS ?? "6");
 const MAX_OUTPUT_TOKENS = 4096;
 const REASONING_HEADROOM_TOKENS = 4096;
-const MAX_INPUT_CHARS = 12000;
-const MAX_TOTAL_INPUT_TOKENS = 60000;
-const MAX_TOTAL_OUTPUT_TOKENS = 24000;
+const MAX_INPUT_CHARS = Number(process.env.LIVE_MAX_INPUT_CHARS ?? "12000");
+const MAX_TOTAL_INPUT_TOKENS = Number(process.env.LIVE_MAX_TOTAL_INPUT_TOKENS ?? "60000");
+const MAX_TOTAL_OUTPUT_TOKENS = Number(process.env.LIVE_MAX_TOTAL_OUTPUT_TOKENS ?? "24000");
 const PROVIDER_BASE = "https://opencode.ai/zen/go/v1";
 const OUT = process.env.LIVE_OUT_DIR ?? ".local-evaluation/final-testing/live";
 mkdirSync(OUT, { recursive: true });
+// The document under test: any parseable fixture file.
+const LIVE_FILE = process.env.LIVE_FILE ?? "demo-evidence-fixtures/amber-alpha-infrastructure/2026-01-progress-report-amber.txt";
 
 let envKey = null;
 try {
@@ -125,6 +127,7 @@ globalThis.fetch = async (url, init = {}) => {
     throw new StopError(`stopped: refusing to send outside the approved provider endpoint: ${String(url).slice(0, 80)}`);
   }
   requests += 1;
+  const requestNumber = requests; // capture before any await: concurrent responses must not share a number
   const t0 = performance.now();
   const requestBody = {
     ...body,
@@ -134,20 +137,35 @@ globalThis.fetch = async (url, init = {}) => {
   };
   let response;
   try {
-    response = await realFetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${envKey}`,
-        "x-opencode-session": process.env.OPENCODE_GO_SESSION ?? `final-live-${randomUUID().slice(0, 8)}`,
-        "User-Agent": "devxassurance-final-live/1.0",
-      },
-      body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(120000),
-    });
+    // Transient socket errors (connection reuse drops) never reach the
+    // provider, so retrying them spends nothing; configuration failures
+    // (DNS, refused) still hard-stop the run.
+    let attempts = 0;
+    for (;;) {
+      attempts += 1;
+      try {
+        response = await realFetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${envKey}`,
+            "x-opencode-session": process.env.OPENCODE_GO_SESSION ?? `final-live-${randomUUID().slice(0, 8)}`,
+            "User-Agent": "devxassurance-final-live/1.0",
+          },
+          body: JSON.stringify(requestBody),
+          signal: AbortSignal.timeout(120000),
+        });
+        break;
+      } catch (error) {
+        const code = error instanceof Error ? String(error.cause?.code ?? "") : "";
+        const transient = ["UND_ERR_SOCKET", "ECONNRESET", "ETIMEDOUT", "EPIPE", "UND_ERR_CONNECT_TIMEOUT"].includes(code);
+        if (transient && attempts < 3) continue;
+        throw error;
+      }
+    }
   } catch (error) {
     stop(`dispatch_failed: ${error instanceof Error ? (error.cause?.code ?? error.cause?.message ?? error.message) : String(error)}`.slice(0, 120));
-    ledger.push({ n: requests, task: label, status: null, error: String(error?.message ?? error).slice(0, 200) });
+    ledger.push({ n: requestNumber, task: label, status: null, error: String(error?.message ?? error).slice(0, 200) });
     persistLedger();
     throw error;
   }
@@ -160,10 +178,11 @@ globalThis.fetch = async (url, init = {}) => {
     ? usage.completion_tokens - (usage.completion_tokens_details?.reasoning_tokens ?? 0)
     : null;
   const record = {
-    n: requests, task: label, model: envelope?.model ?? MODEL,
+    n: requestNumber, task: label, model: envelope?.model ?? MODEL,
     prompt_chars: promptChars, status: response.status, latencyMs,
     usage: usage ? {
       prompt_tokens: usage.prompt_tokens ?? null,
+      cached_tokens: usage.prompt_tokens_details?.cached_tokens ?? null,
       completion_tokens: usage.completion_tokens ?? null,
       reasoning_tokens: usage.completion_tokens_details?.reasoning_tokens ?? null,
       visible_completion_tokens: visibleTokens,
@@ -215,7 +234,20 @@ async function runDocument(name, fileName, buffer) {
     outcomes[name] = { parse_ok: false, errorCode: parsed.errorCode };
     return;
   }
-  const rows = new Map();
+  // File-backed group store: a re-run of this gate reuses completed groups
+  // through the content-addressed /41 cache instead of paying for them again.
+  const storeFile = join(OUT, "group-store.json");
+  let rows = {};
+  try { rows = JSON.parse(readFileSync(storeFile, "utf8")); } catch {}
+  const store = {
+    async loadGroups() {
+      return Object.values(rows);
+    },
+    async saveGroup(row) {
+      rows[`${row.documentId}:${row.groupKey}`] = row;
+      writeFileSync(storeFile, JSON.stringify(rows));
+    },
+  };
   try {
     const result = await extractDocumentGroups(
       {
@@ -226,7 +258,7 @@ async function runDocument(name, fileName, buffer) {
       },
       parsed.chunks,
       parsed.parserMetadata,
-      { async loadGroups() { return [...rows.values()]; }, async saveGroup(row) { rows.set(row.groupKey, row); } },
+      store,
     );
     outcomes[name] = {
       parse_ok: true,
@@ -246,11 +278,14 @@ async function runDocument(name, fileName, buffer) {
   }
 }
 
-// 1) Full live pipeline over the smallest real fixture (fictional demo data).
-const amberTxt = "demo-evidence-fixtures/amber-alpha-infrastructure/2026-01-progress-report-amber.txt";
+// 1) Full live pipeline over the document under test (no mocks at all).
 {
-  const buffer = readFileSync(amberTxt);
-  await runDocument("amber_txt_end_to_end", amberTxt.split("/").pop(), buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength));
+  const buffer = readFileSync(LIVE_FILE);
+  await runDocument(
+    LIVE_FILE.split("/").pop().replace(/[^a-z0-9._-]/gi, "_"),
+    LIVE_FILE.split("/").pop(),
+    buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
+  );
 }
 
 // 2) Injection probe: one synthetic chunk through the full live pipeline. The
