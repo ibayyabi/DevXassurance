@@ -25,12 +25,10 @@ import {
   mapRiskMappingRow,
   mapWbsMappingRow,
   milestoneMappingColumns,
-  riskMappingColumns,
   wbsMappingColumns,
   type CostBaselineRow,
   type CostObservationRow,
   type MilestoneMappingRow,
-  type RiskMappingRow,
   type WbsMappingRow,
 } from "@/features/assurance/lib/cost-queries";
 import {
@@ -40,6 +38,7 @@ import {
 import {
   buildMilestoneComparisons,
   buildProgressComparison,
+  buildProgressComputedStatuses,
   buildScheduleFinding,
   milestoneSourceLabels,
 } from "@/features/assurance/lib/schedule-comparison";
@@ -123,6 +122,22 @@ type PreviousRiskSelection = {
   cutoffComplete: boolean;
   gapReason: string | null;
 };
+type ClaimRiskMapping = {
+  id: string;
+  project_id: string;
+  source_label: string;
+  canonical_label: string;
+  state: "proposed" | "accepted" | "rejected";
+  proposed_by_model: boolean;
+  note: string | null;
+  created_by: string | null;
+  accepted_by: string | null;
+  accepted_at: string | null;
+};
+type ClaimRiskMappings = {
+  risk_identity_mappings: ClaimRiskMapping[];
+  risk_scale_mappings: ClaimRiskMapping[];
+};
 type PriorRiskSnapshotClaim = {
   current_cutoff: string | null;
   review: PreviousRiskReview | null;
@@ -130,6 +145,14 @@ type PriorRiskSnapshotClaim = {
   observation_decisions: ObservationDecision[];
   gap_reason: string | null;
 };
+type ProgressRagRuleSnapshot = {
+  id: string;
+  rule_version: string;
+  thresholds: Record<string, unknown>;
+  note: string | null;
+  approved_by: string;
+  approved_at: string;
+} | null;
 type AssuranceAnalysisClaim = {
   attempt_id: string;
   sources: AssuranceSource[];
@@ -137,6 +160,8 @@ type AssuranceAnalysisClaim = {
   reference_fingerprint?: string;
   reference_versions?: Record<string, unknown>;
   prior_risk_snapshot?: PriorRiskSnapshotClaim;
+  progress_rag_rule: ProgressRagRuleSnapshot;
+  risk_mappings?: ClaimRiskMappings;
 };
 
 export async function createAssuranceReview(formData: FormData): Promise<void> {
@@ -254,9 +279,11 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
     const wbs = await buildWbsComparison(
       supabase, projectId, reportingPeriod, costDecisions.baseline, costDecisions.current,
     );
-    const schedule = await buildScheduleComparison(supabase, projectId, reviewData.extraction);
-    const risk = await buildRiskSnapshotComparison(
-      supabase, projectId, reviewData.extraction, previousRisk, currentRiskCoverageComplete,
+    const schedule = await buildScheduleComparison(
+      supabase, projectId, reportingPeriod, reviewData.extraction, claim.progress_rag_rule ?? null,
+    );
+    const risk = buildRiskSnapshotComparison(
+      claim.risk_mappings, reviewData.extraction, previousRisk, currentRiskCoverageComplete,
     );
     reviewData.extraction.risk = buildRiskAssessment(
       reviewData.extraction, risk.comparison, reviewData.riskStatements,
@@ -292,6 +319,7 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
           comparison_engine: {
             budget: "pmo_cost_contract_v1",
             schedule: "pmo_schedule_observations_v1",
+            progress: "pmo_progress_cut_off_v1",
             risk: "pmo_risk_observations_v2",
           },
           thresholds: {
@@ -333,6 +361,9 @@ export async function runAssuranceAnalysis(formData: FormData): Promise<void> {
           schedule_milestone_labels: schedule.milestoneLabels,
           progress_observations: schedule.progress,
           progress_source_observations: reviewData.progressSourceObservations,
+          progress_source_rag_claims: reviewData.progressSourceRagClaims,
+          progress_rag_rule: schedule.progressRagRule,
+          progress_computed_statuses: schedule.progressComputedStatuses,
           risk_item_findings: risk.comparison.items,
           risk_unidentified_items: risk.comparison.unidentified,
           risk_source_ids: risk.sourceIds,
@@ -945,7 +976,9 @@ async function buildWbsComparison(
 async function buildScheduleComparison(
   supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
   projectId: string,
+  cutoffDate: string,
   extraction: ReviewExtraction,
+  ragRule: ProgressRagRuleSnapshot,
 ) {
   const [milestoneMappingResult, wbsMappingResult] = await Promise.all([
     supabase
@@ -977,45 +1010,50 @@ async function buildScheduleComparison(
   const progress = buildProgressComparison({
     observations: extraction.progress.observations,
     wbsMappings,
+    cutoffDate,
+  });
+  const progressComputedStatuses = buildProgressComputedStatuses({
+    observations: extraction.progress.observations,
+    wbsMappings,
+    cutoffDate,
+    rule: ragRule,
   });
   const milestoneLabels = milestoneSourceLabels({
     baselineMilestones: extraction.schedule.baselineMilestones,
     currentMilestones: extraction.schedule.currentMilestones,
   });
-  return { finding, comparisons, progress, milestoneLabels };
+  return {
+    finding,
+    comparisons,
+    progress,
+    progressComputedStatuses,
+    milestoneLabels,
+    progressRagRule: ragRule,
+  };
 }
 
 /**
  * Item-level risk comparison for this review. Risks are matched only by exact
  * source ID or a reviewer-accepted identity mapping, and ratings compare only
- * within the same scale or an accepted scale mapping; both mapping sets are
- * reusable within the project. No project Risk score or composite is produced —
- * the Risk domain condition stays separate.
+ * within the same scale or an accepted scale mapping. The applied mappings
+ * come from the atomic claim — all accepted project-scoped mappings, exactly
+ * the set its reference fingerprint captured — never a post-claim table read,
+ * so a change after claim cannot silently alter the comparison. No project
+ * Risk score or composite is produced — the Risk domain condition stays
+ * separate.
  */
-async function buildRiskSnapshotComparison(
-  supabase: Awaited<ReturnType<typeof requireProjectMembership>>["supabase"],
-  projectId: string,
+function buildRiskSnapshotComparison(
+  claimMappings: ClaimRiskMappings | undefined,
   extraction: ReviewExtraction,
   previous: PreviousRiskSelection,
   currentCoverageComplete: boolean,
 ) {
-  const [identityResult, scaleResult] = await Promise.all([
-    supabase
-      .from("risk_identity_mappings")
-      .select(riskMappingColumns)
-      .eq("project_id", projectId)
-      .eq("state", "accepted"),
-    supabase
-      .from("risk_scale_mappings")
-      .select(riskMappingColumns)
-      .eq("project_id", projectId)
-      .eq("state", "accepted"),
-  ]);
-  if (identityResult.error) throw new Error(identityResult.error.message);
-  if (scaleResult.error) throw new Error(scaleResult.error.message);
-
-  const identityMappings = ((identityResult.data ?? []) as RiskMappingRow[]).map(mapRiskMappingRow);
-  const scaleMappings = ((scaleResult.data ?? []) as RiskMappingRow[]).map(mapRiskMappingRow);
+  const identityMappings = (claimMappings?.risk_identity_mappings ?? [])
+    .filter((row) => row.state === "accepted")
+    .map((row) => mapRiskMappingRow(row));
+  const scaleMappings = (claimMappings?.risk_scale_mappings ?? [])
+    .filter((row) => row.state === "accepted")
+    .map((row) => mapRiskMappingRow(row));
   const currentSnapshots = extraction.riskItems.currentSnapshots;
   const comparison = buildRiskComparison({
     previousSnapshots: previous.snapshots,
@@ -1161,6 +1199,7 @@ function buildReviewExtraction(
 ): {
   extraction: ReviewExtraction;
   progressSourceObservations: Record<string, unknown>[];
+  progressSourceRagClaims: Record<string, unknown>[];
   riskStatements: {
     current: { source: AssuranceSource; row: AssuranceObservationRow }[];
     baseline: { source: AssuranceSource; row: AssuranceObservationRow }[];
@@ -1222,6 +1261,11 @@ function buildReviewExtraction(
     const observation = row.observation;
     const scopeLevel = observation.scope_level;
     if (scopeLevel !== "project" && scopeLevel !== "wbs" && scopeLevel !== "unknown") return [];
+    const rawValueLocation = observation.value_source_location;
+    const valueLocation = typeof rawValueLocation === "object" &&
+      rawValueLocation !== null && !Array.isArray(rawValueLocation)
+      ? rawValueLocation as Record<string, unknown>
+      : null;
     const correction = corrections.get(row.id);
     const correctedPercent = typeof correction?.corrected_observation?.percent === "number"
       ? correction.corrected_observation.percent
@@ -1233,10 +1277,25 @@ function buildReviewExtraction(
       percent: correctedPercent ??
         (typeof observation.percent === "number" ? observation.percent : null),
       sourcePercent: typeof observation.percent === "number" ? observation.percent : null,
+      // measure_kind is the extraction's cited-source proof; a reviewer
+      // correction changes the percent, never the measurement kind.
+      measureKind: observation.measure_kind === "planned" || observation.measure_kind === "actual"
+        ? observation.measure_kind
+        : "unspecified",
       periodLabel: snapshotText(observation.period_label),
+      periodBasis: observation.period_basis === "cumulative" ||
+          observation.period_basis === "weekly" ||
+          observation.period_basis === "monthly" ||
+          observation.period_basis === "daily" ||
+          observation.period_basis === "paired_variance_formula"
+        ? observation.period_basis
+        : null,
       asOfDate: snapshotText(observation.as_of_date),
       excerpt: row.excerpt,
-      sourceRef: assuranceEvidenceReference(source, row),
+      sourceRef: {
+        ...assuranceEvidenceReference(source, row),
+        valueSourceLocation: sourceLocationRecord(valueLocation),
+      },
       reviewDecision: correction
         ? { decision: "corrected" as const, percent: correctedPercent, reason: correction.reason }
         : decisions.some((item) =>
@@ -1325,6 +1384,46 @@ function buildReviewExtraction(
     source_location: sourceLocationRecord(row.source_location),
   }));
 
+  // A source-reported RAG label (a cited cell such as "Green") stays exactly
+  // what the source claims: it is published beside the comparison for the
+  // reviewer and never becomes the computed condition. Rejected observations
+  // are excluded here too — a rejected row's RAG claim is not evidence.
+  const progressSourceRagClaims = progressRows
+    .map(({ source, row }) => {
+      const claim = row.observation.source_rag_claim;
+      if (typeof claim !== "object" || claim === null || Array.isArray(claim)) return null;
+      const ragClaim = claim as Record<string, unknown>;
+      const ragLabel = snapshotText(ragClaim.label);
+      if (!ragLabel) return null;
+      const sourceLocation = typeof ragClaim.source_location === "object" &&
+        ragClaim.source_location !== null && !Array.isArray(ragClaim.source_location)
+        ? ragClaim.source_location as Record<string, unknown>
+        : row.source_location;
+      return {
+        role: source.role,
+        document_id: source.document_id,
+        document_title: source.title,
+        source_version: source.source_version,
+        observation_id: row.id,
+        scope_level: snapshotText(row.observation.scope_level),
+        scope_label: snapshotText(row.observation.scope_label),
+        rag_label: ragLabel,
+        freshness: ragClaim.freshness === "cached_formula_unverified"
+          ? "cached_formula_unverified"
+          : ragClaim.freshness === "source_literal" ? "source_literal" : "unknown",
+        period_label: snapshotText(row.observation.period_label),
+        as_of_date: snapshotText(row.observation.as_of_date),
+        evidence_chunk_index: typeof ragClaim.evidence_chunk_index === "number"
+          ? ragClaim.evidence_chunk_index
+          : row.evidence_chunk_index,
+        excerpt: snapshotText(ragClaim.excerpt) ?? row.excerpt,
+        page_number: typeof ragClaim.page_number === "number" ? ragClaim.page_number : row.page_number,
+        section_label: snapshotText(ragClaim.section_label) ?? row.section_label,
+        source_location: sourceLocationRecord(sourceLocation),
+      };
+    })
+    .filter((claim): claim is NonNullable<typeof claim> => claim !== null);
+
   return {
     extraction: {
       schedule: {
@@ -1354,6 +1453,7 @@ function buildReviewExtraction(
       },
     },
     progressSourceObservations,
+    progressSourceRagClaims,
     // Decision-filtered register statements: the risk assessment must read the
     // same effective evidence as every other comparison, so a rejected
     // no_open_high_or_critical claim can never produce on_track.
