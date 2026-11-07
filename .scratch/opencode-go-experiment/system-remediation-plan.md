@@ -1,0 +1,36 @@
+# Rencana Terra: perbaikan sistem provenance dan tanggal
+
+## Tujuan, ruang lingkup, keamanan
+
+User meminta perbaikan **sisi sistem** atas temuan yang telah dikomunikasikan: tanggal milestone, provenance per-cell pada XLSX panjang, deteksi header duplikat dan penanganan formula/cache. Eksekusi CommandCode `deepseek/deepseek-v4.1-flash`. Ini bukan cutover AI pipeline dan bukan izin mengubah dokumen/ground truth Excel, melakukan install OCR, mengganti UI/copy, atau me-repin tes wording. Perubahan produksi sah di `worker/src/services/document-parser.ts`, `document-extraction.ts`, caller yang memang terdampak, tes relevan dan `worker/README.md` sesuai kebutuhan. Hormati perubahan pengguna yang sudah ada.
+
+Pengujian aplikasi **offline** sesuai instruksi user: jangan membaca `.env*`, API key/auth store, request ke provider LLM, atau menyentuh DB eksternal/production. Gunakan synthetic XLSX dan respons lokal terisolasi, tanpa mengubah fixture asli. CommandCode inference terpisah. Ikuti `AGENTS.md` + graphify: jalankan `graphify query` sebelum source search/read dan `graphify update .` sesudah code berubah. Baca `CONTEXT.md`, ADR relevan, dan seluruh alur/caller sebelum memilih perubahan. Jangan tambahkan abstraksi/library baru bila tidak perlu.
+
+## Fakta dan diagnosis awal Terra
+
+- Laporan `.scratch/opencode-go-experiment/report-full-offline.md` dan log `.../tests/evidence-provenance.log` sudah mencatat kegagalan aktual: test `row metadata separates the record date, an unrelated due date, and a duplicate column` menerima tanggal `Cut-off Date` dan label `complete` sebagai milestone. Ini **sudah terbukti gagal**, jangan jalankan ulang hanya untuk mengkonfirmasi sebelum perbaikan.
+- Pada source saat rencana dibuat, worker milestone memeriksa `as_of_date` dengan `checkDate(..., "record")`, tetapi `raw_date` hanya dicek ada dalam excerpt lalu dinormalisasi (`document-extraction.ts` sekitar 3156–3183); validasi semantic due/event perlu ditelusuri end-to-end termasuk date ISO, raw non-ISO, rowCells vs cell, naratif, formula cache dan coverage. Jangan menganggap semua raw date harus ISO.
+- Parser `splitSourceBlock()` sengaja membuang cellReferences untuk row split karena potongan tidak membuktikan sel keseluruhan; 216 baris fixture kehilangan per-cell. Prototipe `.scratch/opencode-go-experiment/prototype-cell-aware-split.mjs` hanya bukti kelayakan. Header row mingguan dapat mendahului header WBS; cap 120 references adalah batas keselamatan. Jangan menonaktifkan guardrail, menaikkan cap tanpa analisis, mengarang citable ID/sel, atau menganggap sheet name membuktikan makna.
+
+## 1. Tanggal milestone — root cause dan regresi
+
+- Telusuri `validateGroupExtraction`, `checkDate`/due roles, `parseCitedRawDate`, aturan source reference dan caller. Gunakan log gagal yang ada sebagai red; jangan mengulang tes hanya untuk mengonfirmasi kegagalan yang sudah diketahui. Tambahkan atau perbarui satu regresi behavior di seam `extractDocumentGroups` menggunakan data sumber yang menunjukkan tanggal Due valid, record/cut-off dan kolom `complete` tidak dapat menjadi tanggal milestone; tetap terima tanggal milestone yang benar dengan format sumber non-ISO dan data naratif yang bukti eksplisitnya memadai. Model output mock hanya input, assertion output tervalidasi dan coverage/warning yang terlihat.
+- Perbaiki tempat validasi bersama, bukan suppress exception/menyensor hanya input contoh; harus menolak nilai yang berasal dari kolom/role berbeda, ambiguity dan formula tanpa cache/hasil tidak aman, serta tetap menjaga raw wording. Jika date tak dapat dinormalisasi, jangan kehilangan bukti raw yang sah atau menebak format; jika makna sumber tidak dapat dibuktikan, simpan warning/review dan jangan klaim absence.
+
+## 2. Provenance XLSX panjang dan header
+
+- Pahami konstruksi source block, chunk context, split, cellReferences/rowCells, MAX_SOURCE_REFERENCES_PER_CHUNK, overlap, formulaCells dan consumidores. Implementasikan split yang mempertahankan referensi hanya ketika seluruh bukti sel memang berada pada potongan tersebut, label/row/sheet benar, dan text persis dapat dirujuk; sel yang melewati boundary/tak dapat diverifikasi tetap row-level/review. Dilarang mengaitkan semua cell references ke semua potongan. Identitas stabil, unik, deterministik pada urutan output.
+- Investigasi dan perbaiki header detection untuk tabel weekly Gantt dengan header WBS dua baris bila dapat dibuktikan (tanggal di grid tidak boleh memaksa mengasumsikan mapping); duplicate/ambiguous header harus terdiagnosis dan fail-closed tanpa menghilangkan referensi literal valid yang tidak ambigu. Jangan mengubah data atau membuat baseline yang disetujui.
+- Uji 120 cap, empty vs zero, duplicate/moved header, cell token ambigu/duplicate, cell over limit dan crossing split, date1904, formula/cache row/per-cell, konteks lintas sheet/period, dan apakah hanya record yang benar dikutip; at least satu integration `parseDocumentBuffer` → `extractDocumentGroups` membuktikan perilaku citable; 2 bentuk workbook W7 yang ada + fixture sintetik negatif. Jangan claim 216 berubah menjadi 216 production-safe bila belum dibuktikan. Jangan menambahkan uji 408 tautologis hanya source-ID length.
+- Bump `PARSER_VERSION` jika output kontrak parser berubah dan pastikan group keys/checkpoint tidak menggunakan hasil parser lama; uji replay version serta tidak menembak API. Update consumers/contracts/docs/changelog yang relevan.
+
+## 3. Formula/cache dan batas
+
+- Periksa alur produksi existing: cached_empty/missing/error tidak jadi nol; cache stored tidak otomatis fresh; provenance per-cell tidak membuktikan freshness. Perbaiki hanya bypass yang nyata terkait perubahan di atas; jangan menambahkan evaluator Excel atau rumus fixture menjadi aturan umum. Ada kejanggalan Rp11,500,00 dalam file fixture; jangan mengoreksinya atau menganggap IDR/scope tersirat, dan jangan mengubah kebijakan bisnis tanpa bukti.
+- 19 kegagalan UI/copy/RPC yang diduga drift dan instalasi OCR bukan bagian dari bug produksi parser/milestone; catat sebagai existing, jangan memoles UI atau repin wording di luar scope. Tes database nyata/provider live tetap blocker bila fasilitas tidak disetujui.
+
+## 4. Verifikasi dan hasil
+
+- Jalankan setelah perbaikan satu set pengujian terarah: tes milestone known red kini lulus, unit/integration parser/source provenance/fencing/checkpoint yang relevan, uji negatif baru, dan smoke parse+extract pada 2 workbook dua template secara offline memakai `loadWorkerModules`/deterministic provider local. Tidak menggunakan model/API asli. Jika ada kegagalan perbaiki akar masalah atau laporkan secara eksplisit; jangan menyempitkan tes untuk membuat lulus. Jaga assertions behavior consumer-visible.
+- Perubahan kode permanen harus disertai catatan di `worker/README.md`, update graph. Kumpulkan total lulus/gagal/skip, source locators aktual, alasan/cakupan yang masih review; catat baseline/DB/live/OCR yang belum diuji. Jangan mengklaim pipeline keseluruhan siap produksi.
+- Catat hasil/verifikasi pada `.scratch/opencode-go-experiment/report-system-remediation.md`. Jangan mengubah atau menimpa laporan maupun hasil sebelumnya. Jangan membocorkan key; no commit, install, destructive git ops. Jika masalah tidak dapat diselesaikan secara aman, tampilkan missing prerequisite dan biarkan fail-closed.

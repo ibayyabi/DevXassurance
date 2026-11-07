@@ -1,0 +1,17 @@
+import { loadWorkerModules } from "../../tests/integration/helpers/worker-modules.mjs";
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+const JSZip = require("jszip");
+const { parseDocumentBuffer } = await loadWorkerModules();
+const inlineCell = (r,v)=>`<c r="${r}" t="inlineStr"><is><t>${v}</t></is></c>`;
+const header=`<row r="1">${["Code","Name","Progress","Status","Owner"].map((l,i)=>inlineCell(`${String.fromCharCode(65+i)}1`,l)).join("")}</row>`;
+const rows=Array.from({length:40},(_,i)=>{const r=i+2;return `<row r="${r}">${inlineCell(`A${r}`,`W-${r}`)}${inlineCell(`B${r}`,`Work ${r}`)}${inlineCell(`C${r}`,`${r}%`)}${inlineCell(`D${r}`,"On track")}${inlineCell(`E${r}`,"Owner")}</row>`;}).join("");
+const zip=new JSZip();
+zip.file("xl/workbook.xml",`<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><workbookPr date1904="0"/><sheets><sheet name="Cap" sheetId="1"/></sheets></workbook>`);
+zip.file("xl/styles.xml",`<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs><xf/></cellXfs></styleSheet>`);
+zip.file("xl/worksheets/sheet1.xml",`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${header+rows}</sheetData></worksheet>`);
+const buf=await zip.generateAsync({type:"nodebuffer"});
+const ab=buf.buffer.slice(buf.byteOffset,buf.byteOffset+buf.byteLength);
+const res=await parseDocumentBuffer("cap.xlsx",ab);
+console.log("chunks",res.chunks.length);
+res.chunks.forEach((c,i)=>console.log(i,c.chunkText.length,c.sourceReferences.length, (c.sourceReferences[0]?.sourceLocation?.rowStart), (c.sourceReferences.at(-1)?.sourceLocation?.rowStart)));
