@@ -364,7 +364,7 @@ type ZipTextReader = {
 
 // Bump whenever parsed chunk/source-reference output changes: cached extraction
 // groups are keyed by this version, so older rows are never reused.
-const PARSER_VERSION = "document-parser/20";
+const PARSER_VERSION = "document-parser/22";
 const MAX_CHUNK_LENGTH = 4000;
 // Growth ceiling per chunk: retained row references always fit, then cell
 // references are added row by row. Cells left uncovered stay citable through
@@ -384,6 +384,10 @@ const WEEK_HEADER_LABEL = /^(?:w(?:eek)?\s*[-#]?\s*\d{1,3}(?:\s*(?:19|20)\d{2})?
 const WEEK_HEADER_CAPTION = /^(?:wbs|no\.?|id|code|task|activity|item|phase|work\s*package|description|deliverable)$/iu;
 const DATA_LIKE_LABEL = /^(?:[-+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?\s*%?|(?:rp|idr|usd|eur|sgd|myr)\s*[\d.,]+|[$€£]\s*[\d.,]+)$/iu;
 const DATA_LIKE_LABEL_MAX_LENGTH = 60;
+// A period band needs at least this many dated columns, with gaps within this
+// many days of the median gap (week starts, or month starts of 28-31 days).
+const PERIOD_BAND_MIN_COLUMNS = 3;
+const PERIOD_BAND_GAP_TOLERANCE_DAYS = 3;
 
 
 
@@ -747,6 +751,35 @@ async function parseXlsxDocument(
           const isPeriodContinuationCell = (cell: WorkbookCell) =>
             firstHeaderColumns.has(columnNumber(cell.reference)) &&
             hasDateHeaderCell(cell);
+          // Structural period band: a first row of plain labels where every band
+          // column has a date-valued cell directly below it, and those dates
+          // ascend at an even interval (week or month starts). No label naming
+          // pattern is needed. A data row's dates are not evenly spaced, so the
+          // spacing proof keeps the first record from being taken for a header.
+          const secondRowDateByColumn = new Map<number, number>();
+          for (const cell of tableRows[1].cells) {
+            const column = columnNumber(cell.reference);
+            if (
+              column > 0 &&
+              cell.dateFormat &&
+              !cell.textual &&
+              !cell.formula &&
+              excelSerialToIsoDate(cell.value, date1904)
+            ) secondRowDateByColumn.set(column, Number(cell.value));
+          }
+          const bandDateSerials = [...secondRowDateByColumn.entries()]
+            .sort(([left], [right]) => left - right)
+            .map(([, serial]) => serial);
+          const bandGaps = bandDateSerials.slice(1).map((serial, index) => serial - bandDateSerials[index]);
+          const medianBandGap = [...bandGaps].sort((left, right) => left - right)[Math.floor(bandGaps.length / 2)];
+          const isEvenlySpacedAscending = bandDateSerials.length >= PERIOD_BAND_MIN_COLUMNS &&
+            bandGaps.every((gap) => gap > 0 && Math.abs(gap - medianBandGap) <= PERIOD_BAND_GAP_TOLERANCE_DAYS);
+          const isDateBandedHeaderRow =
+            isEvenlySpacedAscending &&
+            tableRows[0].cells.every(
+              (cell) => isHeaderLabelCell(cell) && secondRowDateByColumn.has(columnNumber(cell.reference)),
+            );
+          const isPeriodBand = isWeekHeaderRow || isDateBandedHeaderRow;
           const isPlainLabelRow = tableRows[1].cells.every(isHeaderLabelCell);
           const subtitleLabelCells = tableRows[1].cells.filter(isHeaderLabelCell);
           const subtitleLabels = subtitleLabelCells.map((cell) =>
@@ -756,7 +789,7 @@ async function parseXlsxDocument(
             (cell) => !firstHeaderColumns.has(columnNumber(cell.reference)),
           );
           const isStaggeredWeekLabelRow =
-            isWeekHeaderRow &&
+            isPeriodBand &&
             tableRows[1].cells.every(
               (cell) => isHeaderLabelCell(cell) || isPeriodContinuationCell(cell),
             ) &&
@@ -764,7 +797,7 @@ async function parseXlsxDocument(
             new Set(subtitleLabels).size === subtitleLabels.length;
           if (
             (
-              isWeekHeaderRow ||
+              isPeriodBand ||
               (
                 hasGroupedHeader &&
                 isTextHeaderRow &&
@@ -948,10 +981,15 @@ async function parseXlsxDocument(
             const column = columnNumber(cell.reference);
             const label = headers.get(column);
             const labelText = label ? `${label}: ` : `${columnLetters(column) || "Cell"}: `;
-            const isoDate = cell.dateFormat && cell.value
+            // A date number format makes a cell a date serial only when it holds
+            // a number (or nothing). Text in a date-formatted cell - an ISO date
+            // string, a header label, a word - is literal content: it is never
+            // converted and never reported as an invalid Excel serial.
+            const dateSerialCell = cell.dateFormat && !(cell.textual && Boolean(cell.value.trim()));
+            const isoDate = dateSerialCell && cell.value
               ? excelSerialToIsoDate(cell.value, date1904)
               : undefined;
-            const invalidDate = cell.dateFormat && cell.value && !isoDate;
+            const invalidDate = dateSerialCell && cell.value && !isoDate;
             const formulaStatus = cell.formulaCacheStatus;
             const isFormula = formulaStatus !== "not_formula";
             const formulaCacheTag = isFormula ? `; formula cache: ${formulaStatus}` : "";
@@ -973,16 +1011,16 @@ async function parseXlsxDocument(
             // substring of the canonical cell/row text a citation must match, so
             // a model can cite exactly what it was given.
             const annotation = cell.numberFormat || isFormula
-              ? ` [raw value: ${cell.value}; number format: ${cell.numberFormat ?? "none"}${isoDate ? `; ISO date: ${isoDate}` : invalidDate ? `; Needs Review: invalid Excel serial ${cell.value}` : cell.dateFormat ? "; Needs Review: no cached date value" : ""}${formulaCacheTag}]`
+              ? ` [raw value: ${cell.value}; number format: ${cell.numberFormat ?? "none"}${isoDate ? `; ISO date: ${isoDate}` : invalidDate ? `; Needs Review: invalid Excel serial ${cell.value}` : dateSerialCell ? "; Needs Review: no cached date value" : ""}${formulaCacheTag}]`
               : "";
             const compactValue = cell.formula
               ? `${cell.formula}${formulaValueText}${formulaCacheTag}`
               : isoDate ?? displayValue;
-            const compactFormat = cell.dateFormat
+            const compactFormat = dateSerialCell
               ? isoDate
                 ? ""
                 : ` [date format: ${cell.numberFormat ?? "unknown"}; Needs Review: ${invalidDate ? `invalid Excel serial ${cell.value}` : "no cached date value"}${formulaCacheTag}]`
-              : cell.numberFormat && cell.numberFormat !== "General"
+              : cell.numberFormat && cell.numberFormat !== "General" && !cell.dateFormat
                 ? ` [number format: ${cell.numberFormat}${formulaCacheTag}]`
                 : isFormula
                   ? ` [formula cache: ${formulaStatus}]`
