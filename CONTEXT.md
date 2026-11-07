@@ -140,10 +140,10 @@ For comparable data, Budget is on-track at variance <= 0%, needs attention above
 Show Budget, Schedule, and Risk separately. Do not calculate a combined project score; if a source reports an overall status, preserve it as a source claim with its citation.
 
 **Assurance result**:
-Show the evidence-backed Budget, Schedule, and Risk comparisons, project/WBS findings, scope differences, evidence gaps, and source citations on the existing Assurance page. The initial output does not add AI-generated action suggestions or a separate downloadable report.
+Evidence-backed Budget, Schedule, and Risk comparisons, project/WBS findings, scope differences, evidence gaps, and source citations. Results may inform a project overview without requiring a user to create or run an Assurance Review. Ambiguous evidence and decisions requiring authority remain visible for human action. This does not add AI-generated action suggestions or a separate downloadable report.
 
 **Assurance pipeline boundary**:
-Reuse the existing upload, parser/OCR, source-located chunks, and text groups. Replace the assurance-specific classification and generic extraction with PMO-domain contracts, then update the existing Assurance result; do not maintain a permanent parallel pipeline.
+Reuse the existing upload, parser/OCR, source-located chunks, and text groups. Assessment consumes published evidence; do not maintain a permanent parallel extraction pipeline.
 
 **Model provider preference**:
 The provider and model are not selected yet; the target is a free provider. Domain contracts and the grouped-extraction design remain independent of that choice.

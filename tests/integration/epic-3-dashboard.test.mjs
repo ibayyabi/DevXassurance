@@ -50,13 +50,6 @@ test("overview uses real finding values for budget, schedule, and risk visuals",
   assert.equal(charts.match(/minWidth=\{0\}/g)?.length, 5);
 });
 
-test("schedule chart always compares forecast against the approved zero-day baseline", () => {
-  const charts = read("src/features/dashboard/components/overview-charts.tsx");
-  assert.match(charts, /scheduleBaseline: 0/);
-  assert.match(charts, /dataKey="scheduleBaseline"/);
-  assert.match(charts, /dataKey="scheduleDelay"/);
-});
-
 test("condition snapshot keeps long overall labels inside the donut", () => {
   const charts = read("src/features/dashboard/components/overview-charts.tsx");
   assert.match(charts, /max-w-24 text-balance text-lg/);

@@ -8,11 +8,11 @@
 -- open; B updates selected prior evidence or uses Storage API to delete/update
 -- its selected object. The after-trigger waits for project; A finishes against
 -- its captured MVCC source and commits; B then invalidates currentness. No
--- deadlock. pgTAP runs after migrations 202611050001, 202611050002, and 003.
+-- deadlock. pgTAP runs after migrations 202611050001, 003, and 006.
 --   psql -v ON_ERROR_STOP=1 -f supabase/tests/risk_snapshot_atomicity.test.sql
 begin;
 select set_config('storage.allow_delete_query', 'true', true);
-select extensions.plan(32);
+select extensions.plan(52);
 select ok(not exists (
   select 1 from unnest(array[
     'cost_baselines','wbs_mappings','milestone_mappings','risk_identity_mappings','risk_scale_mappings'
@@ -121,6 +121,14 @@ with changed as (
 select is((select count(*) from changed), 0::bigint,
   'direct review updates are unavailable outside project-first RPCs');
 reset role;
+insert into public.progress_rag_rules (id, project_id, rule_version, thresholds, approved_by)
+values (
+  '51000000-0000-4000-8000-000000000071',
+  '51000000-0000-4000-8000-000000000003',
+  'approved-v1',
+  '{"amber_below_pp": -2, "red_below_pp": -5}'::jsonb,
+  '51000000-0000-4000-8000-000000000001'
+);
 create temporary table risk_claims (stage integer primary key, claim jsonb not null);
 create function pg_temp.claim_current() returns jsonb language sql as $$
   select public.claim_assurance_analysis('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000022');
@@ -140,6 +148,14 @@ create function pg_temp.add_claim(stage integer) returns void language sql as $$
 $$;
 
 select pg_temp.add_claim(1);
+select is(
+  (select claim->'progress_rag_rule'->>'rule_version' from risk_claims where stage=1),
+  'approved-v1', 'the same claim carries the approved progress rule'
+);
+select is(
+  (select claim->'reference_versions'->>'progress_rag_rule_id' from risk_claims where stage=1),
+  '51000000-0000-4000-8000-000000000071', 'the progress rule is included in reference fencing'
+);
 select is(
   (select claim->'prior_risk_snapshot'->'review'->>'id' from risk_claims where stage=1),
   '51000000-0000-4000-8000-000000000021',
@@ -278,5 +294,114 @@ select throws_ok(
   'project membership cannot claim another project review'
 );
 
+-- Claim-scoped risk mapping fence: the claim carries ALL accepted
+-- project-scoped identity/scale mappings (simplest consistent contract; a
+-- chunk-mention selection would miss reviewer-corrected labels absent from
+-- raw text). Any accepted mapping change must fence finish in-flight and
+-- invalidate a published analysis; cross-project rows never enter.
+-- ponytail: full-project snapshot, unrelated mapping changes invalidate
+-- other reviews in the project; narrow if measurable.
+-- No document_chunks rows are inserted here on purpose: the whole mapping
+-- set is claim-carried whether or not any chunk mentions it.
+-- Restore the selected current storage object deleted at stage 9 before any
+-- further claim.
+insert into storage.objects (bucket_id, name)
+values ('project-evidence', '51000000-0000-4000-8000-000000000003/current.pdf')
+on conflict do nothing;
+insert into public.risk_identity_mappings
+  (id, project_id, source_label, canonical_label, state, created_by, accepted_by, accepted_at)
+values ('51000000-0000-4000-8000-000000000081', '51000000-0000-4000-8000-000000000003',
+  'R-prior only', 'R-1', 'accepted', '51000000-0000-4000-8000-000000000001',
+  '51000000-0000-4000-8000-000000000001', now())
+on conflict do nothing;
+insert into public.risk_scale_mappings
+  (id, project_id, source_label, canonical_label, state, created_by, accepted_by, accepted_at)
+values ('51000000-0000-4000-8000-000000000082', '51000000-0000-4000-8000-000000000003',
+  '1to5', '1-5', 'accepted', '51000000-0000-4000-8000-000000000001',
+  '51000000-0000-4000-8000-000000000001', now())
+on conflict do nothing;
+insert into public.risk_identity_mappings
+  (id, project_id, source_label, canonical_label, state, created_by, accepted_by, accepted_at)
+values ('51000000-0000-4000-8000-000000000083', '51000000-0000-4000-8000-000000000004',
+  'R-prior only', 'R-foreign', 'accepted', '51000000-0000-4000-8000-000000000001',
+  '51000000-0000-4000-8000-000000000001', now())
+on conflict do nothing;
+insert into public.risk_scale_mappings
+  (id, project_id, source_label, canonical_label, state, created_by, accepted_by, accepted_at)
+values ('51000000-0000-4000-8000-000000000084', '51000000-0000-4000-8000-000000000003',
+  'Corrected-Low', 'Low-Med-High', 'accepted', '51000000-0000-4000-8000-000000000001',
+  '51000000-0000-4000-8000-000000000001', now())
+on conflict do nothing;
+select pg_temp.add_claim(10);
+select is(
+  (select claim->'risk_mappings'->'risk_scale_mappings'->0->>'id' from risk_claims where stage=10),
+  '51000000-0000-4000-8000-000000000082',
+  'claim carries the accepted project scale mapping');
+select is(
+  (select count(*) from jsonb_array_elements(
+    (select claim->'risk_mappings'->'risk_identity_mappings' from risk_claims where stage=10)) as h
+   where h->>'canonical_label' = 'R-foreign'),
+  0::bigint, 'a foreign-project mapping is never in the claim payload');
+select is(
+  (select claim->'reference_versions'->'risk_identity_mapping_ids'->>0 from risk_claims where stage=10),
+  '51000000-0000-4000-8000-000000000081',
+  'reference versions fingerprinted the claim identity mapping id');
+select is(pg_temp.finish_current((select claim from risk_claims where stage=10)), true,
+  'unchanged claim mapping set publishes');
+select is(public.assurance_analysis_is_current('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000022'), true,
+  'published analysis is current with claim mappings');
+select public.remove_assurance_mapping(
+  '51000000-0000-4000-8000-000000000003', 'risk_identity', '51000000-0000-4000-8000-000000000081');
+select is(public.assurance_analysis_is_current('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000022'), false,
+  'claim identity removal after publication invalidates the analysis');
+select is((select status from public.assurance_reviews where id = '51000000-0000-4000-8000-000000000022'),
+  'evidence_ready', 'claim identity removal invalidates the published review');
+select pg_temp.add_claim(11);
+select is(
+  (select claim->'risk_mappings'->'risk_identity_mappings' from risk_claims where stage=11),
+  '[]'::jsonb, 'superseded claim identity mapping leaves the next claim');
+select is(pg_temp.finish_current((select claim from risk_claims where stage=11)), true,
+  'analysis republishes without the removed mapping');
+select pg_temp.add_claim(12);
+select public.replace_assurance_mapping(
+  '51000000-0000-4000-8000-000000000003', 'risk_scale', '1to5', '1-10', 'scale revised prior only');
+select is(pg_temp.finish_current((select claim from risk_claims where stage=12)), false,
+  'claim scale change during analysis fences finish');
+select pg_temp.add_claim(13);
+select is(
+  (select claim->'reference_versions'->'risk_scale_mapping_ids'
+   from risk_claims where stage=13) ? (select h->>'id'
+     from jsonb_array_elements(
+       (select claim->'risk_mappings'->'risk_scale_mappings' from risk_claims where stage=13)) as h
+     where h->>'source_label' = '1to5' and h->>'canonical_label' = '1-10'),
+  true,
+  'reference versions contain the exact superseding claim scale mapping id');
+select is(
+  (select claim->'reference_versions'->'risk_scale_mapping_ids'
+   from risk_claims where stage=13) ? '51000000-0000-4000-8000-000000000082',
+  false,
+  'superseded claim scale mapping id leaves reference versions');
+select is(
+  (select count(*) from jsonb_array_elements(
+    (select claim->'risk_mappings'->'risk_scale_mappings' from risk_claims where stage=13)) as h
+   where h->>'source_label' = '1to5' and h->>'canonical_label' = '1-10'),
+  1::bigint, 'the next claim carries the revised claim scale mapping');
+select is(pg_temp.finish_current((select claim from risk_claims where stage=13)), true,
+  'analysis publishes with the revised claim scale mapping');
+select pg_temp.add_claim(14);
+select is(
+  (select count(*) from jsonb_array_elements(
+    (select claim->'risk_mappings'->'risk_scale_mappings' from risk_claims where stage=14)) as h
+   where h->>'source_label' = 'Corrected-Low'),
+  1::bigint,
+  'a corrected-only scale mapping absent from chunk text is still claim-carried');
+select is(pg_temp.finish_current((select claim from risk_claims where stage=14)), true,
+  'analysis publishes with the corrected-only claim scale mapping');
+select is(public.assurance_analysis_is_current('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000022'), true,
+  'published analysis is current with corrected-only claim mapping');
+select public.remove_assurance_mapping(
+  '51000000-0000-4000-8000-000000000003', 'risk_scale', '51000000-0000-4000-8000-000000000084');
+select is(public.assurance_analysis_is_current('51000000-0000-4000-8000-000000000003', '51000000-0000-4000-8000-000000000022'), false,
+  'corrected-only mapping removal after publication invalidates the analysis');
 select * from extensions.finish();
 rollback;

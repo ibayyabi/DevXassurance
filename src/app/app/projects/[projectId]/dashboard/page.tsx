@@ -1,35 +1,79 @@
 import { Suspense } from "react";
 
-import { getAssuranceWorkspace } from "@/features/assurance/lib/queries";
+import { getAssuranceWorkspace, getProjectObservationEvidence } from "@/features/assurance/lib/queries";
+import {
+  getAutomaticAssessmentPeriods,
+  getAutomaticAssessmentSnapshot,
+} from "@/features/dashboard/lib/queries";
+import {
+  AutomaticSnapshotOverview,
+  AutomaticSnapshotPeriods,
+} from "@/features/dashboard/components/automatic-snapshot-overview";
 import { UsableOverview } from "@/features/dashboard/components/usable-overview";
+import { buildPublishedEvidence, isAnalysisCurrent } from "@/features/dashboard/lib/overview";
 
 export default function DashboardPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ projectId: string }>;
+  searchParams: Promise<{ review?: string; assessment?: string }>;
 }) {
   return (
     <Suspense fallback={<DashboardLoading />}>
-      <DashboardContent params={params} />
+      <DashboardContent params={params} searchParams={searchParams} />
     </Suspense>
   );
 }
 
 async function DashboardContent({
   params,
+  searchParams,
 }: {
   params: Promise<{ projectId: string }>;
+  searchParams: Promise<{ review?: string; assessment?: string }>;
 }) {
   const { projectId } = await params;
-  const { membership, review, reviews } = await getAssuranceWorkspace(projectId);
+  const { review: reviewParam, assessment: assessmentParam } = await searchParams;
+  const { membership, review, reviews, documents } =
+    await getAssuranceWorkspace(projectId);
+  const selectedReview =
+    reviews.find((item) => item.id === reviewParam) ?? review;
+  // Published observations are the overview itself without a review, and the
+  // fallback whenever the selected review's analysis is stale.
+  const publishedEvidence =
+    !selectedReview || !isAnalysisCurrent(selectedReview)
+      ? buildPublishedEvidence(await getProjectObservationEvidence(projectId))
+      : null;
+  // The automatic queue's published snapshot, selected by ?assessment= or the
+  // latest known cut-off. Independent of the review path: both surfaces can
+  // exist for the same project.
+  const [automatic, automaticPeriods] = await Promise.all([
+    getAutomaticAssessmentSnapshot(projectId, assessmentParam ?? null),
+    getAutomaticAssessmentPeriods(projectId),
+  ]);
 
   return (
-    <UsableOverview
-      projectId={projectId}
-      projectName={membership.projectName}
-      review={review}
-      reviews={reviews}
-    />
+    <>
+      {!(automatic.status === "none" && automaticPeriods.length === 0) && (
+        <div className="mx-auto max-w-[1600px] space-y-3 px-4 pt-6 md:px-6">
+          <AutomaticSnapshotPeriods
+            projectId={projectId}
+            selectedCutoff={assessmentParam ?? automatic.cutoff}
+            periods={automaticPeriods}
+          />
+          {automatic.status !== "none" && <AutomaticSnapshotOverview assessment={automatic} />}
+        </div>
+      )}
+      <UsableOverview
+        projectId={projectId}
+        projectName={membership.projectName}
+        review={selectedReview}
+        reviews={reviews}
+        documents={documents}
+        publishedEvidence={publishedEvidence}
+      />
+    </>
   );
 }
 

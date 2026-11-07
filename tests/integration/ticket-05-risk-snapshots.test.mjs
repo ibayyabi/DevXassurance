@@ -34,6 +34,15 @@ const scheduleComparison = load("src/features/assurance/lib/schedule-comparison.
 });
 const riskComparison = parse("src/features/assurance/lib/risk-comparison.ts");
 const reviewPeriod = parse("src/features/assurance/lib/review-period.ts");
+const analysisPipeline = load("src/features/assurance/lib/analysis-pipeline.ts", {
+  "./analysis": analysis,
+  "./cost-evidence": costEvidence,
+  "./cost-queries": costQueries,
+  "./risk-comparison": riskComparison,
+  "./schedule-comparison": scheduleComparison,
+  "./wbs-comparison": wbsComparison,
+  "./review-period": reviewPeriod,
+});
 const role = parse("src/features/projects/lib/roles.ts");
 const buildRiskComparisonImpl = riskComparison.buildRiskComparison;
 const buildRiskComparison = (input) => buildRiskComparisonImpl({
@@ -103,9 +112,27 @@ const riskObservation = (id, riskId, extra = {}) =>
     ...extra,
   });
 
+const claimMappingRow = (sourceLabel, canonicalLabel, kind) => ({
+  id: `claim-${kind}-${sourceLabel}`,
+  project_id: "project-1",
+  source_label: sourceLabel,
+  canonical_label: canonicalLabel,
+  state: "accepted",
+  proposed_by_model: false,
+  note: null,
+  created_by: "user-1",
+  accepted_by: "user-1",
+  accepted_at: "2026-11-05T00:00:00Z",
+});
+const claimMappings = (identity = [], scale = []) => ({
+  risk_identity_mappings: identity,
+  risk_scale_mappings: scale,
+});
+
 async function runRiskPipeline({
   sources,
   observationDecisions = [],
+  riskMappings = claimMappings(),
   priorRiskSnapshot = {
     current_cutoff: "2026-10-23", review: null, sources: [],
     observation_decisions: [], gap_reason: "no_prior_current_review",
@@ -122,7 +149,8 @@ async function runRiskPipeline({
         return { data: {
           attempt_id: "attempt-1", sources, observation_decisions: observationDecisions,
           reference_fingerprint: "reference-fingerprint-1",
-          reference_versions: { risk_identity_mappings: 2, risk_scale_mappings: 1 },
+          reference_versions: { risk_identity_mapping_ids: [], risk_scale_mapping_ids: [] },
+          risk_mappings: riskMappings,
           prior_risk_snapshot: priorRiskSnapshot,
         } };
       }
@@ -166,6 +194,7 @@ async function runRiskPipeline({
     "@/features/assurance/lib/schedule-comparison": scheduleComparison,
     "@/features/assurance/lib/risk-comparison": riskComparison,
     "@/features/assurance/lib/review-period": reviewPeriod,
+    "@/features/assurance/lib/analysis-pipeline": analysisPipeline,
   };
   const loaded = load("src/features/assurance/actions/assurance-actions.ts", dependencies);
   const data = new FormData();
@@ -463,6 +492,182 @@ test("risks without a source ID are never compared, only preserved for mapping",
   assert.equal(comparison.unidentified.length, 2);
 });
 
+test("claim identity and scale mappings absent from chunk text drive the comparison", async () => {
+  // The mapping rows below are claim-carried regardless of any document
+  // chunk mention (simplest consistent contract: all accepted project
+  // mappings). A chunk-verified selection would miss them.
+  const previousHash = "a".repeat(64);
+  const currentHash = "c".repeat(64);
+  const previousObservation = (id, riskId, fingerprint, extra = {}) => ({
+    ...riskObservation(id, riskId, { as_of_date: "2026-10-16", ...extra }),
+    project_id: "project-1",
+    document_id: "previous-doc",
+    source_content_hash: previousHash,
+    parser_version: "parser/1",
+    contract_version: "contract/1",
+    observation_fingerprint: fingerprint,
+  });
+  const sources = [
+    source("approved-baseline-doc", "baseline", "Approved baseline", "b".repeat(64), [
+      riskObservation("baseline-r1", "R-SB01-001", {
+        as_of_date: "2026-10-09", rating_label: "Low", rating_value: 1,
+      }),
+    ]),
+    source("current-doc", "current", "W6 Alarm report", currentHash, [
+      riskObservation("current-r1", "R-1", {
+        as_of_date: "2026-10-23", rating_label: "Medium", rating_value: 3,
+      }),
+    ]),
+  ];
+  const priorRiskSnapshot = {
+    current_cutoff: "2026-10-23",
+    review: {
+      id: "review-previous", project_id: "project-1",
+      reporting_period: "2026-10-16", cutoff_precision: "date", status: "eligible",
+    },
+    sources: [source("previous-doc", "current", "W5 Alarm report", previousHash, [
+      previousObservation("previous-r1", "R-prior only", "previous-fp", {
+        rating_label: "Low", rating_value: 1, scale_label: "1to5",
+      }),
+    ], [coverageRow("risk", "processed")])],
+    observation_decisions: [],
+    gap_reason: null,
+  };
+  const riskMappings = claimMappings(
+    [claimMappingRow("R-prior only", "R-1", "identity")],
+    [claimMappingRow("1to5", "1-5", "scale")],
+  );
+  const result = await runRiskPipeline({ sources, priorRiskSnapshot, riskMappings });
+  const publication = result.calls.find((call) =>
+    call.name === "finish_assurance_analysis_with_decision_fingerprint");
+  const item = publication.input.p_result_metadata.risk_item_findings
+    .find((entry) => entry.canonicalId === "R-1");
+  assert.equal(item.changeType, "increased");
+  assert.equal(item.ratingDelta, 2, "the claim scale mapping aligns prior 1to5 with current 1-5");
+  assert.equal(item.previous.sourceId, "R-prior only");
+  assert.equal(item.previous.sourceRef.documentId, "previous-doc");
+});
+
+test("without the claim mappings a differently-labelled pair stays an identity gap", async () => {
+  const previousHash = "a".repeat(64);
+  const previousObservation = (id, riskId, fingerprint, extra = {}) => ({
+    ...riskObservation(id, riskId, { as_of_date: "2026-10-16", ...extra }),
+    project_id: "project-1",
+    document_id: "previous-doc",
+    source_content_hash: previousHash,
+    parser_version: "parser/1",
+    contract_version: "contract/1",
+    observation_fingerprint: fingerprint,
+  });
+  const sources = [
+    source("approved-baseline-doc", "baseline", "Approved baseline", "b".repeat(64), [
+      riskObservation("baseline-r1", "R-SB01-001", {
+        as_of_date: "2026-10-09", rating_label: "Low", rating_value: 1,
+      }),
+    ]),
+    source("current-doc", "current", "W6 Alarm report", "c".repeat(64), [
+      riskObservation("current-r1", "R-1", {
+        as_of_date: "2026-10-23", rating_label: "Medium", rating_value: 3,
+      }),
+    ]),
+  ];
+  const priorRiskSnapshot = {
+    current_cutoff: "2026-10-23",
+    review: {
+      id: "review-previous", project_id: "project-1",
+      reporting_period: "2026-10-16", cutoff_precision: "date", status: "eligible",
+    },
+    sources: [source("previous-doc", "current", "W5 Alarm report", previousHash, [
+      previousObservation("previous-r1", "R-prior only", "previous-fp", {
+        rating_label: "Low", rating_value: 1, scale_label: "1to5",
+      }),
+    ], [coverageRow("risk", "processed")])],
+    observation_decisions: [],
+    gap_reason: null,
+  };
+  const unmapped = await runRiskPipeline({ sources, priorRiskSnapshot, riskMappings: claimMappings() });
+  const publication = unmapped.calls.find((call) =>
+    call.name === "finish_assurance_analysis_with_decision_fingerprint");
+  const priorOnly = publication.input.p_result_metadata.risk_item_findings
+    .find((entry) => entry.canonicalId === "R-prior only");
+  assert.equal(priorOnly.changeType, "identity_not_comparable");
+  const mapped = await runRiskPipeline({
+    sources, priorRiskSnapshot,
+    riskMappings: claimMappings(
+      [claimMappingRow("R-prior only", "R-1", "identity")],
+      [claimMappingRow("1to5", "1-5", "scale")],
+    ),
+  });
+  const mappedPublication = mapped.calls.find((call) =>
+    call.name === "finish_assurance_analysis_with_decision_fingerprint");
+  assert.equal(mappedPublication.input.p_result_metadata.risk_item_findings
+    .find((entry) => entry.canonicalId === "R-1").changeType, "increased",
+    "the same row flips only when the claim carries the mappings");
+});
+
+test("prior scale_label absent from chunk text aligns via the claim scale mapping", async () => {
+  const previousHash = "a".repeat(64);
+  const previousObservation = (id, riskId, fingerprint, extra = {}) => ({
+    ...riskObservation(id, riskId, { as_of_date: "2026-10-16", ...extra }),
+    project_id: "project-1",
+    document_id: "previous-doc",
+    source_content_hash: previousHash,
+    parser_version: "parser/1",
+    contract_version: "contract/1",
+    observation_fingerprint: fingerprint,
+  });
+  const sources = [
+    source("approved-baseline-doc", "baseline", "Approved baseline", "b".repeat(64), [
+      riskObservation("baseline-r1", "R-SB01-001", {
+        as_of_date: "2026-10-09", rating_label: "Low", rating_value: 1,
+      }),
+    ]),
+    source("current-doc", "current", "W6 Alarm report", "c".repeat(64), [
+      riskObservation("current-r1", "R-SB01-001", {
+        as_of_date: "2026-10-23", rating_label: "Medium", rating_value: 3,
+        scale_label: "Low-Med-High",
+      }),
+    ]),
+  ];
+  const priorRiskSnapshot = {
+    current_cutoff: "2026-10-23",
+    review: {
+      id: "review-previous", project_id: "project-1",
+      reporting_period: "2026-10-16", cutoff_precision: "date", status: "eligible",
+    },
+    sources: [source("previous-doc", "current", "W5 Alarm report", previousHash, [
+      previousObservation("previous-r1", "R-SB01-001", "corrected-prior-fp", {
+        rating_label: "Low", rating_value: 1, scale_label: "structured-only-scale",
+      }),
+    ], [coverageRow("risk", "processed")])],
+    observation_decisions: [
+      {
+        id: "previous-correction", project_id: "project-1", target_type: "assurance",
+        document_id: "previous-doc", source_content_hash: previousHash,
+        parser_version: "parser/1", contract_version: "contract/1",
+        observation_fingerprint: "corrected-prior-fp", decision: "corrected",
+        corrected_observation: { rating_value: 2 }, reason: "Peringkat sumber salah baca",
+        decided_by: "reviewer-previous", decided_at: "2026-11-04T01:00:00Z",
+        observation_ids: ["previous-r1"],
+      },
+    ],
+    gap_reason: null,
+  };
+  const result = await runRiskPipeline({
+    sources,
+    priorRiskSnapshot,
+    riskMappings: claimMappings([], [claimMappingRow("structured-only-scale", "Low-Med-High", "scale")]),
+  });
+  const publication = result.calls.find((call) =>
+    call.name === "finish_assurance_analysis_with_decision_fingerprint");
+  const item = publication.input.p_result_metadata.risk_item_findings
+    .find((entry) => entry.canonicalId === "R-SB01-001");
+  assert.equal(item.changeType, "increased");
+  assert.equal(item.ratingDelta, 1, "corrected prior rating_value compares; the claim scale mapping aligns prior structured-only-scale with current Low-Med-High");
+  assert.equal(item.previous.ratingValue, 2);
+  assert.equal(item.previous.sourceRatingValue, 1);
+});
+
 test("analysis uses the prior review's current-role source, version, and reviewer decisions", async () => {
   const previousHash = "a".repeat(64);
   const currentHash = "c".repeat(64);
@@ -589,9 +794,6 @@ test("analysis uses the prior review's current-role source, version, and reviewe
   const provenance = publication.input.p_metadata.risk_comparison_provenance;
   assert.equal(provenance.contract, "pmo_risk_comparison_v2");
   assert.equal(provenance.referenceFingerprint, "reference-fingerprint-1");
-  assert.deepEqual(provenance.referenceVersions, {
-    risk_identity_mappings: 2, risk_scale_mappings: 1,
-  });
   assert.equal(provenance.previousReviewId, "review-previous");
   assert.equal(provenance.previousCutoffComplete, true);
   assert.equal(provenance.previousSourceVersions[0].content_hash, previousHash);
@@ -599,21 +801,15 @@ test("analysis uses the prior review's current-role source, version, and reviewe
     total_observations: 3, reviewed: 2, accepted: 0, corrected: 1, rejected: 1,
   });
 
-  for (const table of ["risk_identity_mappings", "risk_scale_mappings"]) {
-    const mappingRead = result.queries.find((query) => query.table === table);
-    assert.ok(mappingRead.filters.some(([kind, key, value]) =>
-      kind === "eq" && key === "project_id" && value === "project-1"));
-    assert.ok(mappingRead.filters.some(([kind, key, value]) =>
-      kind === "eq" && key === "state" && value === "accepted"));
-  }
   assert.deepEqual(
     result.queries.filter((query) => [
       "assurance_reviews", "assurance_review_documents", "documents",
       "assurance_observations", "assurance_observation_coverage",
       "assurance_observation_decisions",
+      "risk_identity_mappings", "risk_scale_mappings",
     ].includes(query.table)),
     [],
-    "previous review selection and all risk evidence arrive inside the atomic claim",
+    "previous review selection, risk evidence, and the applied mappings all arrive inside the atomic claim",
   );
   const mappingWrites = result.calls.filter((call) => call.name === "replace_assurance_mapping");
   assert.deepEqual(mappingWrites, [], "analysis never writes or auto-accepts a mapping");
@@ -676,6 +872,7 @@ test("risk mapping accept routes through the atomic replace RPC", async () => {
     "@/features/assurance/lib/schedule-comparison": scheduleComparison,
     "@/features/assurance/lib/risk-comparison": riskComparison,
     "@/features/assurance/lib/review-period": reviewPeriod,
+    "@/features/assurance/lib/analysis-pipeline": analysisPipeline,
   };
   const loaded = load("src/features/assurance/actions/assurance-actions.ts", dependencies);
   const data = new FormData();
