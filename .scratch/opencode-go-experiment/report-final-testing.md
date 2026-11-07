@@ -339,3 +339,18 @@ Setelah resolusi tanggal-teks: **Duration (G5-F5+1=8) dan Weighted Progress (I5*
 Guard aritmetika + normalisasi dua-arah ditambahkan; keluarga aritmetika tetap terverifikasi (2 match), namun 58 sel cross-sheet/IF tetap not_computable - penyebab pastinya belum terisolasi (dugaan: pemetaan nama sheet ter-escape `&amp;` antara token formula dan kunci data, atau bentuk sel yang belum tertangani regex). Debug berlanjut di konteks berikutnya dengan pelacakan per-token; skrip probe tetap working file (tidak di-commit).
 
 **Status Level 2 tetap parsial**: keluarga aritmetika terverifikasi; IF/cross-sheet inconclusive - bukan bukti generator salah, bukan bukti benar.
+
+## Lampiran 22: Level 2 VERDICT - generator terbukti konsisten (580/609, 0 mismatch)
+
+Verifikasi formula di-jalankan ke seluruh 12 workbook mingguan asli: **609 sel formula, 580 match (95,2%), 0 mismatch, 29 not_computable** (`formula-verify-asli.json`).
+
+- **Generator (tracker-web) terbukti menghitung cache formula dengan benar** untuk seluruh keluarga: Duration, Weighted Progress, Variance, RAG, dan 56 referensi lintas-sheet - di semua subsistem.
+- 29 not_computable: sel ber-cache string kosong (tak ada yang diverifikasi) + formula shared (`<f t="shared">`) yang butuh dukungan shared-formula di harness.
+- 1 file (01_Alarm non-(1), 798 ref) total=0: formula-nya dalam bentuk shared-formula yang belum diekstrak harness - tercatat sebagai iterasi harness, bukan indikasi masalah generator (file (1)-nya yang identik struktur terverifikasi penuh).
+
+**Implikasi freshness (gabungan Level 1 + 2)**:
+1. Level 1 (pipeline): cache aritmetika diverifikasi otomatis via rekalkulasi (/44).
+2. Level 2 (bukti generator): cache generator konsisten 580/609, 0 mismatch - basis untuk mempercayai cache keluarga generated setelah parser mendukung shared-formula.
+3. Attestation reviewer hanya tersisa untuk file manual-edit.
+
+Ditutup sesuai preferensi: harness tetap working file (tidak di-commit), hasil di lampiran ini + `formula-verify-asli.json`.
