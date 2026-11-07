@@ -69,18 +69,21 @@ export function formatShortPeriod(value: string | null | undefined): string {
 }
 
 export type ReviewCutoff = {
-  precision: "month" | "date";
+  precision: "month" | "date" | "unknown";
   label: string;
 };
 
 export function reviewCutoff(
   review: Pick<AssuranceReview, "reportingPeriod"> & {
-    cutoffPrecision?: "month" | "date";
+    cutoffPrecision?: "month" | "date" | "unknown";
   },
 ): ReviewCutoff {
   const parsed = parsePeriod(review.reportingPeriod);
   const precision = review.cutoffPrecision ??
     (parsed?.date ? "date" : "month");
+  if (precision === "unknown") {
+    return { precision, label: "Periode tidak terbukti" };
+  }
   if (!parsed) {
     return {
       precision,
@@ -104,12 +107,12 @@ export type EvidencePeriodState = "match" | "mismatch" | "month_only" | "unknown
  */
 export function compareEvidencePeriod(
   reviewPeriod: string,
-  precision: "month" | "date",
+  precision: "month" | "date" | "unknown",
   documentPeriod: string | null | undefined,
 ): EvidencePeriodState {
   const review = parsePeriod(reviewPeriod);
   const document = parsePeriod(documentPeriod);
-  if (!review || !document) return "unknown";
+  if (precision === "unknown" || !review || !document) return "unknown";
   if (precision === "month") {
     return document.month === review.month ? "match" : "mismatch";
   }
@@ -1006,6 +1009,7 @@ export type OverviewTrendPoint = {
 
 /** Cut-off sort key: a date cut-off is itself; a month cut-off sorts at month-end. */
 function cutoffSortKey(review: AssuranceReview): string {
+  if (review.cutoffPrecision === "unknown") return "\uffff";
   const parsed = parsePeriod(review.reportingPeriod);
   if (!parsed) return review.reportingPeriod;
   if (review.cutoffPrecision === "month" || !parsed.date) return monthEnd(parsed.month);
@@ -1021,13 +1025,13 @@ export function buildTrendPoints(reviews: readonly AssuranceReview[]): OverviewT
   return [...reviews]
     .sort((first, second) => cutoffSortKey(first).localeCompare(cutoffSortKey(second)))
     .map((review) => {
-      const stale = !isAnalysisCurrent(review);
+      const stale = !isAnalysisCurrent(review) || review.cutoffPrecision === "unknown";
       const budget = stale ? null : findDomain(review, "budget");
       const schedule = stale ? null : findDomain(review, "schedule");
       const risk = stale ? null : findDomain(review, "risk");
       return {
         period: review.reportingPeriod,
-        label: formatShortPeriod(review.reportingPeriod),
+        label: review.cutoffPrecision === "unknown" ? "?" : formatShortPeriod(review.reportingPeriod),
         budgetPlan: numberValue(budget?.baselineValue?.amount),
         budgetCurrent: numberValue(budget?.currentValue?.amount),
         scheduleDelay: numberValue(schedule?.variance?.delay_days),

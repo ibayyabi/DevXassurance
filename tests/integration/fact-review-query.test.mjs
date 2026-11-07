@@ -28,6 +28,7 @@ function setup(fail = false, orphan = false) {
   new Function("require", "exports", code)((name) => {
     if (name.includes("projects/lib/queries")) return { requireProjectMembership: async () => ({ supabase, membership: { role: "admin" } }) };
     if (name.includes("metadata")) return { resolveDocumentMetadata: () => ({}) };
+    if (name.includes("job-diagnostics")) return { fetchJobDiagnostics: async () => new Map() };
     throw new Error(`Unexpected dependency ${name}`);
   }, exports);
   return { get: exports.getDocumentIntelligence, ranges };

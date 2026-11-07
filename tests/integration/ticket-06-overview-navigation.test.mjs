@@ -133,6 +133,7 @@ test("period proof distinguishes a matching date, another cut-off, month-only me
   assert.equal(compareEvidencePeriod("2026-10-09", "date", "2026-10-16"), "mismatch");
   assert.equal(compareEvidencePeriod("2026-10-09", "date", "2026-10"), "month_only");
   assert.equal(compareEvidencePeriod("2026-10-09", "date", null), "unknown");
+  assert.equal(compareEvidencePeriod("2026-10-09", "unknown", "2026-10-09"), "unknown");
   assert.equal(compareEvidencePeriod("2026-10", "month", "2026-10-16"), "match");
   assert.equal(compareEvidencePeriod("2026-10", "month", "2026-11"), "mismatch");
   assert.equal(formatPeriodLabel("2026-10"), "Oktober 2026");

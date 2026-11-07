@@ -28,6 +28,7 @@ import type {
   ProcessingStatus,
 } from "@/features/documents/lib/constants";
 import { requireProjectMembership } from "@/features/projects/lib/queries";
+import { fetchJobDiagnostics, type JobDiagnostic } from "@/features/documents/lib/job-diagnostics";
 
 export type AssuranceDocument = {
   id: string;
@@ -57,13 +58,15 @@ export type AssuranceDocument = {
   suggestedWorkstream: string | null;
   workstream: string | null;
   confirmedWorkstream: string | null;
+  /** Latest parse job state for this document, read through RLS; null when unavailable. */
+  jobDiagnostic: JobDiagnostic | null;
 };
 
 export type AssuranceReview = {
   id: string;
   reportingPeriod: string;
-  /** New reviews use a date cut-off; legacy month-scoped reviews keep month-end semantics. */
-  cutoffPrecision: "month" | "date";
+  /** Unknown precision never proves a date or month. */
+  cutoffPrecision: "month" | "date" | "unknown";
   title: string;
   status: string;
   currentStep: "evidence" | "analysis" | "findings" | "actions" | "report";
@@ -222,6 +225,7 @@ export type ObservationReviewDocument = {
   role: "baseline" | "current" | "unlinked";
   processingStatus: string;
   processingError: string | null;
+  jobDiagnostic: JobDiagnostic | null;
   coverage: ObservationCoverageDisplayRow[];
 };
 
@@ -295,7 +299,7 @@ export async function getAssuranceObservationReview(
     return { documents: [], observations: [], costObservations: [], decisions: [] };
   }
 
-  const [observationsResult, costResult, coverageResult, decisionsResult] = await Promise.all([
+  const [observationsResult, costResult, coverageResult, decisionsResult, jobDiagnostics] = await Promise.all([
     supabase
       .from("assurance_observations")
       .select(
@@ -332,6 +336,7 @@ export async function getAssuranceObservationReview(
       .eq("project_id", projectId)
       .in("document_id", documentIds)
       .order("decided_at"),
+    fetchJobDiagnostics(supabase, projectId, documentIds),
   ]);
   if (observationsResult.error) throw new Error(observationsResult.error.message);
   if (costResult.error) throw new Error(costResult.error.message);
@@ -359,6 +364,7 @@ export async function getAssuranceObservationReview(
       role: roleByDocument.get(row.id) ?? "unlinked",
       processingStatus: row.processing_status,
       processingError: row.processing_error,
+      jobDiagnostic: jobDiagnostics?.get(row.id) ?? null,
       coverage: coverageDomains.map((domain) => {
         const stored = ((coverageResult.data ?? []) as {
           document_id: string;
@@ -675,6 +681,11 @@ export async function getAssuranceWorkspace(projectId: string) {
     ));
   }
 
+  const jobDiagnostics = await fetchJobDiagnostics(
+    supabase,
+    projectId,
+    (documentsResult.data ?? []).map((row) => row.id),
+  );
   const documents: AssuranceDocument[] = (documentsResult.data ?? []).map(
     (row) => {
       const effective = resolveDocumentMetadata(row);
@@ -704,6 +715,7 @@ export async function getAssuranceWorkspace(projectId: string) {
         suggestedWorkstream: row.suggested_workstream,
         workstream: effective.workstream,
         confirmedWorkstream: row.confirmed_workstream,
+        jobDiagnostic: jobDiagnostics?.get(row.id) ?? null,
       };
     },
   );
@@ -758,7 +770,9 @@ export async function getAssuranceWorkspace(projectId: string) {
     id: row.id,
     isAnalysisCurrent: currentByReview.get(row.id) ?? false,
     reportingPeriod: row.reporting_period,
-    cutoffPrecision: row.cutoff_precision === "date" ? "date" : "month",
+    cutoffPrecision: row.cutoff_precision === "date" || row.cutoff_precision === "month"
+      ? row.cutoff_precision
+      : "unknown",
     title: row.title,
     status: row.status,
     currentStep: row.current_step,
