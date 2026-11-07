@@ -3295,14 +3295,13 @@ test("a lost domain task output stays retryable failure, never absent evidence",
   assert.equal(outcome.ok, false);
   assert.equal(outcome.errorCode, "llm_provider_transient_failure");
   assert.match(outcome.errorMessage, /HTTP 429/);
-  // Both tasks ran, retried together, and the group was checkpointed failed
-  // with a retryable attempt count, not as a completed empty extraction.
-  assert.equal(analysisTaskCalls, 2);
-  assert.equal(domainTaskCalls, 2);
+  // Quota failure defers the group immediately rather than spending more requests.
+  assert.equal(analysisTaskCalls, 1);
+  assert.equal(domainTaskCalls, 1);
   const row = checkPointedRows.at(-1);
   assert.equal(row.status, "failed");
   assert.equal(row.result, null);
-  assert.equal(row.attemptCount, 2);
+  assert.equal(row.attemptCount, 1);
   // No completed row exists that could later be misread as "no evidence".
   assert.equal([...store.rows.values()].some((entry) => entry.status === "completed"), false);
 });

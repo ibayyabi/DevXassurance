@@ -11,7 +11,9 @@ export function AutomaticAssessment({
   documents: EvidenceDocument[];
 }) {
   const failedCount = documents.filter((document) => document.processingStatus === "failed").length;
-  const activeCount = documents.filter((document) => ["uploaded", "queued", "processing"].includes(document.processingStatus)).length;
+  const queuedCount = documents.filter((document) => document.processingStatus === "queued").length;
+  const processingCount = documents.filter((document) => ["uploaded", "processing"].includes(document.processingStatus)).length;
+  const activeCount = queuedCount + processingCount;
   const completedCount = documents.filter((document) => document.processingStatus === "completed").length;
 
   return (
@@ -27,7 +29,8 @@ export function AutomaticAssessment({
           </p>
           {(activeCount > 0 || failedCount > 0) && (
             <p className="mt-2 text-sm" role="status">
-              {activeCount > 0 ? `${activeCount} file(s) still processing. ` : ""}
+              {queuedCount > 0 ? `${queuedCount} file(s) waiting in the queue. ` : ""}
+              {processingCount > 0 ? `${processingCount} file(s) being processed. ` : ""}
               {failedCount > 0 ? `${failedCount} file(s) failed; retry or replace them in the Evidence Library. ` : ""}
               {completedCount} completed file(s) are available for selection.
             </p>
