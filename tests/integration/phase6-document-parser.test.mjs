@@ -118,7 +118,7 @@ test("TXT extraction keeps headings and source-linked bounded chunks across long
   for (let index = 1; index <= 24; index += 1) {
     assert.ok(result.chunks.some((chunk) => chunk.chunkText.includes(`PARAGRAPH-${index} `)));
   }
-  assert.equal(result.parserMetadata.parserVersion, "document-parser/20");
+  assert.equal(result.parserMetadata.parserVersion, "document-parser/22");
 });
 test("a single long paragraph is bounded without losing its boundary markers", async () => {
   const paragraph =
@@ -373,7 +373,7 @@ test("XLSX cell references locate literals exactly and never claim an unresolved
 
   assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
   if (!result.ok) return;
-  assert.equal(result.parserMetadata.parserVersion, "document-parser/20");
+  assert.equal(result.parserMetadata.parserVersion, "document-parser/22");
 
   const chunk = result.chunks[0];
   const references = chunk.sourceReferences ?? [];
@@ -1004,4 +1004,80 @@ test("splitting a long row preserves a literal pipe inside a cell value", async 
     cellReferences[0].chunk.chunkText.includes(cellReferences[0].source.text),
     "the per-cell reference stays citable in its own chunk",
   );
+});
+
+test("text in a date-formatted cell stays literal and only numeric serials can be invalid", async () => {
+  const styled = (reference, inner, type) =>
+    `<c r="${reference}" s="0"${type ? ` t="${type}"` : ""}>${inner}</c>`;
+  const text = (reference, value) => styled(reference, `<is><t>${value}</t></is>`, "inlineStr");
+  const rows =
+    `<row r="1">${text("A1", "Activity")}${text("B1", "Baseline Start")}</row>` +
+    `<row r="2">${text("A2", "Serial date")}${styled("B2", "<v>45292</v>")}</row>` +
+    `<row r="3">${text("A3", "ISO text")}${text("B3", "2026-10-13")}</row>` +
+    `<row r="4">${text("A4", "Word")}${text("B4", "TBD")}</row>` +
+    `<row r="5">${text("A5", "Impossible serial")}${styled("B5", "<v>60</v>")}</row>`;
+  const result = await parseDocumentBuffer(
+    "date-typing.xlsx",
+    await xlsxPackage("Dates", rows, { styles: '<xf numFmtId="14"/>' }),
+  );
+  assert.equal(result.ok, true, JSON.stringify(result));
+  if (!result.ok) return;
+  const sources = result.chunks.flatMap((chunk) => chunk.sourceReferences ?? []);
+  const cell = (reference) => sources.find((source) => source.cell?.cell === reference)?.cell;
+  const text5 = (reference) => sources.find((source) => source.cell?.cell === reference)?.text ?? "";
+
+  assert.equal(cell("B2")?.dateIso, "2024-01-01", "a numeric serial is still converted");
+  assert.equal(cell("B3")?.value, "2026-10-13", "an ISO text date stays literal");
+  assert.equal(cell("B3")?.rawValue, "2026-10-13");
+  assert.equal(cell("B3")?.dateIso, null, "an ISO text date is not re-derived as a serial");
+  assert.equal(cell("B4")?.value, "TBD");
+  const all = result.chunks.map((chunk) => chunk.chunkText).join("\n");
+  assert.doesNotMatch(all, /invalid Excel serial 2026-10-13/);
+  assert.doesNotMatch(all, /invalid Excel serial TBD/);
+  assert.doesNotMatch(all, /invalid Excel serial Baseline Start/);
+  assert.doesNotMatch(text5("B3"), /Needs Review/);
+  assert.match(text5("B5"), /Needs Review: invalid Excel serial 60/, "an impossible numeric serial is still flagged");
+});
+
+test("a period band is recognised structurally, and a first record with uneven dates stays data", async () => {
+  const cell = (reference, inner, type, style = false) =>
+    `<c r="${reference}"${style ? ' s="0"' : ""}${type ? ` t="${type}"` : ""}>${inner}</c>`;
+  const text = (reference, value) => cell(reference, `<is><t>${value}</t></is>`, "inlineStr");
+  const date = (reference, serial) => cell(reference, `<v>${serial}</v>`, undefined, true);
+  const number = (reference, value) => cell(reference, `<v>${value}</v>`);
+  const labelOf = (result, reference) =>
+    result.chunks
+      .flatMap((chunk) => chunk.sourceReferences ?? [])
+      .find((source) => source.cell?.cell === reference)?.cell?.label;
+  const parse = async (rows) =>
+    parseDocumentBuffer(
+      "band.xlsx",
+      await xlsxPackage("Plan", rows, { styles: '<xf numFmtId="14"/>' }),
+    );
+
+  // Band labels use no known week naming; every band column has a weekly date
+  // directly below it, next to real field labels that sit outside the band.
+  const banded = await parse(
+    `<row r="1">${text("C1", "Phase A")}${text("D1", "Phase B")}${text("E1", "Phase C")}</row>` +
+    `<row r="2">${text("A2", "WBS")}${text("B2", "Activity")}${date("C2", 46283)}${date("D2", 46290)}${date("E2", 46297)}</row>` +
+    `<row r="3">${text("A3", "1.1")}${text("B3", "Survey")}${number("C3", 1)}</row>` +
+    `<row r="4">${text("A4", "1.2")}${text("B4", "Design")}${number("D4", 1)}</row>`,
+  );
+  assert.equal(banded.ok, true, JSON.stringify(banded));
+  if (!banded.ok) return;
+  assert.equal(labelOf(banded, "A3"), "WBS", "the real header row labels the data");
+  assert.equal(labelOf(banded, "B4"), "Activity");
+
+  // Every header column has a date below it and a label sits outside the
+  // band, so only the spacing proof can tell a first record from a header
+  // row: these dates are not evenly spaced, so the row stays data.
+  const record = await parse(
+    `<row r="1">${text("B1", "Start")}${text("C1", "Finish")}${text("D1", "Review")}</row>` +
+    `<row r="2">${text("A2", "Kickoff")}${date("B2", 46283)}${date("C2", 46301)}${date("D2", 46330)}</row>` +
+    `<row r="3">${text("A3", "Design")}${date("B3", 46290)}${date("C3", 46320)}${number("D3", 5)}</row>`,
+  );
+  assert.equal(record.ok, true, JSON.stringify(record));
+  if (!record.ok) return;
+  assert.equal(labelOf(record, "B2"), "Start", "the first record is labelled by the header, not consumed as one");
+  assert.equal(labelOf(record, "C3"), "Finish");
 });

@@ -538,7 +538,7 @@ test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived 
       await processDocumentJob(job(buffer), store),
     );
     assert.equal(jobResult.status, "completed", jobResult.processing_error);
-    assert.equal(jobResult.parser_version, "document-parser/20");
+    assert.equal(jobResult.parser_version, "document-parser/22");
     // The literal actual row survives with its full period/cut-off provenance,
     // alongside the deterministic-first % Complete rows the pass now derives
     // from the Workplan sheet's percent-formatted numeric cells.
@@ -929,7 +929,7 @@ test("a generated XLSX keeps a literal cell while a sibling formula has no cache
     ),
   );
   assert.equal(result.status, "completed", result.processing_error);
-  assert.equal(result.parser_version, "document-parser/20");
+  assert.equal(result.parser_version, "document-parser/22");
   assert.equal(result.processing_status, "needs_review");
   assert.match(result.processing_error ?? "", /Formula results are unavailable/);
   assert.ok(groupCalls > 0);
