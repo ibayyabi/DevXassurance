@@ -9,7 +9,11 @@ import type {
 import type {
   AssuranceDocument,
   AssuranceFinding,
+  AssuranceObservationReview,
   AssuranceReview,
+  CostObservationReviewRow,
+  ObservationReviewDocument,
+  ObservationReviewRow,
 } from "@/features/assurance/lib/queries";
 
 /**
@@ -1041,4 +1045,470 @@ export function buildTrendPoints(reviews: readonly AssuranceReview[]): OverviewT
         stale,
       };
     });
+}
+
+// ---------------------------------------------------------------------------
+// Published observation evidence (no review required)
+// ---------------------------------------------------------------------------
+
+/** Domain contract of the published observations and of per-domain coverage. */
+export const publishedDomains = ["budget", "schedule", "progress", "risk"] as const;
+
+export type PublishedDomain = (typeof publishedDomains)[number];
+
+const publishedDomainLabels: Record<string, string> = {
+  budget: "Anggaran",
+  schedule: "Jadwal",
+  progress: "Progres",
+  risk: "Risiko",
+};
+
+export function publishedDomainLabel(domain: string) {
+  return publishedDomainLabels[domain] ?? domain;
+}
+
+export type PublishedCoverageState =
+  | "processed"
+  | "partial"
+  | "unprocessed"
+  | "ambiguous_conflicting"
+  | "absent";
+
+const publishedCoverageStateLabels: Record<PublishedCoverageState, string> = {
+  processed: "Cakupan domain diproses",
+  partial: "Cakupan sebagian",
+  unprocessed: "Belum diproses",
+  ambiguous_conflicting: "Ambigu / bertentangan",
+  absent: "Tidak ditemukan di sumber",
+};
+
+export function publishedCoverageStateLabel(state: PublishedCoverageState) {
+  return publishedCoverageStateLabels[state];
+}
+
+/**
+ * Coverage tone never means "healthy": `processed` only says the domain's
+ * evidence groups were processed, every other state is an open gap.
+ */
+export function publishedCoverageStateTone(state: PublishedCoverageState) {
+  if (state === "processed") return "ok" as const;
+  if (state === "absent") return "neutral" as const;
+  return "warn" as const;
+}
+
+export type PublishedObservationDecision = "accepted" | "corrected" | "rejected" | "pending";
+
+export type PublishedObservationView = {
+  id: string;
+  domain: string;
+  domainLabel: string;
+  typeLabel: string;
+  value: string;
+  /** Source-proven period of this claim; null when the source proves none. */
+  period: string | null;
+  periodLabel: string;
+  /** `claim` when the claim states its own period; `unknown` is never filled in. */
+  periodOrigin: "claim" | "unknown";
+  scope: string | null;
+  scopeProvenance: string | null;
+  sourceTitle: string;
+  sourceVersion: string;
+  location: string | null;
+  excerpt: string;
+  decision: PublishedObservationDecision;
+  decisionNote: string | null;
+};
+
+export type PublishedCoverageView = {
+  domain: string;
+  domainLabel: string;
+  state: PublishedCoverageState;
+  stateLabel: string;
+  tone: "ok" | "warn" | "neutral";
+  processedGroups: number;
+  totalGroups: number;
+  reason: string | null;
+};
+
+export type PublishedEvidenceDocumentView = {
+  documentId: string;
+  title: string;
+  sourceVersion: string;
+  processingStatus: string;
+  /** Honest processing state; a needs-review source still keeps its warnings. */
+  processingNote: string;
+  period: string | null;
+  periodLabel: string;
+  coverage: PublishedCoverageView[];
+  gaps: PublishedCoverageView[];
+  observations: PublishedObservationView[];
+};
+
+export type PublishedDomainStateView = {
+  domain: PublishedDomain;
+  domainLabel: string;
+  state: PublishedCoverageState;
+  stateLabel: string;
+  tone: "ok" | "warn" | "neutral";
+  observationCount: number;
+  sourceCount: number;
+  gaps: { sourceTitle: string; reason: string }[];
+};
+
+export type PublishedEvidence = {
+  documents: PublishedEvidenceDocumentView[];
+  domains: PublishedDomainStateView[];
+  eligibleObservationCount: number;
+  excludedObservationCount: number;
+  /**
+   * Always true for this read model: the overview shows cited source claims and
+   * coverage gaps, never a project-level health verdict.
+   */
+  claimsOnly: true;
+};
+
+const assuranceObservationTypeLabels: Record<string, string> = {
+  milestone: "Tanggal milestone",
+  progress: "Progres",
+  risk_snapshot: "Potret risiko",
+  risk_register_statement: "Pernyataan register risiko",
+};
+
+const costMeasureLabels: Record<string, string> = {
+  approved_baseline: "Baseline disetujui",
+  actual_to_date: "Aktual s.d. hari ini",
+  committed: "Biaya komitmen",
+  eac: "Estimasi penyelesaian (EAC)",
+};
+
+const scopeProvenanceKindLabels: Record<string, string> = {
+  cited_row_column: "baris yang dikutip",
+  declared_subject_key: "label kunci subjek",
+  declared_subject: "nilai subjek",
+  sheet_title: "judul lembar",
+};
+
+const unknownPeriodLabel = "Periode tidak terbukti";
+const unknownVersionLabel = "Versi sumber tidak diketahui";
+
+function publishedPeriod(value: string | null | undefined): string | null {
+  const trimmed = (value ?? "").trim();
+  return trimmed || null;
+}
+
+function locationLabel(
+  pageNumber: number | null,
+  sectionLabel: string | null,
+  sourceLocation: Record<string, string | number> | null | undefined,
+) {
+  return [
+    formatSourceLocation(sourceLocation ?? null),
+    pageNumber ? `hal. ${pageNumber}` : null,
+    sectionLabel,
+  ].filter((part): part is string => Boolean(part)).join(" · ") || null;
+}
+
+function provenanceLabel(
+  provenance: { kind: string; sheetName: string; cellReference: string; excerpt: string }[] | null,
+) {
+  if (!provenance || provenance.length === 0) return null;
+  return provenance
+    .map((item) => `${scopeProvenanceKindLabels[item.kind] ?? item.kind}: ${item.sheetName}!${item.cellReference} — “${item.excerpt}”`)
+    .join(" · ");
+}
+
+function decisionFields(decision: AssuranceObservationReview["decisions"][number] | undefined) {
+  if (!decision) return { decision: "pending" as const, corrected: null, decisionNote: null };
+  return {
+    decision: decision.decision,
+    corrected: decision.decision === "corrected" ? decision.correctedObservation : null,
+    decisionNote: decision.reason
+      ? `${decision.reason} (${decision.decidedAt.slice(0, 10)})`
+      : null,
+  };
+}
+
+/**
+ * Assurance observation claim as cited text. A missing value stays missing
+ * text, never a zero; a corrected decision renders the corrected claim.
+ */
+function assuranceObservationView(
+  row: ObservationReviewRow,
+  decision: AssuranceObservationReview["decisions"][number] | undefined,
+  document: ObservationReviewDocument,
+): PublishedObservationView {
+  const { decision: state, corrected, decisionNote } = decisionFields(decision);
+  const value = row.observation;
+  let valueText: string;
+  if (row.observationType === "progress") {
+    valueText = [
+      typeof value.raw_value === "string" ? `“${value.raw_value}”` : null,
+      typeof corrected?.percent === "number"
+        ? `→ dikoreksi menjadi ${corrected.percent}%`
+        : typeof value.percent === "number"
+          ? `→ ${value.percent}%`
+          : "→ persentase tidak terbaca",
+      typeof value.scope_label === "string" ? `· scope ${value.scope_label}` : null,
+    ].filter(Boolean).join(" ");
+  } else if (row.observationType === "milestone") {
+    valueText = [
+      typeof value.label === "string" ? value.label : "Milestone",
+      typeof corrected?.date === "string"
+        ? `→ dikoreksi menjadi ${corrected.date}`
+        : typeof value.date === "string"
+          ? `· ${value.date}`
+          : "· tanggal tidak terbaca",
+      typeof value.scope_label === "string" ? `· scope ${value.scope_label}` : null,
+    ].filter(Boolean).join(" ");
+  } else if (row.observationType === "risk_snapshot") {
+    valueText = [
+      typeof value.risk_id === "string" ? value.risk_id : "Risiko tanpa ID",
+      typeof value.name === "string" ? `· ${value.name}` : null,
+      typeof corrected?.status === "string"
+        ? `· status dikoreksi: ${corrected.status}`
+        : typeof value.status === "string" ? `· ${value.status}` : null,
+      typeof corrected?.rating_label === "string"
+        ? `· peringkat dikoreksi: ${corrected.rating_label}`
+        : typeof value.rating_label === "string" ? `· ${value.rating_label}` : null,
+    ].filter(Boolean).join(" ");
+  } else {
+    valueText = value.state === "no_open_high_or_critical"
+      ? "Sumber menyatakan tidak ada risiko tinggi/kritis terbuka"
+      : value.state
+        ? "Sumber menyatakan ada risiko yang dilaporkan"
+        : "Pernyataan register risiko";
+  }
+
+  const claimPeriod =
+    publishedPeriod(typeof value.as_of_date === "string" ? value.as_of_date : null) ??
+    publishedPeriod(typeof value.period_label === "string" ? value.period_label : null);
+  const scopeLabel = typeof value.scope_label === "string" ? value.scope_label : null;
+  const provenance = Array.isArray(value.scope_provenance)
+    ? (value.scope_provenance as {
+        kind: string; sheet_name: string; cell_reference: string; excerpt: string;
+      }[]).map((item) => ({
+        kind: item.kind,
+        sheetName: item.sheet_name,
+        cellReference: item.cell_reference,
+        excerpt: item.excerpt,
+      }))
+    : null;
+
+  return {
+    ...claimIdentity(row.id, row.domain, document, state, decisionNote),
+    typeLabel: assuranceObservationTypeLabels[row.observationType] ?? row.observationType,
+    value: valueText,
+    ...claimPeriodFields(claimPeriod),
+    scope: scopeLabel,
+    scopeProvenance: provenanceLabel(provenance),
+    location: locationLabel(row.pageNumber, row.sectionLabel, row.sourceLocation),
+    excerpt: row.excerpt,
+  };
+}
+
+/** Cost observation claim; unreadable amounts stay unreadable, not zero. */
+function costObservationView(
+  row: CostObservationReviewRow,
+  decision: AssuranceObservationReview["decisions"][number] | undefined,
+  document: ObservationReviewDocument,
+): PublishedObservationView {
+  const { decision: state, corrected, decisionNote } = decisionFields(decision);
+  const amount = typeof corrected?.amount === "number" ? corrected.amount : row.normalizedAmount;
+  const currency = typeof corrected?.currency === "string" ? corrected.currency : row.currency;
+  const valueText = `“${row.sourceValue}” → ${
+    amount !== null && currency ? `${currency} ${amount}` : "jumlah/mata uang tidak terbaca aman"
+  }`;
+  const claimPeriod = publishedPeriod(row.asOfDate) ?? publishedPeriod(row.periodLabel);
+
+  return {
+    ...claimIdentity(row.id, "budget", document, state, decisionNote),
+    typeLabel: costMeasureLabels[row.measure] ?? row.measure,
+    value: valueText,
+    ...claimPeriodFields(claimPeriod),
+    scope: row.scopeLabel,
+    scopeProvenance: provenanceLabel(row.scopeProvenance),
+    location: locationLabel(row.pageNumber, row.sectionLabel, null),
+    excerpt: row.excerpt,
+  };
+}
+
+function claimIdentity(
+  id: string,
+  domain: string,
+  document: ObservationReviewDocument,
+  decision: PublishedObservationDecision,
+  decisionNote: string | null,
+) {
+  return {
+    id,
+    domain,
+    domainLabel: publishedDomainLabel(domain),
+    sourceTitle: document.title,
+    sourceVersion: document.contentHash ? document.contentHash.slice(0, 12) : unknownVersionLabel,
+    decision,
+    decisionNote,
+  };
+}
+
+/**
+ * A claim period is only ever proven by the claim itself. The document's
+ * reporting period is never lent to an observation — an extraction whose
+ * as-of date is missing (for example deterministic WBS progress rows) stays an
+ * unproven date, shown as a sourced claim, not a cut-off.
+ */
+function claimPeriodFields(claimPeriod: string | null) {
+  return {
+    period: claimPeriod,
+    periodLabel: claimPeriod ? formatPeriodLabel(claimPeriod) : unknownPeriodLabel,
+    periodOrigin: claimPeriod ? ("claim" as const) : ("unknown" as const),
+  };
+}
+
+function observationSortKey(view: PublishedObservationView) {
+  const domainIndex = publishedDomains.indexOf(view.domain as PublishedDomain);
+  return [
+    domainIndex === -1 ? publishedDomains.length : domainIndex,
+    view.typeLabel,
+    view.id,
+  ].join("|");
+}
+
+function processingNote(status: string) {
+  if (status === "needs_review") {
+    return "Perlu diperiksa — peringatan pemrosesan tetap berlaku; hanya observasi tervalidasi yang ditampilkan.";
+  }
+  if (status === "completed") return "Selesai diproses.";
+  return `Status pemrosesan: ${status}.`;
+}
+
+function buildPublishedDocument(
+  document: ObservationReviewDocument,
+  evidence: AssuranceObservationReview,
+  decisions: Map<string, AssuranceObservationReview["decisions"][number]>,
+): PublishedEvidenceDocumentView {
+  const coverage: PublishedCoverageView[] = document.coverage
+    .map((row) => coverageView(row))
+    .sort((first, second) =>
+      publishedDomains.indexOf(first.domain as PublishedDomain) -
+      publishedDomains.indexOf(second.domain as PublishedDomain),
+    );
+  const observations = [
+    ...evidence.observations
+      .filter((row) => row.documentId === document.documentId)
+      .map((row) => assuranceObservationView(row, decisions.get(row.observationFingerprint), document)),
+    ...evidence.costObservations
+      .filter((row) => row.documentId === document.documentId)
+      .map((row) => costObservationView(row, decisions.get(row.observationFingerprint), document)),
+  ].sort((first, second) => observationSortKey(first).localeCompare(observationSortKey(second)));
+
+  return {
+    documentId: document.documentId,
+    title: document.title,
+    sourceVersion: document.contentHash ? document.contentHash.slice(0, 12) : unknownVersionLabel,
+    processingStatus: document.processingStatus,
+    processingNote: processingNote(document.processingStatus),
+    period: publishedPeriod(document.reportingPeriod),
+    periodLabel: document.reportingPeriod
+      ? formatPeriodLabel(document.reportingPeriod)
+      : unknownPeriodLabel,
+    coverage,
+    gaps: coverage.filter((row) => row.state !== "processed"),
+    observations,
+  };
+}
+
+function coverageView(row: ObservationReviewDocument["coverage"][number]): PublishedCoverageView {
+  // An unknown or missing stored state fails closed to `unprocessed`: it never
+  // becomes a processed (or healthy) domain.
+  const known = publishedCoverageStateLabels[row.state as PublishedCoverageState] !== undefined;
+  const state: PublishedCoverageState = known
+    ? (row.state as PublishedCoverageState)
+    : "unprocessed";
+  return {
+    domain: row.domain,
+    domainLabel: publishedDomainLabel(row.domain),
+    state,
+    stateLabel: publishedCoverageStateLabel(state),
+    tone: publishedCoverageStateTone(state),
+    processedGroups: row.processedGroups,
+    totalGroups: row.totalGroups,
+    reason: row.reason,
+  };
+}
+
+/**
+ * Domain state is the coverage state across the sources of this project, never
+ * a project health verdict: any ambiguous source makes the domain ambiguous,
+ * and a domain is only `processed` when every source processed it. A domain
+ * with a gap never holds back the other domains.
+ */
+function domainState(states: PublishedCoverageState[]): PublishedCoverageState {
+  if (states.length === 0) return "unprocessed";
+  if (states.includes("ambiguous_conflicting")) return "ambiguous_conflicting";
+  if (states.every((state) => state === "processed")) return "processed";
+  if (states.some((state) => state === "processed")) return "partial";
+  if (states.every((state) => state === "absent")) return "absent";
+  return "unprocessed";
+}
+
+function buildPublishedDomainStates(
+  sourceDocuments: readonly ObservationReviewDocument[],
+  documents: PublishedEvidenceDocumentView[],
+): PublishedDomainStateView[] {
+  return publishedDomains.map((domain) => {
+    const states = sourceDocuments.flatMap((document) =>
+      document.coverage
+        .filter((row) => row.domain === domain)
+        .map((row) => coverageView(row).state),
+    );
+    const state = domainState(states);
+    const observations = documents.flatMap((document) =>
+      document.observations.filter((view) => view.decision !== "rejected" && view.domain === domain),
+    );
+    const gaps = documents.flatMap((document) =>
+      document.gaps
+        .filter((row) => row.domain === domain)
+        .map((row) => ({
+          sourceTitle: document.title,
+          reason: row.reason ?? row.stateLabel,
+        })),
+    );
+    return {
+      domain,
+      domainLabel: publishedDomainLabel(domain),
+      state,
+      stateLabel: publishedCoverageStateLabel(state),
+      tone: publishedCoverageStateTone(state),
+      observationCount: observations.length,
+      sourceCount: new Set(observations.map((view) => view.sourceTitle)).size,
+      gaps,
+    };
+  });
+}
+
+/**
+ * Published observation evidence of a project, independent of any assurance
+ * review. Every claim keeps its source version, period (or unproven period),
+ * scope and citation; gaps stay gaps. No comparison between periods or
+ * baselines is derived here, and no project-level condition is computed.
+ */
+export function buildPublishedEvidence(evidence: AssuranceObservationReview): PublishedEvidence {
+  const decisions = new Map(
+    evidence.decisions.map((decision) => [decision.observationFingerprint, decision]),
+  );
+  const documents = [...evidence.documents]
+    .sort((first, second) =>
+      first.title.localeCompare(second.title, "id") ||
+      first.documentId.localeCompare(second.documentId),
+    )
+    .map((document) => buildPublishedDocument(document, evidence, decisions));
+  const observations = documents.flatMap((document) => document.observations);
+
+  return {
+    documents,
+    domains: buildPublishedDomainStates(evidence.documents, documents),
+    eligibleObservationCount: observations.filter((view) => view.decision !== "rejected").length,
+    excludedObservationCount: observations.filter((view) => view.decision === "rejected").length,
+    claimsOnly: true,
+  };
 }
