@@ -16,6 +16,7 @@ import { SectionCard } from "@/components/ui/section-card";
 import type { ReviewCondition } from "@/features/assurance/lib/analysis";
 import type {
   AssuranceAction,
+  AssuranceDocument,
   AssuranceFinding,
   AssuranceReview,
 } from "@/features/assurance/lib/queries";
@@ -27,21 +28,40 @@ import {
   ScheduleTrendChart,
   type ActionStatusDatum,
   type DomainStatusDatum,
-  type OverviewTrendPoint,
 } from "@/features/dashboard/components/overview-charts";
-
-const assessedDomains = ["budget", "schedule", "risk"] as const;
+import {
+  DomainSummarySection,
+  OverviewWarnings,
+  ProgressOverviewSection,
+  ReviewEvidenceCard,
+  ReviewNavigator,
+} from "@/features/dashboard/components/overview-sections";
+import {
+  buildComputedProgress,
+  buildCoverageWarnings,
+  buildDomainSummaries,
+  buildFreshnessWarnings,
+  buildProgressScopes,
+  buildRagClaims,
+  buildReviewEvidence,
+  buildReviewNavigation,
+  buildTrendPoints,
+  isAnalysisCurrent,
+  reviewCutoff,
+} from "@/features/dashboard/lib/overview";
 
 export function UsableOverview({
   projectId,
   projectName,
   review,
   reviews,
+  documents,
 }: {
   projectId: string;
   projectName: string;
   review: AssuranceReview | null;
   reviews: AssuranceReview[];
+  documents: AssuranceDocument[];
 }) {
   if (!review) {
     return (
@@ -83,15 +103,21 @@ export function UsableOverview({
     );
   }
 
-  const budget = findDomainFinding(review, "budget");
-  const schedule = findDomainFinding(review, "schedule");
-  const risk = findDomainFinding(review, "risk");
-  const overall = overallCondition(review.findings);
+  const analysisCurrent = isAnalysisCurrent(review);
+  const budget = analysisCurrent ? findDomainFinding(review, "budget") : undefined;
+  const schedule = analysisCurrent ? findDomainFinding(review, "schedule") : undefined;
+  const risk = analysisCurrent ? findDomainFinding(review, "risk") : undefined;
   const completedAt = textValue(review.analysisMetadata.completed_at);
-  const history = [...reviews]
-    .filter((item) => item.findings.length > 0)
-    .sort((a, b) => a.reportingPeriod.localeCompare(b.reportingPeriod));
-  const trendPoints = buildTrendPoints(history);
+  const cutoff = reviewCutoff(review);
+  const navigation = buildReviewNavigation(reviews, documents);
+  const evidence = buildReviewEvidence(review, reviews, documents);
+  const domainSummaries = buildDomainSummaries(review, documents);
+  const progressScopes = buildProgressScopes(review);
+  const computedProgress = buildComputedProgress(review);
+  const ragClaims = buildRagClaims(review);
+  const coverageWarnings = buildCoverageWarnings(review);
+  const freshnessWarnings = buildFreshnessWarnings(review, documents);
+  const trendPoints = buildTrendPoints(reviews);
   const budgetCurrency =
     textValue(budget?.currentValue?.currency) ||
     textValue(budget?.baselineValue?.currency);
@@ -117,22 +143,19 @@ export function UsableOverview({
 
   return (
     <div className="mx-auto max-w-[1600px] space-y-6">
-      <section
-        className={`overflow-hidden rounded-2xl border border-l-4 border-ui-border bg-surface shadow-sm ${conditionAccent(overall.condition)}`}
-      >
+      <section className="overflow-hidden rounded-2xl border border-l-4 border-ui-border bg-surface shadow-sm">
         <div className="grid lg:grid-cols-[1.35fr_0.65fr]">
           <div className="p-6 md:p-8">
-            <div className="flex flex-wrap items-center gap-3">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-ink-muted">
-                Asesmen terbaru
-              </p>
-              <ConditionBadge condition={overall.condition} />
-            </div>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-ink-muted">
+              Tinjauan per cut-off
+            </p>
             <h2 className="mt-3 text-4xl font-semibold tracking-tight text-ink md:text-5xl">
-              {overall.label}
+              {projectName}
             </h2>
             <p className="mt-3 max-w-3xl text-base leading-7 text-ink-muted">
-              {overall.explanation}
+              {analysisCurrent
+                ? "Anggaran, Jadwal, dan Risiko dinilai terpisah dari bukti pada cut-off ini. Tidak ada skor gabungan lintas domain."
+                : "Hasil analisis pada cut-off ini tidak mutakhir. Kondisi per domain tidak disajikan; jalankan analisis ulang sebelum memakai tinjauan ini."}
             </p>
             <div className="mt-6 flex flex-wrap gap-3">
               <Button asChild>
@@ -149,8 +172,8 @@ export function UsableOverview({
           </div>
           <div className="grid grid-cols-2 gap-px border-t border-ui-border bg-ui-border lg:border-l lg:border-t-0">
             <SummaryStat
-              label="Periode asesmen"
-              value={formatPeriod(review.reportingPeriod)}
+              label="Cut-off asesmen"
+              value={cutoff.label}
             />
             <SummaryStat
               label="Bukti disertakan"
@@ -168,7 +191,25 @@ export function UsableOverview({
         </div>
       </section>
 
-      <section aria-label="Indikator proyek terkini">
+      <ReviewNavigator
+        projectId={projectId}
+        items={navigation}
+        activeReviewId={review.id}
+      />
+
+      <OverviewWarnings
+        analysisCurrent={analysisCurrent}
+        analysisError={review.status === "analysis_failed" ? review.analysisError : null}
+        freshness={freshnessWarnings}
+        coverage={coverageWarnings}
+      />
+
+      {!analysisCurrent && (
+        <p className="rounded-xl bg-status-warn-bg px-3 py-2 text-sm text-status-warn-text" aria-roledescription="Peringatan">
+          Hasil analisis tidak mutakhir — nilai per domain tidak disajikan sebagai kondisi terkini. Lihat banner peringatan.
+        </p>
+      )}
+      <section aria-label={analysisCurrent ? "Indikator proyek terkini" : "Indikator proyek (tidak mutakhir)"}>
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <KpiCard
             icon={CircleDollarSign}
@@ -201,6 +242,16 @@ export function UsableOverview({
         </div>
       </section>
 
+      <DomainSummarySection summaries={domainSummaries} />
+
+      <ProgressOverviewSection
+        scopes={progressScopes}
+        statuses={computedProgress.statuses}
+        rule={computedProgress.rule}
+        gated={computedProgress.gated}
+        claims={ragClaims}
+      />
+
       <section className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.8fr)_minmax(320px,0.8fr)]">
         <ScheduleTrendChart
           points={trendPoints}
@@ -208,8 +259,8 @@ export function UsableOverview({
         />
         <DomainStatusChart
           data={domainStatusData}
-          overallLabel={overall.label}
-          period={formatPeriod(review.reportingPeriod)}
+          overallLabel="Per domain"
+          period={cutoff.label}
           evidenceCount={review.documents.length}
         />
       </section>
@@ -228,12 +279,14 @@ export function UsableOverview({
         />
       </section>
 
+      <ReviewEvidenceCard evidence={evidence} />
+
       <SectionCard
         icon={FileSearch}
         title="Apa yang dikatakan bukti"
         subtitle="Temuan terbaru dari perbandingan rencana dan realisasi di balik grafik dasbor."
       >
-        <div className="grid gap-5 xl:grid-cols-3">
+        <div className="grid min-w-0 gap-5 xl:grid-cols-3">
           <FindingPanel
             icon={CircleDollarSign}
             label="Anggaran"
@@ -328,7 +381,7 @@ function FindingPanel({
 
   return (
     <article
-      className={`rounded-2xl border border-t-4 border-ui-border bg-base p-5 ${conditionTopBorder(condition)}`}
+      className={`min-w-0 break-words rounded-2xl border border-t-4 border-ui-border bg-base p-5 ${conditionTopBorder(condition)}`}
     >
       <div className="flex items-start justify-between gap-4">
         <div className="flex min-w-0 items-start gap-3">
@@ -339,7 +392,7 @@ function FindingPanel({
             <p className="text-xs font-semibold uppercase tracking-[0.12em] text-ink-muted">
               {label}
             </p>
-            <h3 className="mt-1 text-lg font-semibold leading-6 text-ink">
+            <h3 className="mt-1 break-words text-lg font-semibold leading-6 text-ink">
               {finding?.headline ?? "Perlu bukti tambahan"}
             </h3>
           </div>
@@ -347,7 +400,7 @@ function FindingPanel({
       </div>
       {finding ? (
         <>
-          <p className="mt-4 text-sm leading-6 text-ink-muted">
+          <p className="mt-4 break-words text-sm leading-6 text-ink-muted">
             {finding.explanation}
           </p>
           {children}
@@ -427,11 +480,11 @@ function RiskSummary({ finding }: { finding: AssuranceFinding }) {
 
   return (
     <dl className="mt-5 grid grid-cols-3 gap-2 border-t border-ui-border pt-4">
-      <RiskCount label="Kritis" value={counts.critical ?? 0} danger />
-      <RiskCount label="Tinggi" value={counts.high ?? 0} />
+      <RiskCount label="Kritis" value={counts.critical} danger />
+      <RiskCount label="Tinggi" value={counts.high} />
       <RiskCount
         label="Tidak terkendali"
-        value={counts.uncontrolled ?? 0}
+        value={counts.uncontrolled}
         danger
       />
     </dl>
@@ -450,7 +503,7 @@ function ComparisonRow({
   return (
     <div className="flex items-baseline justify-between gap-4 rounded-xl bg-surface px-3 py-3">
       <dt className="text-xs text-ink-muted">{label}</dt>
-      <dd className={`text-right text-sm font-semibold ${valueClassName}`}>
+      <dd className={`min-w-0 break-words text-right text-sm font-semibold ${valueClassName}`}>
         {value}
       </dd>
     </div>
@@ -463,7 +516,7 @@ function RiskCount({
   danger = false,
 }: {
   label: string;
-  value: number;
+  value: number | null;
   danger?: boolean;
 }) {
   return (
@@ -471,10 +524,14 @@ function RiskCount({
       <dt className="text-[11px] text-ink-muted">{label}</dt>
       <dd
         className={`mt-1 text-2xl font-semibold ${
-          danger && value > 0 ? "text-status-critical-text" : "text-ink"
+          value === null
+            ? "text-ink-muted"
+            : danger && value > 0
+              ? "text-status-critical-text"
+              : "text-ink"
         }`}
       >
-        {value}
+        {value === null ? "—" : value}
       </dd>
     </div>
   );
@@ -571,7 +628,7 @@ function ActionStatusBadge({ status }: { status: AssuranceAction["status"] }) {
 
 function MissingEvidence({ finding }: { finding: AssuranceFinding }) {
   return finding.requiredEvidence.length > 0 ? (
-    <p className="mt-5 rounded-xl bg-status-warn-bg p-3 text-sm text-status-warn-text">
+    <p className="mt-5 break-words rounded-xl bg-status-warn-bg p-3 text-sm text-status-warn-text">
       Diperlukan: {finding.requiredEvidence.join(", ")}
     </p>
   ) : null;
@@ -585,70 +642,6 @@ function ConditionBadge({ condition }: { condition: ReviewCondition }) {
   );
 }
 
-function overallCondition(findings: AssuranceFinding[]) {
-  if (
-    findings.length < assessedDomains.length ||
-    findings.some((item) => item.condition === "more_evidence_required")
-  ) {
-    const missing = findings.find(
-      (item) => item.condition === "more_evidence_required",
-    );
-    return {
-      condition: "more_evidence_required" as const,
-      label: "Bukti belum lengkap",
-      explanation:
-        missing?.explanation ??
-        "Bukti Anggaran, Jadwal, dan Risiko diperlukan sebelum manajemen dapat mengandalkan kondisi proyek yang lengkap.",
-    };
-  }
-
-  const critical = findings.find((item) => item.condition === "critical");
-  if (critical) {
-    return {
-      condition: "critical" as const,
-      label: "Kondisi kritis",
-      explanation: `${critical.headline}. ${critical.explanation}`,
-    };
-  }
-
-  const attention = findings.find(
-    (item) => item.condition === "needs_attention",
-  );
-  if (attention) {
-    return {
-      condition: "needs_attention" as const,
-      label: "Perlu Perhatian",
-      explanation: `${attention.headline}. ${attention.explanation}`,
-    };
-  }
-
-  return {
-    condition: "on_track" as const,
-    label: "Sesuai Rencana",
-    explanation:
-      "Bukti Anggaran, Jadwal, dan Risiko yang tersedia masih dalam aturan assurance yang berlaku untuk periode pelaporan ini.",
-  };
-}
-
-function buildTrendPoints(reviews: AssuranceReview[]): OverviewTrendPoint[] {
-  return reviews.map((item) => {
-    const budget = findDomainFinding(item, "budget");
-    const schedule = findDomainFinding(item, "schedule");
-    const risk = findDomainFinding(item, "risk");
-    const riskCounts = readRiskCounts(risk);
-
-    return {
-      period: item.reportingPeriod,
-      label: shortPeriod(item.reportingPeriod),
-      budgetPlan: numberValue(budget?.baselineValue?.amount),
-      budgetCurrent: numberValue(budget?.currentValue?.amount),
-      scheduleDelay: numberValue(schedule?.variance?.delay_days),
-      openCriticalRisks: riskCounts.critical,
-      openHighRisks: riskCounts.high,
-      uncontrolledRisks: riskCounts.uncontrolled,
-    };
-  });
-}
 
 function buildActionStatusData(
   actions: AssuranceAction[],
@@ -680,7 +673,13 @@ function findDomainFinding(
   return review.findings.find((item) => item.domain === domain);
 }
 
-function readRiskCounts(finding?: AssuranceFinding) {
+type RiskCounts = {
+  critical: number | null;
+  high: number | null;
+  uncontrolled: number | null;
+};
+
+function readRiskCounts(finding?: AssuranceFinding): RiskCounts {
   return {
     critical: numberValue(finding?.currentValue?.open_critical_count),
     high: numberValue(finding?.currentValue?.open_high_count),
@@ -702,13 +701,13 @@ function scheduleDelayLabel(finding?: AssuranceFinding) {
   return formatDelay(delay);
 }
 
-function riskCountLabel(counts: ReturnType<typeof readRiskCounts>) {
-  if (counts.critical === null && counts.high === null) return "Tidak ditemukan";
-  return String((counts.critical ?? 0) + (counts.high ?? 0));
+function riskCountLabel(counts: RiskCounts) {
+  if (counts.critical === null || counts.high === null) return "Tidak tersedia";
+  return String(counts.critical + counts.high);
 }
 
 function conditionLabel(condition: ReviewCondition) {
-  if (condition === "on_track") return "Sesuai Rencana";
+  if (condition === "on_track") return "Sesuai Rencana (per domain)";
   if (condition === "needs_attention") return "Perlu Perhatian";
   if (condition === "critical") return "Kritis";
   return "Perlu Bukti Tambahan";
@@ -734,12 +733,6 @@ function actionStatusLabel(status: AssuranceAction["status"]) {
   return "Selesai";
 }
 
-function conditionAccent(condition: ReviewCondition) {
-  if (condition === "on_track") return "border-l-status-ok";
-  if (condition === "needs_attention") return "border-l-status-warn";
-  if (condition === "critical") return "border-l-status-critical";
-  return "border-l-status-neutral";
-}
 
 function conditionTopBorder(condition?: ReviewCondition) {
   if (condition === "on_track") return "border-t-status-ok";
@@ -807,24 +800,6 @@ function formatDate(value: string) {
     month: "short",
     timeZone: "UTC",
     year: "numeric",
-  }).format(new Date(`${value}T00:00:00Z`));
-}
-
-function formatPeriod(value: string) {
-  return new Intl.DateTimeFormat("id", {
-    day: "numeric",
-    month: "long",
-    timeZone: "UTC",
-    year: "numeric",
-  }).format(new Date(`${value}T00:00:00Z`));
-}
-
-function shortPeriod(value: string) {
-  return new Intl.DateTimeFormat("id", {
-    day: "numeric",
-    month: "short",
-    timeZone: "UTC",
-    year: "2-digit",
   }).format(new Date(`${value}T00:00:00Z`));
 }
 

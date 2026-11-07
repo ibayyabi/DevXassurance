@@ -29,17 +29,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { SectionCard } from "@/components/ui/section-card";
 import { StatusPill, type StatusTone } from "@/components/ui/status-pill";
 import type { ReviewCondition } from "@/features/assurance/lib/analysis";
-
-export type OverviewTrendPoint = {
-  period: string;
-  label: string;
-  budgetPlan: number | null;
-  budgetCurrent: number | null;
-  scheduleDelay: number | null;
-  openCriticalRisks: number | null;
-  openHighRisks: number | null;
-  uncontrolledRisks: number | null;
-};
+import type { OverviewTrendPoint } from "@/features/dashboard/lib/overview";
 
 export type DomainStatusDatum = {
   domain: "Anggaran" | "Jadwal" | "Risiko";
@@ -74,7 +64,12 @@ export function BudgetTrendChart({
   condition: ReviewCondition;
   currency: string;
 }) {
-  const chartPoints = points.filter(
+  // Every assessed cut-off stays in the series. A period without a comparable
+  // value is a gap: the line breaks there and is never bridged or drawn as 0.
+  const gapPeriods = points
+    .filter((point) => point.budgetPlan === null || point.budgetCurrent === null)
+    .map((point) => point.label);
+  const hasValues = points.some(
     (point) => point.budgetPlan !== null || point.budgetCurrent !== null,
   );
   const statusColor = conditionColor(condition);
@@ -86,25 +81,26 @@ export function BudgetTrendChart({
       description="Baseline disetujui dan EAC terlapor dari setiap periode asesmen."
       badge={<ConditionLabel condition={condition} />}
     >
-      {chartPoints.length === 0 ? (
+      {!hasValues ? (
         <ChartEmpty message="Nilai anggaran yang sebanding tidak ditemukan dalam bukti asesmen." />
       ) : (
-        <div
-          className="h-72 min-h-0 min-w-0 w-full"
-          role="img"
-          aria-label="Baseline disetujui dan EAC terlapor per periode asesmen"
-        >
-          <ResponsiveContainer
-            width="100%"
-            height="100%"
-            minWidth={0}
-            initialDimension={{ width: 0, height: 288 }}
+        <>
+          <div
+            className="h-72 min-h-0 min-w-0 w-full"
+            role="img"
+            aria-label="Baseline disetujui dan EAC terlapor per periode asesmen; garis terputus pada periode tanpa nilai"
           >
-            <AreaChart
-              data={chartPoints}
-              margin={{ top: 12, right: 12, bottom: 4, left: 2 }}
-              accessibilityLayer
+            <ResponsiveContainer
+              width="100%"
+              height="100%"
+              minWidth={0}
+              initialDimension={{ width: 0, height: 288 }}
             >
+              <AreaChart
+                data={points}
+                margin={{ top: 12, right: 12, bottom: 4, left: 2 }}
+                accessibilityLayer
+              >
               <defs>
                 <linearGradient id="budget-current-fill" x1="0" x2="0" y1="0" y2="1">
                   <stop offset="5%" stopColor={statusColor} stopOpacity={0.2} />
@@ -133,7 +129,9 @@ export function BudgetTrendChart({
               <Tooltip
                 contentStyle={tooltipStyle}
                 formatter={(value, name) => [
-                  formatMoney(Number(value), currency),
+                  value === null || value === undefined
+                    ? "Tidak tersedia"
+                    : formatMoney(Number(value), currency),
                   name === "budgetPlan" ? "Baseline disetujui" : "EAC terlapor",
                 ]}
                 labelFormatter={(label) => String(label)}
@@ -146,7 +144,6 @@ export function BudgetTrendChart({
                 wrapperStyle={{ color: "var(--text-muted)", fontSize: "0.75rem" }}
               />
               <Area
-                connectNulls
                 dataKey="budgetPlan"
                 fill="transparent"
                 name="budgetPlan"
@@ -156,7 +153,6 @@ export function BudgetTrendChart({
                 type="monotone"
               />
               <Area
-                connectNulls
                 dataKey="budgetCurrent"
                 fill="url(#budget-current-fill)"
                 name="budgetCurrent"
@@ -167,6 +163,11 @@ export function BudgetTrendChart({
             </AreaChart>
           </ResponsiveContainer>
         </div>
+          <GapNote
+            items={gapPeriods}
+            message="Garis terputus pada periode yang tidak memiliki nilai sebanding; itu gap bukti, bukan nol."
+          />
+        </>
       )}
     </ChartCard>
   );
@@ -179,12 +180,16 @@ export function ScheduleTrendChart({
   points: OverviewTrendPoint[];
   condition: ReviewCondition;
 }) {
-  const chartPoints = points
-    .filter((point) => point.scheduleDelay !== null)
-    .map((point) => ({
-      ...point,
-      scheduleBaseline: 0,
-    }));
+  // All assessed cut-offs stay; a cut-off without a comparable forecast gets
+  // null so both lines break there instead of implying an on-time 0.
+  const chartPoints = points.map((point) => ({
+    ...point,
+    scheduleBaseline: point.scheduleDelay === null ? null : 0,
+  }));
+  const gapPeriods = points
+    .filter((point) => point.scheduleDelay === null)
+    .map((point) => point.label);
+  const hasValues = points.some((point) => point.scheduleDelay !== null);
   const statusColor = conditionColor(condition);
 
   return (
@@ -194,13 +199,14 @@ export function ScheduleTrendChart({
       description="Pergerakan prakiraan dalam hari kalender terhadap baseline disetujui pada 0 hari."
       badge={<ConditionLabel condition={condition} />}
     >
-      {chartPoints.length === 0 ? (
+      {!hasValues ? (
         <ChartEmpty message="Tanggal jadwal yang sebanding tidak ditemukan dalam bukti asesmen." />
       ) : (
+        <>
         <div
           className="h-72 min-h-0 min-w-0 w-full"
           role="img"
-          aria-label="Baseline jadwal disetujui dan keterlambatan prakiraan per periode asesmen"
+          aria-label="Baseline jadwal disetujui dan keterlambatan prakiraan per periode asesmen; garis terputus pada periode tanpa nilai"
         >
           <ResponsiveContainer
             width="100%"
@@ -251,15 +257,16 @@ export function ScheduleTrendChart({
               <Tooltip
                 contentStyle={tooltipStyle}
                 formatter={(value, name) => [
-                  name === "Baseline disetujui"
-                    ? "0 hari (rencana disetujui)"
-                    : formatDelay(Number(value)),
+                  value === null || value === undefined
+                    ? "Tidak tersedia"
+                    : name === "Baseline disetujui"
+                      ? "0 hari (rencana disetujui)"
+                      : formatDelay(Number(value)),
                   String(name),
                 ]}
                 labelFormatter={(label) => String(label)}
               />
               <Line
-                connectNulls
                 dataKey="scheduleDelay"
                 dot={{
                   fill: "var(--surface)",
@@ -275,6 +282,11 @@ export function ScheduleTrendChart({
             </LineChart>
           </ResponsiveContainer>
         </div>
+          <GapNote
+            items={gapPeriods}
+            message="Garis terputus pada periode tanpa prakiraan yang sebanding; itu gap bukti, bukan 0 hari."
+          />
+        </>
       )}
     </ChartCard>
   );
@@ -388,17 +400,17 @@ export function RiskBreakdownChart({
   uncontrolled: number | null;
   condition: ReviewCondition;
 }) {
-  const data = [
-    { name: "Kritis", value: critical ?? 0, fill: "var(--status-critical)" },
-    { name: "Tinggi", value: high ?? 0, fill: "var(--status-warn)" },
+  const data: { name: string; value: number | null; fill: string }[] = [
+    { name: "Kritis", value: critical, fill: "var(--status-critical)" },
+    { name: "Tinggi", value: high, fill: "var(--status-warn)" },
     {
       name: "Tidak terkendali",
-      value: uncontrolled ?? 0,
+      value: uncontrolled,
       fill: "var(--status-crit-text)",
     },
   ];
-  const hasValues =
-    critical !== null || high !== null || uncontrolled !== null;
+  const hasValues = data.some((item) => item.value !== null);
+  const unavailable = data.filter((item) => item.value === null).map((item) => item.name);
 
   return (
     <ChartCard
@@ -408,13 +420,14 @@ export function RiskBreakdownChart({
       badge={<ConditionLabel condition={condition} />}
     >
       {!hasValues ? (
-        <ChartEmpty message="Jumlah risiko tidak ditemukan dalam bukti asesmen." />
+        <ChartEmpty message="Jumlah risiko tidak ditemukan dalam bukti asesmen; ini bukan nol." />
       ) : (
-        <div
-          className="h-64 min-h-0 min-w-0 w-full"
-          role="img"
-          aria-label={`Risiko kritis ${critical ?? 0}, risiko tinggi ${high ?? 0}, risiko tidak terkendali ${uncontrolled ?? 0}`}
-        >
+        <>
+          <div
+            className="h-64 min-h-0 min-w-0 w-full"
+            role="img"
+            aria-label={`Risiko kritis ${critical ?? "tidak tersedia"}, risiko tinggi ${high ?? "tidak tersedia"}, risiko tidak terkendali ${uncontrolled ?? "tidak tersedia"}`}
+          >
           <ResponsiveContainer
             width="100%"
             height="100%"
@@ -449,7 +462,10 @@ export function RiskBreakdownChart({
               />
               <Tooltip
                 contentStyle={tooltipStyle}
-                formatter={(value) => [Number(value), "Jumlah"]}
+                formatter={(value) => [
+                  value === null || value === undefined ? "Tidak tersedia" : Number(value),
+                  "Jumlah",
+                ]}
               />
               <Bar dataKey="value" radius={[0, 5, 5, 0]}>
                 {data.map((item) => (
@@ -459,6 +475,17 @@ export function RiskBreakdownChart({
             </BarChart>
           </ResponsiveContainer>
         </div>
+          <GapNote
+            items={unavailable}
+            message="Seri tanpa angka tidak digambar sebagai nol."
+          />
+          {condition === "more_evidence_required" && (
+            <p className="mt-2 rounded-md bg-status-warn-bg px-2 py-1 text-xs leading-5 text-status-warn-text">
+              Coverage bukti risiko belum lengkap. Angka yang tampil bukan bukti
+              bahwa tidak ada risiko lain.
+            </p>
+          )}
+        </>
       )}
     </ChartCard>
   );
@@ -572,6 +599,15 @@ function ChartEmpty({ message }: { message: string }) {
   );
 }
 
+function GapNote({ items, message }: { items: string[]; message: string }) {
+  if (items.length === 0) return null;
+  return (
+    <p className="mt-2 text-xs leading-5 text-ink-muted">
+      Tanpa nilai: {items.join(", ")}. {message}
+    </p>
+  );
+}
+
 function ConditionLabel({ condition }: { condition: ReviewCondition }) {
   return (
     <StatusPill tone={conditionTone(condition)} className="shrink-0">
@@ -581,7 +617,7 @@ function ConditionLabel({ condition }: { condition: ReviewCondition }) {
 }
 
 function conditionLabel(condition?: ReviewCondition) {
-  if (condition === "on_track") return "Sesuai Rencana";
+  if (condition === "on_track") return "Sesuai Rencana (per domain)";
   if (condition === "needs_attention") return "Perlu Perhatian";
   if (condition === "critical") return "Kritis";
   return "Perlu Bukti Tambahan";

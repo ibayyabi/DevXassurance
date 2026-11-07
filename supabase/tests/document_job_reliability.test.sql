@@ -1,5 +1,5 @@
 begin;
-select plan(38);
+select plan(39);
 
 insert into auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at)
 values ('10000000-0000-4000-8000-000000000001', 'authenticated', 'authenticated', 'job-reliability-test@example.invalid', '', now(), '{}'::jsonb, '{}'::jsonb, now(), now())
@@ -18,8 +18,9 @@ values ('10000000-0000-4000-8000-000000000004', '10000000-0000-4000-8000-0000000
 insert into public.ai_jobs (id, project_id, document_id, job_type, status, attempt_count, max_attempts, claimed_at, lease_expires_at, claim_token)
 values ('10000000-0000-4000-8000-000000000005', '10000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000004', 'parse_document', 'processing', 1, 3, now(), now() + interval '15 minutes', 'aaaaaaaa-0000-4000-8000-000000000005');
 
-select is(public.retry_document_job_attempt('10000000-0000-4000-8000-000000000005', '10000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000004', 'aaaaaaaa-0000-4000-8000-000000000005', 'extraction_group_checkpoint_failed', 'Transient checkpoint write failed'), 'queued', 'first transient failure queues job atomically');
+select is(public.retry_document_job_attempt('10000000-0000-4000-8000-000000000005', '10000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000004', 'aaaaaaaa-0000-4000-8000-000000000005', 'llm_provider_transient_failure', 'The configured AI provider returned HTTP 429.'), 'queued', 'first 429 response queues job atomically');
 select is((select status::text from public.ai_jobs where id = '10000000-0000-4000-8000-000000000005'), 'queued', 'first retry changes job state');
+select is((select error_code from public.ai_jobs where id = '10000000-0000-4000-8000-000000000005'), 'llm_provider_transient_failure', '429 remains a retryable provider deferral');
 select is((select processing_status::text from public.documents where id = '10000000-0000-4000-8000-000000000004'), 'queued', 'first retry synchronizes document state');
 select ok((select lease_expires_at is null and claimed_at is null from public.ai_jobs where id = '10000000-0000-4000-8000-000000000005'), 'first retry clears claim lease');
 select ok((select available_at between now() + interval '14 seconds' and now() + interval '16 seconds' from public.ai_jobs where id = '10000000-0000-4000-8000-000000000005'), 'first retry uses 15-second backoff');
@@ -28,12 +29,12 @@ select is((select count(*) from public.claim_next_available_document_job()), 0::
 
 update public.ai_jobs set status = 'processing', attempt_count = 2, claim_token = 'aaaaaaaa-0000-4000-8000-000000000005', claimed_at = now(), lease_expires_at = now() + interval '15 minutes' where id = '10000000-0000-4000-8000-000000000005';
 update public.documents set processing_status = 'processing' where id = '10000000-0000-4000-8000-000000000004';
-select is(public.retry_document_job_attempt('10000000-0000-4000-8000-000000000005', '10000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000004', 'aaaaaaaa-0000-4000-8000-000000000005', 'extraction_group_checkpoint_failed', 'Transient checkpoint write failed'), 'queued', 'second transient failure queues job');
+select is(public.retry_document_job_attempt('10000000-0000-4000-8000-000000000005', '10000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000004', 'aaaaaaaa-0000-4000-8000-000000000005', 'llm_provider_transient_failure', 'The configured AI provider returned HTTP 429 again.'), 'queued', 'second 429 response queues job');
 select ok((select available_at between now() + interval '29 seconds' and now() + interval '31 seconds' from public.ai_jobs where id = '10000000-0000-4000-8000-000000000005'), 'second retry uses 30-second backoff');
 
 update public.ai_jobs set status = 'processing', attempt_count = 3, claim_token = 'aaaaaaaa-0000-4000-8000-000000000005', claimed_at = now(), lease_expires_at = now() + interval '15 minutes' where id = '10000000-0000-4000-8000-000000000005';
 update public.documents set processing_status = 'processing' where id = '10000000-0000-4000-8000-000000000004';
-select is(public.retry_document_job_attempt('10000000-0000-4000-8000-000000000005', '10000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000004', 'aaaaaaaa-0000-4000-8000-000000000005', 'extraction_group_checkpoint_failed', 'Transient checkpoint write failed'), 'failed', 'attempt limit terminally fails retry');
+select is(public.retry_document_job_attempt('10000000-0000-4000-8000-000000000005', '10000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000004', 'aaaaaaaa-0000-4000-8000-000000000005', 'llm_provider_transient_failure', 'The configured AI provider returned HTTP 429 again.'), 'failed', 'attempt limit terminates repeated 429 retry');
 select is((select status::text from public.ai_jobs where id = '10000000-0000-4000-8000-000000000005'), 'failed', 'attempt limit fails job');
 select is((select processing_status::text from public.documents where id = '10000000-0000-4000-8000-000000000004'), 'failed', 'attempt limit synchronizes document failure');
 select ok((select lease_expires_at is null and claimed_at is null from public.ai_jobs where id = '10000000-0000-4000-8000-000000000005'), 'terminal retry clears claim lease');

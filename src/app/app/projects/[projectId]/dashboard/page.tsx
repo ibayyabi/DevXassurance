@@ -5,30 +5,37 @@ import { UsableOverview } from "@/features/dashboard/components/usable-overview"
 
 export default function DashboardPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ projectId: string }>;
+  searchParams: Promise<{ review?: string }>;
 }) {
   return (
     <Suspense fallback={<DashboardLoading />}>
-      <DashboardContent params={params} />
+      <DashboardContent params={params} searchParams={searchParams} />
     </Suspense>
   );
 }
 
 async function DashboardContent({
   params,
+  searchParams,
 }: {
   params: Promise<{ projectId: string }>;
+  searchParams: Promise<{ review?: string }>;
 }) {
   const { projectId } = await params;
-  const { membership, review, reviews } = await getAssuranceWorkspace(projectId);
+  const { review: reviewParam } = await searchParams;
+  const { membership, review, reviews, documents } =
+    await getAssuranceWorkspace(projectId);
 
   return (
     <UsableOverview
       projectId={projectId}
       projectName={membership.projectName}
-      review={review}
+      review={reviews.find((item) => item.id === reviewParam) ?? review}
       reviews={reviews}
+      documents={documents}
     />
   );
 }

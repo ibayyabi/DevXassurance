@@ -68,6 +68,7 @@ export async function loadWorkerModules(repoRoot = REPO_ROOT) {
       parseDocumentBuffer: parser.parseDocumentBuffer,
       extractDocumentGroups: extraction.extractDocumentGroups,
       processDocumentJob: job.processDocumentJob,
+      extraction,
     };
   } finally {
     for (const { target } of Object.values(compiled)) unlinkSync(target);

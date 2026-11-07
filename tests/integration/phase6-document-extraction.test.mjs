@@ -938,15 +938,15 @@ test("document-level artifact classification survives conflicting chunk groups",
 
 test("invalid fact citations are excluded with an explicit review warning", async () => {
   const store = memoryGroupStore();
-  let calls = 0;
-  let groupCalls = 0;
+  let analysisCalls = 0;
   await withLocalOllama(async (_url, init) => {
-    calls += 1;
     const prompt = JSON.parse(init.body).messages[1].content;
     if (prompt.startsWith("Classify the entire document")) return modelResponse(validModelOutput(prompt));
     if (isExecutiveSummaryPrompt(prompt)) return modelResponse(validModelOutput(prompt));
-    groupCalls += 1;
-    assert.ok(groupCalls === 1 || prompt.includes("Previous response validation errors"));
+    if (prompt.includes("narrative assurance signals")) {
+      analysisCalls += 1;
+      if (analysisCalls > 1) assert.ok(prompt.includes("Previous response validation errors"));
+    }
     return modelResponse(validModelOutput(prompt, { invalidCitation: true }));
   }, async () => {
     const result = await processDocumentJob(
@@ -957,22 +957,23 @@ test("invalid fact citations are excluded with an explicit review warning", asyn
     assert.equal(result.processing_status, "needs_review");
     assert.equal(result.facts.length, 0);
     assert.match(result.processing_error, /facts\[0\].*excluded/i);
-    assert.equal(calls, 6);
+    assert.equal(analysisCalls, 2);
     assert.equal([...store.rows.values()][0].status, "failed");
   });
 });
 
 test("a valid correction on the final bounded attempt is accepted", async () => {
-  let calls = 0;
-  let groupCalls = 0;
+  let analysisCalls = 0;
   await withLocalOllama(async (_url, init) => {
-    calls += 1;
     const prompt = JSON.parse(init.body).messages[1].content;
     if (prompt.startsWith("Classify the entire document")) return modelResponse(validModelOutput(prompt));
     if (isExecutiveSummaryPrompt(prompt)) return modelResponse(validModelOutput(prompt));
-    groupCalls += 1;
-    if (groupCalls === 2) assert.ok(prompt.includes("Previous response validation errors"));
-    return modelResponse(validModelOutput(prompt, { invalidCitation: groupCalls === 1 }));
+    if (prompt.includes("narrative assurance signals")) {
+      analysisCalls += 1;
+      if (analysisCalls > 1) assert.ok(prompt.includes("Previous response validation errors"));
+      return modelResponse(validModelOutput(prompt, { invalidCitation: analysisCalls === 1 }));
+    }
+    return modelResponse(validModelOutput(prompt));
   }, async () => {
     const result = await processDocumentJob(
       job(sourceDocument("CORRECTION", 1), {
@@ -983,7 +984,7 @@ test("a valid correction on the final bounded attempt is accepted", async () => 
     );
     assert.equal(result.status, "completed");
     assert.equal(result.processing_status, "completed");
-    assert.equal(calls, 6);
+    assert.equal(analysisCalls, 2);
     assert.ok(result.facts[0].evidence_chunk_index >= 0);
   });
 });
@@ -2124,6 +2125,17 @@ test("a provider quota defers the remaining groups for retry instead of reportin
   const source = sourceDocument("QUOTA");
   let quotaExhausted = true;
   let groupCalls = [];
+  let releaseFirstGroup;
+  const firstGroupGate = new Promise((resolve) => { releaseFirstGroup = resolve; });
+  let markFirstDomainStarted;
+  const firstDomainStarted = new Promise((resolve) => { markFirstDomainStarted = resolve; });
+  let markDeferredCheckpoint;
+  const deferredCheckpointSaved = new Promise((resolve) => { markDeferredCheckpoint = resolve; });
+  const saveGroup = store.saveGroup.bind(store);
+  store.saveGroup = async (row) => {
+    await saveGroup(row);
+    if (row.status === "failed") markDeferredCheckpoint();
+  };
 
   await withLocalOllama(async (_url, init) => {
     const prompt = JSON.parse(init.body).messages[1].content;
@@ -2133,7 +2145,12 @@ test("a provider quota defers the remaining groups for retry instead of reportin
     if (isExecutiveSummaryPrompt(prompt)) return modelResponse(validModelOutput(prompt));
     const chunkIndex = documentContextFromPrompt(prompt)[0].chunk_index;
     groupCalls.push(chunkIndex);
+    if (quotaExhausted && chunkIndex === 0 && prompt.includes("Task: collect every source-backed cost")) {
+      markFirstDomainStarted();
+      await firstGroupGate;
+    }
     if (quotaExhausted && chunkIndex === 2) {
+      await firstDomainStarted;
       return new Response(JSON.stringify({ error: "quota exceeded" }), {
         status: 429,
         headers: { "Content-Type": "application/json" },
@@ -2141,25 +2158,60 @@ test("a provider quota defers the remaining groups for retry instead of reportin
     }
     return modelResponse(validModelOutput(prompt));
   }, async () => {
-    const deferred = await processDocumentJob(job(source, { fileName: "quota.txt" }), store);
+    const firstAttempt = processDocumentJob(job(source, { fileName: "quota.txt" }), store);
+    let timeout;
+    try {
+      await Promise.race([
+        deferredCheckpointSaved,
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("429 group was not checkpointed")), 5_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+      releaseFirstGroup();
+    }
+    const deferred = await firstAttempt;
     assert.equal(deferred.status, "failed");
     assert.equal(deferred.errorCode, "llm_provider_transient_failure");
 
-    const rows = [...store.rows.values()];
-    const deferredRows = rows.filter((row) => row.status === "failed");
-    assert.equal(deferredRows.length, 1);
-    assert.ok(rows.some((row) => row.status === "completed"));
-    const [deferredRow] = deferredRows;
+    const firstAttemptRows = [...store.rows.values()];
+    const deferredRow = firstAttemptRows.find((row) => row.status === "failed");
+    assert.ok(deferredRow, "the 429 group remains deferred instead of becoming absent");
+    const completedBeforeRetry = firstAttemptRows.filter((row) => row.status === "completed");
+    assert.ok(completedBeforeRetry.length, "some completed groups are checkpointed for reuse");
+    const completedGroupKeys = new Set(completedBeforeRetry.map((row) => row.groupKey));
+    const completedStartChunks = new Set(completedBeforeRetry.map((row) => row.chunkStartIndex));
     assert.equal(deferredRow.result, null);
     assert.ok(deferredRow.attemptCount >= 1);
     assert.match(deferredRow.lastError, /HTTP 429/);
 
-    // The retry resumes only the deferred group; completed work is not re-sent.
+    // The typed transient failure leaves evidence unclassified; it is not an
+    // absence result. Previously completed checkpoints are the retry boundary.
     quotaExhausted = false;
     groupCalls = [];
     const retried = await processDocumentJob(job(source, { fileName: "quota.txt" }), store);
     assert.equal(retried.status, "completed", `${retried.errorCode}: ${retried.errorMessage}`);
-    assert.deepEqual([...new Set(groupCalls)], [2]);
+    const retryStartChunks = new Set(groupCalls);
+    assert.ok(
+      [...completedStartChunks].every((chunkIndex) => !retryStartChunks.has(chunkIndex)),
+      "retry does not send groups with completed checkpoints",
+    );
+    const resumedGroups = [...store.rows.values()].filter(
+      (row) => row.status === "completed" && !completedGroupKeys.has(row.groupKey),
+    );
+    assert.ok(
+      resumedGroups.some((row) => row.groupKey === deferredRow.groupKey),
+      "retry sends the group deferred by HTTP 429",
+    );
+    assert.ok(
+      resumedGroups.some((row) => row.groupKey !== deferredRow.groupKey),
+      "retry also sends a group that had not started before deferral",
+    );
+    assert.ok(
+      resumedGroups.every((row) => retryStartChunks.has(row.chunkStartIndex)),
+      "every newly completed group was actually sent on retry",
+    );
     assert.deepEqual(
       [...new Set([...store.rows.values()].map((row) => row.status))],
       ["completed"],
@@ -2282,10 +2334,15 @@ test("a per-cell citation survives a sibling cell's unresolved formula while the
       // The unresolved formula cell itself.
       { fact_type: "milestone", extracted_text: "Topping off reached 25% complete", original_value: "Topping off reached 25% complete", confidence: 0.8, source_id: "c0s3" },
     ];
-    output.assurance_observations.progress = [{
+    const progressCandidate = (source_id) => ({
       raw_value: "25%", percent: 25, scope_level: "project", scope_label: null,
-      period_label: null, as_of_date: null, excerpt: "Progress: 25%", source_id: "c0s1",
-    }];
+      period_label: null, as_of_date: null, excerpt: "Progress: 25%", source_id,
+    });
+    output.assurance_observations.progress = [
+      progressCandidate("c0s1"),
+      progressCandidate("c0s0"),
+      progressCandidate("c0s3"),
+    ];
     return modelResponse(output);
   }, async () => {
     const result = await extractDocumentGroups(
@@ -2299,11 +2356,17 @@ test("a per-cell citation survives a sibling cell's unresolved formula while the
       result.extraction.facts.map((fact) => [fact.extracted_text, fact.evidence_chunk_index]),
       [["Topping off reached 25% complete", 0]],
     );
-    assert.equal(result.extraction.assurance_observations.progress[0]?.source_location?.cellRangeStart, "A12");
+    const progress = result.extraction.assurance_observations.progress;
+    assert.equal(progress.length, 1);
+    assert.equal(progress[0]?.source_location?.cellRangeStart, "A12");
+    assert.equal(progress[0]?.measure_kind, "unspecified");
+    assert.equal(progress[0]?.period_basis, null);
     const warnings = result.extraction.quality_warnings.join(" ");
     assert.doesNotMatch(warnings, /facts\[0\]/);
     assert.match(warnings, /facts\[1\] was excluded because facts\[1\]\.source_id cites formula_result_unavailable/);
     assert.match(warnings, /facts\[2\] was excluded because facts\[2\]\.source_id cites formula_result_unavailable/);
+    assert.match(warnings, /progress\[1\] was excluded/);
+    assert.match(warnings, /progress\[2\] was excluded/);
     // An unresolved formula still keeps every evidence domain unprocessed.
     assert.deepEqual(
       result.extraction.assurance_observation_coverage.map((row) => row.state),

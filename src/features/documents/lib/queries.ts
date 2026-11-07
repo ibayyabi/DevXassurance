@@ -5,6 +5,7 @@ import type {
   ProcessingStatus,
 } from "@/features/documents/lib/constants";
 import { resolveDocumentMetadata } from "@/features/documents/lib/metadata";
+import { fetchJobDiagnostics, type JobDiagnostic } from "@/features/documents/lib/job-diagnostics";
 
 export type EvidenceDocument = {
   submissionId: string | null;
@@ -45,6 +46,10 @@ export type EvidenceDocument = {
   effectiveDocumentDate: string | null;
   effectiveReportingPeriod: string | null;
   effectiveWorkstream: string | null;
+  /** Latest parse job state for this document, read through RLS. */
+  jobDiagnostic: JobDiagnostic | null;
+  /** True when the latest-job query failed; a missing row is a separate state. */
+  jobDiagnosticReadFailed: boolean;
   reviewDetails: DocumentReviewDetail[];
 };
 export type DocumentReviewDetail = {
@@ -241,6 +246,15 @@ export async function getDocumentIntelligence(projectId: string) {
   const documents = ((documentsData ?? []) as unknown as DocumentRow[]).map((row) =>
       mapDocument(row, readDocumentReviewDetails(metadataByDocument.get(row.id) ?? [])),
     );
+  const jobDiagnostics = await fetchJobDiagnostics(
+    supabase,
+    projectId,
+    documents.map((document) => document.id),
+  );
+  for (const document of documents) {
+    document.jobDiagnostic = jobDiagnostics?.get(document.id) ?? null;
+    document.jobDiagnosticReadFailed = jobDiagnostics === null;
+  }
   const documentsById = new Map(documents.map((document) => [document.id, document]));
   const facts = ((factsData ?? []) as unknown as FactRow[]).map((row) => {
     const fact = mapFact(row);
@@ -312,6 +326,8 @@ function mapDocument(
     effectiveDocumentDate: effective.documentDate,
     effectiveReportingPeriod: effective.reportingPeriod,
     effectiveWorkstream: effective.workstream,
+    jobDiagnostic: null,
+    jobDiagnosticReadFailed: false,
     reviewDetails,
   };
 }
