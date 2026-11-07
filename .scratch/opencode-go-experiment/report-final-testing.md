@@ -1,5 +1,15 @@
 # Laporan: ronde pengujian final — robustness pipeline terhadap file input yang ada
 
+## Lampiran: iterasi prompt tanggal (langkah 2, setelah ronde final)
+
+Setelah ronde final, langkah lanjutan menutup temuan live #2 (fabrikasi tanggal oleh model):
+
+- **Perubahan** (`document-extraction.ts`, cache `/39` → `/40`, commit `46cc490`): prompt analysis mewajibkan `snapshot_date` ISO yang muncul digit-per-digit di excerpt (bukan due date, deadline, document date, atau tanggal locale yang diformat ulang); prompt domain mewajibkan `period_label` verbatim dengan jebakan counter tahap/fase ("Tahap 2 Januari 2026" adalah label, bukan periode) dan `as_of_date` hanya dari cut-off/record date eksplisit dengan bentuk verbatim.
+- **Verifikasi offline**: 311/311 tes, `tsc`, lint, replay diagnostik — semua lulus.
+- **Verifikasi live** (`LIVE_MAX_REQUESTS=6`, dir `live-prompt-v2`): dokumen Amber TXT yang sebelumnya gagal (6 snapshot terfabrikasi → grup failed) kini **checkpoint `completed` tanpa warning** — 5 fakta bertipe benar, summary grounded. Tepat **6/6 request, 9.253 in / 2.868 out token** (`glm-5.3-flash`; ada satu loop koreksi yang berhasil pada attempt 2).
+- Artinya: kelas kegagalan live yang tersisa dari ronde final telah ditutup untuk kasus naratif yang diuji; bukti masih satu dokumen — bukan statistik korpus.
+
+
 Tanggal: 2026-11-07. Eksekutor: GLM 5.3 Flash via Zcode. Metode: matriks celah dari 20+ laporan sebelumnya → satu ronde pengujian (sweep korpus offline, mutasi edge offline, live terkontrol) → remediasi → verifikasi penuh.
 
 ## Cara ronde ini dirancang
