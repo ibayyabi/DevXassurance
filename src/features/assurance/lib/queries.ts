@@ -42,6 +42,10 @@ export type AssuranceDocument = {
   processingStatus: ProcessingStatus;
   processingError: string | null;
   hasCurrentAssuranceCoverage: boolean;
+  /** Original uploaded filename (documents.file_name), distinct from the editable title. */
+  fileName: string | null;
+  /** Content hash of the current file version, used to distinguish same-named files. */
+  contentHash: string | null;
   evidenceRole: "baseline" | "current" | "supporting" | null;
   suggestedEvidenceRole: "baseline" | "current" | "supporting" | null;
   confirmedEvidenceRole: "baseline" | "current" | "supporting" | null;
@@ -58,11 +62,15 @@ export type AssuranceDocument = {
 export type AssuranceReview = {
   id: string;
   reportingPeriod: string;
+  /** New reviews use a date cut-off; legacy month-scoped reviews keep month-end semantics. */
+  cutoffPrecision: "month" | "date";
   title: string;
   status: string;
   currentStep: "evidence" | "analysis" | "findings" | "actions" | "report";
   analysisError: string | null;
   analysisMetadata: Record<string, unknown>;
+  /** Authoritative currentness from the DB (assurance_analysis_is_current), fail-closed to false. */
+  isAnalysisCurrent: boolean;
   documents: { documentId: string; role: "baseline" | "current" }[];
   findings: AssuranceFinding[];
   actions: AssuranceAction[];
@@ -108,6 +116,7 @@ export type AssuranceAction = {
 type ReviewRow = {
   id: string;
   reporting_period: string;
+  cutoff_precision: "month" | "date" | null;
   title: string;
   status: string;
   current_step: AssuranceReview["currentStep"];
@@ -600,7 +609,7 @@ export async function getAssuranceWorkspace(projectId: string) {
     supabase
       .from("documents")
       .select(
-        "id, title, document_type, document_type_hint, suggested_document_type, confirmed_document_type, document_date, document_date_hint, suggested_document_date, confirmed_document_date, processing_status, processing_error, content_hash, assurance_observation_parser_version, assurance_observation_contract_version, evidence_role, suggested_evidence_role, confirmed_evidence_role, classification_confidence, classification_reason, detected_reporting_period, reporting_period_hint, confirmed_reporting_period, workstream_hint, suggested_workstream, workstream, confirmed_workstream",
+        "id, title, file_name, document_type, document_type_hint, suggested_document_type, confirmed_document_type, document_date, document_date_hint, suggested_document_date, confirmed_document_date, processing_status, processing_error, content_hash, assurance_observation_parser_version, assurance_observation_contract_version, evidence_role, suggested_evidence_role, confirmed_evidence_role, classification_confidence, classification_reason, detected_reporting_period, reporting_period_hint, confirmed_reporting_period, workstream_hint, suggested_workstream, workstream, confirmed_workstream",
       )
       .eq("project_id", projectId)
       .order("document_date", { ascending: false, nullsFirst: false })
@@ -608,7 +617,7 @@ export async function getAssuranceWorkspace(projectId: string) {
     supabase
       .from("assurance_reviews")
       .select(
-        "id, reporting_period, title, status, current_step, analysis_error, analysis_metadata",
+        "id, reporting_period, cutoff_precision, title, status, current_step, analysis_error, analysis_metadata",
       )
       .eq("project_id", projectId)
       .order("reporting_period", { ascending: false }),
@@ -616,6 +625,28 @@ export async function getAssuranceWorkspace(projectId: string) {
 
   if (documentsResult.error) throw new Error(documentsResult.error.message);
   if (reviewsResult.error) throw new Error(reviewsResult.error.message);
+
+  // Authoritative currentness per review from the DB (no client fingerprint
+  // reimplementation). Fail closed: an RPC error or missing function marks
+  // every review as not current so stale verdicts never render as current.
+  const currentByReview = new Map<string, boolean>();
+  const reviewIdsForCurrentness =
+    ((reviewsResult.data ?? []) as { id: string }[]).map((row) => row.id);
+  if (reviewIdsForCurrentness.length > 0) {
+    const currentnessResults = await Promise.all(reviewIdsForCurrentness.map(async (id) => {
+      const { data, error } = await supabase.rpc("get_assurance_analysis_state", {
+        p_project_id: projectId,
+        p_review_id: id,
+      });
+      const current = !error &&
+        typeof data === "object" &&
+        data !== null &&
+        "current" in data &&
+        data.current === true;
+      return [id, current] as const;
+    }));
+    for (const [id, current] of currentnessResults) currentByReview.set(id, current);
+  }
   const needsReviewDocuments = (documentsResult.data ?? []).filter(
     (row) => row.processing_status === "needs_review",
   );
@@ -660,6 +691,8 @@ export async function getAssuranceWorkspace(projectId: string) {
         processingStatus: row.processing_status,
         processingError: row.processing_error,
         hasCurrentAssuranceCoverage: currentCoverageDocumentIds.has(row.id),
+        fileName: row.file_name ?? null,
+        contentHash: row.content_hash ?? null,
         evidenceRole: effective.evidenceRole,
         suggestedEvidenceRole: row.suggested_evidence_role,
         confirmedEvidenceRole: row.confirmed_evidence_role,
@@ -723,7 +756,9 @@ export async function getAssuranceWorkspace(projectId: string) {
   const actions = (actionsResult.data ?? []) as ActionRow[];
   const reviews = reviewRows.map((row): AssuranceReview => ({
     id: row.id,
+    isAnalysisCurrent: currentByReview.get(row.id) ?? false,
     reportingPeriod: row.reporting_period,
+    cutoffPrecision: row.cutoff_precision === "date" ? "date" : "month",
     title: row.title,
     status: row.status,
     currentStep: row.current_step,
