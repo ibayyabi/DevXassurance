@@ -763,6 +763,32 @@ export async function extractDocumentGroups(
 
 
   const groupFailures: Array<{ code: string; message: string }> = [];
+  // Class-aware strong-model fallback: when the primary model exhausts its
+  // correction loop with model-fidelity warnings (numbers copied from the
+  // wrong row, milestone column-role misattribution), the partial group is
+  // retried once with the configured Gemini model before it is checkpointed
+  // failed. Structural warnings (formula freshness, unprovable scope, invalid
+  // header candidates) never trigger it - a stronger model cannot close
+  // missing evidence. Opt-in via GEMINI_API_KEY + GEMINI_MODEL; the
+  // per-document portion is capped.
+  const GEMINI_FALLBACK_MARKER =
+    /does not numerically match|scope_label is only valid|cannot be attributed to a due or event date|must be nonempty and at most|scope_label is not present in the cited excerpt/;
+  const geminiFallback = {
+    remaining: Number(process.env.XASS_EXTRACTION_GEMINI_FALLBACK_GROUPS ?? "3"),
+  };
+  function geminiFallbackProvider(): ModelProvider | null {
+    if (process.env.XASS_EXTRACTION_GEMINI_FALLBACK === "0") return null;
+    const apiKey = process.env.GEMINI_API_KEY;
+    const model = process.env.GEMINI_MODEL;
+    if (!apiKey || !model) return null;
+    const baseUrl = process.env.GEMINI_API_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta";
+    return {
+      provider: "gemini",
+      model,
+      url: `${baseUrl.replace(/\/$/, "")}/models/${encodeURIComponent(model)}:generateContent`,
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+    };
+  }
   let cursor = 0;
   await Promise.all(
     Array.from({ length: Math.min(MAX_CONCURRENT_PROVIDER_REQUESTS, groupsToProcess.length) }, async () => {
@@ -802,19 +828,42 @@ export async function extractDocumentGroups(
         }
 
         try {
-          const partial = extraction.value.quality_warnings.length > 0;
+          let partial = extraction.value.quality_warnings.length > 0;
+          let usedProvider: ModelProvider = provider;
+          if (
+            partial &&
+            geminiFallback.remaining > 0 &&
+            GEMINI_FALLBACK_MARKER.test(extraction.value.quality_warnings.join(" ")) &&
+            geminiFallbackProvider()
+          ) {
+            geminiFallback.remaining -= 1;
+            const fallbackProvider = geminiFallbackProvider() ?? provider;
+            usedProvider = fallbackProvider;
+            console.info("Document extraction falling back to the configured Gemini model", {
+              jobId: job.jobId ?? null,
+              projectId: job.projectId,
+              documentId: job.documentId,
+              groupIndex: work.group.groupIndex,
+            });
+            try {
+              extraction = await extractGroupWithCorrection(job, work.group, fallbackProvider);
+              partial = extraction.value.quality_warnings.length > 0;
+            } catch {
+              // keep the primary partial result: the fallback produced nothing
+            }
+          }
           await store.saveGroup(groupRecord(job, contentHash, parserVersion, work.group, {
             status: partial ? "failed" : "completed",
             result: partial ? null : extraction.value,
             attemptCount: priorAttempts + extraction.attempts,
-            provider: provider.provider,
-            model: provider.model,
+            provider: usedProvider.provider,
+            model: usedProvider.model,
             lastError: partial ? extraction.value.quality_warnings.join(" ").slice(0, 1000) : null,
           }));
           groupResults[work.groupIndex] = {
             value: extraction.value,
-            provider: provider.provider,
-            model: provider.model,
+            provider: usedProvider.provider,
+            model: usedProvider.model,
           };
         } catch (checkpointError) {
           groupFailures.push({

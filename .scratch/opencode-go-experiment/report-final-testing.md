@@ -304,3 +304,9 @@ Dengan persetujuan pelonggaran aturan "formulas are never evaluated" untuk subse
 - **Tidak cocok** -> `cached_value_recompute_mismatch`: review-required dengan pesan inkonsistensi eksplisit di jalur error dedikasi
 - Di luar subset / tidak terverifikasi -> perilaku lama (review-required)
 Konservatif: cache tetap otoritatif; rekalkulasi hanya membuka gerbang bila konsisten. Nilai tak terhitung (teks, RAG IF kompleks) tetap jalur lama. Schema /43 -> /44. Verifikasi: 2 tes baru (match = terbit tanpa marker; mismatch = tereliminasi dengan review-required), suite penuh **319/319**, tsc bersih. Efek pada dokumen asli: kolom Duration/Weighted Progress/Variance ber-cache kini terverifikasi otomatis; RAG (IF) menunggu Level 2 (garansi generator tracker-web).
+
+## Lampiran 17: fallback Gemini sadar-kelas tereksekusi (/44, tanpa bump)
+
+Mekanisme di jalur partial-success (lokasi kegagalan fidelity yang sebenarnya): grup yang selesai dengan warning kelas fidelity (numeric-mismatch, milestone peran/kapasitas) di-retry SEKALI dengan Gemini sebelum di-checkpoint failed; kelas struktural (formula freshness, scope tak terbukti, header invalid) tidak pernah memicu fallback; porsi dibatasi `XASS_EXTRACTION_GEMINI_FALLBACK_GROUPS` (default 3/dokumen); provenance provider/model per grup mencatat model yang menghasilkan.
+
+Verifikasi offline: 2 tes baru - (1) fidelity gagal di flash -> retry Gemini -> grup selesai dengan provenance Gemini; (2) kegagalan struktural -> 0 panggilan Gemini, checkpoint failed. Suite penuh **321/321**, tsc + lint bersih. Verifikasi live: residu saja (gratis di free tier) - menunggu server Gemini lega.
