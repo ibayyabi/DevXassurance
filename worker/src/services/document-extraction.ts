@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   costMeasures,
   normalizeCostAmount,
@@ -2981,7 +2981,15 @@ function configuredModelProvider(): ModelProvider {
       provider,
       model,
       url: `${baseUrl.replace(/\/$/, "")}/chat/completions`,
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        // The opencode gateway routes (and since 2026-11-08 requires) a
+        // per-session id on this endpoint; one id per extraction keeps every
+        // request of one document in the same routing session. Other
+        // OpenAI-compatible gateways ignore the unknown header.
+        ...(groq ? {} : { "x-opencode-session": randomUUID() }),
+      },
     };
   }
   if (provider === "gemini") {

@@ -3782,3 +3782,69 @@ test("layout-drift rows yield no deterministic progress derivations", async () =
     "the same row without labels derives nothing deterministically",
   );
 });
+
+// The opencode gateway requires a per-session routing header on the
+// openai-compatible endpoint (2026-11-08 contract change); the provider must
+// send it itself, not rely on any wrapper.
+test("the openai-compatible provider sends the opencode session routing header", async () => {
+  const savedEnv = Object.fromEntries(
+    ["XASS_LLM_PROVIDER", "XASS_CLOUD_LLM_BASE_URL", "XASS_CLOUD_LLM_API_KEY", "XASS_CLOUD_LLM_MODEL"]
+      .map((key) => [key, process.env[key]]),
+  );
+  const savedFetch = globalThis.fetch;
+  process.env.XASS_LLM_PROVIDER = "openai-compatible";
+  process.env.XASS_CLOUD_LLM_BASE_URL = "http://provider.test/v1";
+  process.env.XASS_CLOUD_LLM_API_KEY = "test-key";
+  process.env.XASS_CLOUD_LLM_MODEL = "test-model";
+  let captured = null;
+  // The openai-compatible envelope wraps content in choices[].message.
+  const openaiResponse = (value) => new Response(
+    JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) }, finish_reason: "stop" }] }),
+    { status: 200, headers: { "Content-Type": "application/json" } },
+  );
+  globalThis.fetch = async (_url, init) => {
+    if (!captured) captured = { headers: new Headers(init.headers), body: JSON.parse(init.body) };
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return openaiResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return openaiResponse(classificationOutput(references));
+    return openaiResponse(baseGroupOutput(references));
+  };
+  try {
+    const result = await extractDocumentGroups(
+      job("session-header.txt", { fileName: "session-header.xlsx" }),
+      [{
+        chunkIndex: 0,
+        chunkText: "Item: CCTV | Total: 4000",
+        sectionLabel: "Costs",
+        sourceReferences: [{
+          sourceId: "row-2",
+          chunkIndex: 0,
+          text: "Item: CCTV | Total: 4000",
+          modelText: "Item: CCTV | Total: 4000",
+          sourceLocation: { kind: "xlsx", sheetName: "Costs", tableNumber: 0, rowStart: 2, rowEnd: 2, cellRangeStart: "A2", cellRangeEnd: "D2" },
+          rowCells: [],
+        }],
+      }],
+      { parserVersion: "session-header-v1" },
+      memoryGroupStore(),
+    );
+    assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  } finally {
+    globalThis.fetch = savedFetch;
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert.ok(captured, "a provider request was issued");
+  assert.equal(captured.headers.get("authorization"), "Bearer test-key");
+  const session = captured.headers.get("x-opencode-session");
+  assert.ok(
+    session && /^[0-9a-f-]{36}$/i.test(session),
+    `x-opencode-session must be a uuid, got: ${session}`,
+  );
+});
