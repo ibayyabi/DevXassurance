@@ -11,7 +11,10 @@
       "name": "Setup Note",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
-      "position": [-720, 40]
+      "position": [
+        -720,
+        40
+      ]
     },
     {
       "parameters": {
@@ -24,7 +27,10 @@
       "name": "Environment Note",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
-      "position": [-720, 440]
+      "position": [
+        -720,
+        440
+      ]
     },
     {
       "parameters": {
@@ -39,7 +45,10 @@
       "name": "Assessment Queue Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.1,
-      "position": [-240, -80],
+      "position": [
+        -240,
+        -80
+      ],
       "webhookId": "x-assurance-assessment-jobs"
     },
     {
@@ -57,7 +66,10 @@
       "name": "Assessment Recovery Schedule",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [-240, 120]
+      "position": [
+        -240,
+        120
+      ]
     },
     {
       "parameters": {
@@ -67,7 +79,10 @@
       "name": "Build Assessment Request",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [80, 20]
+      "position": [
+        80,
+        20
+      ]
     },
     {
       "parameters": {
@@ -102,7 +117,10 @@
       "name": "Run Automatic Assessment",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
-      "position": [360, 20]
+      "position": [
+        360,
+        20
+      ]
     }
   ],
   "connections": {
@@ -146,5 +164,6 @@
   },
   "meta": {
     "templateCredsSetupCompleted": false
-  }
+  },
+  "id": "xass-automatic-assessment-01"
 }

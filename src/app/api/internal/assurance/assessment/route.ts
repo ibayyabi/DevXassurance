@@ -15,8 +15,6 @@ import { NextResponse, type NextRequest } from "next/server";
 import { runAutomaticAssessments } from "@/features/assurance/lib/automatic-assessment";
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
 
-export const dynamic = "force-dynamic";
-export const runtime = "nodejs";
 
 const MAX_BATCH_LIMIT = 25;
 
