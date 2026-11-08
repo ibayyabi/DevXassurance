@@ -530,7 +530,11 @@ function percentShapedClaimText(cell: ParsedSourceCell): string | null {
 // column-role labels, carry a layoutDrift flag into the references, and the
 // task prompts state their unattributed-evidence contract; cached /45 rows
 // predate that rendering and must be re-extracted once.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/46";
+// /47: cost amounts in Excel scientific notation ("1.0767E7") normalize to
+// their plain decimal value, and the formula-cache review marker now also
+// fires for row-cited cached formula results (cell matching accepts the
+// cell's own rendered value); cached /46 rows predate both behaviors.
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/47";
 // Group density is tunable per deployment: smaller groups (fewer chunks each)
 // reduce the model's row-confusion in dense tables at the cost of repeating
 // the prompt scaffolding once more per group. The group key binds the resulting
@@ -1736,6 +1740,14 @@ function sourceCellMatchesCandidate(sourceCell: ParsedSourceCell, candidate: str
     sourceCell.rawValue.trim().toLocaleLowerCase() === normalized.toLocaleLowerCase() ||
     sourceCell.dateIso === normalized
   ) {
+    return true;
+  }
+  // A claim that contains the cell's own rendered value verbatim (formula
+  // cells render as "SUM(...) (stored cached result: N; ...)" — digits of the
+  // referenced cells would poison the pure-numeric match below) identifies
+  // this cell unambiguously. Used only for cache-status resolution.
+  const rendered = sourceCell.value.trim();
+  if (rendered.length > 1 && normalized.includes(rendered)) {
     return true;
   }
   return !/^\d{4}-\d{2}-\d{2}$/u.test(normalized) &&

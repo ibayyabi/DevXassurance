@@ -170,7 +170,33 @@ export function normalizeCostCurrency(sourceValue: string) {
 export function normalizeCostAmount(sourceValue: string) {
   if (scaleWords.test(sourceValue)) return null;
 
-  const digits = sourceValue.match(/-?\d[\d.,  ]*\d|-?\d/g);
+  // Excel frequently stores amounts in scientific notation ("1.0767E7") — a
+  // real procurement workbook rendered every literal HPS amount this way. The
+  // plain-value separator rules below cannot read a mantissa-plus-exponent
+  // (the exponent digits split the digit run in two), so a bare
+  // scientific-notation value is expanded to its plain decimal form first.
+  const scientific = /^([+-]?)([\d.,]+)[eE]([+-]?\d+)$/.exec(sourceValue.trim());
+  if (scientific) {
+    const [, sign, mantissaSource, exponentSource] = scientific;
+    const normalizedMantissa = mantissaSource.replace(/,/g, ".");
+    if ((normalizedMantissa.match(/\./g) ?? []).length > 1) return null;
+    const [integerPart, fractionPart = ""] = normalizedMantissa.split(".");
+    const digits = `${integerPart}${fractionPart}`;
+    if (!/^\d+$/.test(digits) || !digits.length) return null;
+    const decimalPosition = integerPart.length + Number(exponentSource);
+    let expanded: string;
+    if (decimalPosition >= digits.length) {
+      expanded = `${digits}${"0".repeat(decimalPosition - digits.length)}`;
+    } else if (decimalPosition <= 0) {
+      expanded = `0.${"0".repeat(-decimalPosition)}${digits}`;
+    } else {
+      expanded = `${digits.slice(0, decimalPosition)}.${digits.slice(decimalPosition)}`;
+    }
+    const amount = Number(`${sign}${expanded}`);
+    return Number.isFinite(amount) ? amount : null;
+  }
+
+  const digits = sourceValue.match(/-?\d[\d.,  ]*\d|-?\d/g);
   if (!digits || digits.length !== 1) return null;
 
   const raw = digits[0].replace(/[  ]/g, "");

@@ -73,6 +73,15 @@ test("normalization reads unambiguous source values and refuses the rest", () =>
   assert.equal(normalizeCostAmount("Rp 1.250.000"), 1_250_000);
   assert.equal(normalizeCostAmount("Rp. 1.250.000"), 1_250_000);
   assert.equal(normalizeCostAmount("IDR 1.250.000,50"), 1_250_000.5);
+  // Excel scientific-notation amounts (real procurement workbooks render
+  // literal HPS values this way) expand to their plain decimal form.
+  assert.equal(normalizeCostAmount("3.8E7"), 38_000_000);
+  assert.equal(normalizeCostAmount("1.0767E7"), 10_767_000);
+  assert.equal(normalizeCostAmount("1,0767E7"), 10_767_000);
+  assert.equal(normalizeCostAmount("-2.5E3"), -2_500);
+  assert.equal(normalizeCostAmount("2.5E-3"), 0.0025);
+  assert.equal(normalizeCostAmount("1.2.3E7"), null);
+  assert.equal(normalizeCostAmount("1,2 juta"), null);
   assert.equal(normalizeCostCurrency("Approved budget of USD 980,000"), "USD");
   assert.equal(normalizeCostCurrency("Rp. 1.250.000"), "IDR");
   assert.equal(normalizeCostCurrency("Rp 1.250.000"), "IDR");

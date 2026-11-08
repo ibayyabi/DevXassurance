@@ -51,3 +51,7 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 graphify-out/
+
+# Transpiled worker-module artifacts from integration test runs
+.worker-module-*.mjs
+.worker-module-*.m
