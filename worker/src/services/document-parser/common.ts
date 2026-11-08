@@ -5,14 +5,16 @@ import { DOMParser, type Element } from "@xmldom/xmldom";
 
 import { inspectZipDirectory } from "../../../../src/features/documents/lib/zip-safety";
 
-import type { FormulaCacheStatus, WorkbookCell } from "./types";
+import type { WorkbookCell } from "./types";
 
 const MAX_OFFICE_ENTRY_EXPANDED_BYTES = 25 * 1024 * 1024;
 const MAX_OFFICE_PACKAGE_EXPANDED_BYTES = 100 * 1024 * 1024;
 
 // Bump whenever parsed chunk/source-reference output changes: cached extraction
 // groups are keyed by this version, so older rows are never reused.
-export const PARSER_VERSION = "document-parser/22";
+// /23: layout-drift rows render without column-role labels and carry a
+// layoutDrift flag plus a layout_drift parser warning.
+export const PARSER_VERSION = "document-parser/23";
 
 export class OfficePackageError extends Error {
   constructor(

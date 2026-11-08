@@ -23,6 +23,10 @@ export type ParsedSourceReference = {
   sourceLocation?: ParsedSourceLocation;
   cell?: ParsedSourceCell;
   rowCells?: ParsedSourceCell[];
+  // Set on a row whose layout no longer matches its declared header: its cells
+  // carry no column-role labels, so the reference is raw unattributed evidence
+  // and every column-role claim against it must be refused.
+  layoutDrift?: boolean;
 };
 
 export type ParsedChunk = {
@@ -68,6 +72,8 @@ export type SourceBlock = {
   formulaCells?: FormulaCell[];
   cellReferences?: SourceCellReference[];
   rowCells?: ParsedSourceCell[];
+  // Row blocks flagged by layout-drift detection; see ParsedSourceReference.
+  layoutDrift?: boolean;
 };
 
 export type FormulaCell = {

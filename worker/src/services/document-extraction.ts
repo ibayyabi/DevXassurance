@@ -526,7 +526,11 @@ function percentShapedClaimText(cell: ParsedSourceCell): string | null {
 // current behavior. Cached /43 rows are re-extracted once.
 // /45: retain cited planned/actual measurement kinds and source RAG claims;
 // cached /44 groups lack these fields and must be re-extracted.
-export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/45";
+// /46: parser layout-drift rows (document-parser/23) are rendered without
+// column-role labels, carry a layoutDrift flag into the references, and the
+// task prompts state their unattributed-evidence contract; cached /45 rows
+// predate that rendering and must be re-extracted once.
+export const EXTRACTION_SCHEMA_VERSION = "phase6-document-extraction/46";
 // Group density is tunable per deployment: smaller groups (fewer chunks each)
 // reduce the model's row-confusion in dense tables at the cost of repeating
 // the prompt scaffolding once more per group. The group key binds the resulting
@@ -1241,6 +1245,7 @@ function buildChunkGroups(
           chunk_index: source.chunkIndex,
           source_location: source.sourceLocation ?? chunk.sourceLocation ?? null,
           text: source.modelText,
+          ...(source.layoutDrift ? { layout_drift: true } : {}),
         })),
       ),
     });
@@ -2853,6 +2858,7 @@ Task rules:
 - This is the group analysis task; it returns only the narrative fields (facts, summary, health_snapshots, alerts, actions, group_metadata_suggestions). A separate domain evidence task returns cost_observations and assurance_observations. Do not emit cost_observations or assurance_observations here, and do not treat their absence as evidence that no cost or assurance values exist in these sources.
 - Cite each fact, summary source, alert, action, non-insufficient health status, and non-null group metadata suggestion with a source_id from the supplied references. Never copy source text into a citation.
 - original_value must be the exact value or statement copied verbatim, digit for digit, from the cited source text; never paraphrase, round, reformat, or pull a number from a different row of the same table. Keep it to the specific value or statement, not an entire row; a number that does not appear verbatim in the cited excerpt fails validation.
+- A source reference marked "layout_drift" comes from a spreadsheet row whose layout no longer matches its declared header, so its cells carry no column-role labels. Cite its values only as unattributed evidence (facts, alerts, actions, candidate context); never use a layout_drift row for snapshot_date or any value whose meaning depends on a column role, and never guess which column a drifted value belongs to.
 - A progress percentage alone is not a milestone. Use fact_type milestone only for an explicitly stated milestone or delivery event, not a general progress value.
 - Include one or more relevant source IDs for the summary; do not cite every source just to cover the group.
 - This group may suggest document date, reporting period, and workstream only. Artifact type and evidence role are classified once from the document-level preview.
@@ -2907,6 +2913,7 @@ Task rules:
 - Source-reported progress RAG is separate from any computed condition. Return source_rag_claim only when the source explicitly reports a literal progress RAG/status label; cite its exact cell on the same sheet row as the cited percentage, or the same narrative clause. Never infer RAG from the progress value or borrow it from another row, document, or computed rule.
 - Set period_label to null unless the cited source explicitly states a specific period attached to this observation, in wording that appears verbatim in the cited excerpt. A generic document title such as "Weekly report" is not a period, and a stage/phase counter followed by a date (for example "Tahap 2 Januari 2026" or "Phase 3 15 Maret 2026") names a label, not a period — return null then.
 - Set as_of_date to null unless the cited text states an explicit cut-off or record date for the observation; send it as ISO YYYY-MM-DD exactly as the source's date appears in the excerpt. A deadline, due date, document date, or a date you normalize from other wording fails validation — return null instead.
+- A source reference marked "layout_drift" comes from a spreadsheet row whose layout no longer matches its declared header, so its cells carry no column-role labels. Cite its values only as unattributed evidence; for such a row leave as_of_date, period_label, milestone and progress dates, scope_label and scope_source_id, and source_rag_claim null, set measure_kind to unspecified, and never guess which column a drifted value belongs to.
 - Risk: report each item separately with its source risk ID, status, source rating label/value/scale, owner, mitigation, mitigation due date, WBS, and period when stated. raw_value and excerpt must be verbatim source text. A register statement may say no_open_high_or_critical only when it explicitly states that no open high or critical risks exist; otherwise use open_risk_reported only for an explicit open-risk statement.
 - Never derive risk counts, conditions, changes, or dates. Do not turn no extracted rows into a claim that no risks exist. Unsupported values are omitted; the application validates the raw value and computes comparisons.
 - The application decides which cost values are comparable, normalizes amounts, and accepts baselines. Do not compare, calculate a variance, or claim that any value is approved for comparison.

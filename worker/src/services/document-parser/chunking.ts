@@ -65,7 +65,7 @@ function chunkBlockGroup(blocks: SourceBlock[]): ParsedChunk[] {
     const addReference = (
       reference: Pick<
         ParsedSourceReference,
-        "text" | "modelText" | "sourceLocation" | "cell" | "rowCells"
+        "text" | "modelText" | "sourceLocation" | "cell" | "rowCells" | "layoutDrift"
       >,
     ) => {
       sourceReferences.push({
@@ -82,6 +82,7 @@ function chunkBlockGroup(blocks: SourceBlock[]): ParsedChunk[] {
         modelText: block.modelText ?? block.text,
         sourceLocation: block.location,
         rowCells: block.rowCells,
+        layoutDrift: block.layoutDrift,
       });
       const cellReferences = block.cellReferences ?? [];
       if (sourceReferences.length + cellReferences.length > MAX_SOURCE_REFERENCES_PER_CHUNK) {
@@ -94,6 +95,7 @@ function chunkBlockGroup(blocks: SourceBlock[]): ParsedChunk[] {
           sourceLocation: cell.location,
           cell: cell.cell,
           rowCells: block.rowCells,
+          layoutDrift: block.layoutDrift,
         });
       }
     }

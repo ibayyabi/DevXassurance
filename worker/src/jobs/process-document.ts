@@ -51,22 +51,27 @@ export async function processDocumentJob(
   const interpretationReviewMessages = extraction.sheet_interpretations.length
     ? [`${extraction.sheet_interpretations.length} candidate-only XLSX sheet interpretation(s) need reviewer confirmation before use as a mapping.`]
     : [];
+  const parserWarnings = Array.isArray(parsed.parserMetadata.warnings)
+    ? parsed.parserMetadata.warnings.filter((warning): warning is string => typeof warning === "string")
+    : [];
+  // Layout drift keeps row values visible but strips their column-role labels,
+  // so the affected tables are surfaced for review the way formula caches are.
+  const layoutDriftWarnings = parserWarnings.filter((warning) => warning.includes("(layout_drift)"));
   const needsReview =
     classificationNeedsReview ||
     extraction.quality_warnings.length > 0 ||
     unresolvedFormulaCells.length > 0 ||
-    extraction.sheet_interpretations.length > 0;
+    extraction.sheet_interpretations.length > 0 ||
+    layoutDriftWarnings.length > 0;
   const reviewMessages = [
     ...(classificationNeedsReview
       ? [`Review AI artifact type and evidence role; artifact-type confidence must be at least ${MIN_READY_CLASSIFICATION_CONFIDENCE} with no conflicting intake hints. ${extraction.document_suggestions.classification_reason ?? ""}`.trim()]
       : []),
     ...formulaReviewMessages,
     ...interpretationReviewMessages,
+    ...layoutDriftWarnings,
     ...extraction.quality_warnings,
   ];
-  const parserWarnings = Array.isArray(parsed.parserMetadata.warnings)
-    ? parsed.parserMetadata.warnings.filter((warning): warning is string => typeof warning === "string")
-    : [];
   return {
     jobId: job.jobId,
     projectId: job.projectId,
@@ -83,10 +88,14 @@ export async function processDocumentJob(
         ...parsed.parserMetadata,
         sourceLocation: chunk.sourceLocation ?? null,
         warnings: parserWarnings.filter((warning) =>
-          !warning.includes(' has formula "') ||
-          (chunk.formulaCells ?? []).some((cell) =>
-            warning.startsWith(`Sheet "${cell.sheetName}" cell ${cell.cellReference} has formula "`),
-          ),
+          // A layout_drift warning is scoped to the chunks that carry a
+          // drift-flagged row reference; other chunks see the table clean.
+          (!warning.includes("(layout_drift)") ||
+            (chunk.sourceReferences ?? []).some((reference) => reference.layoutDrift)) &&
+          (!warning.includes(' has formula "') ||
+            (chunk.formulaCells ?? []).some((cell) =>
+              warning.startsWith(`Sheet "${cell.sheetName}" cell ${cell.cellReference} has formula "`),
+            )),
         ),
         formulaCells: chunk.formulaCells ?? [],
         sheetInterpretations: extraction.sheet_interpretations.filter((interpretation) =>

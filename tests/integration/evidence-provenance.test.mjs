@@ -538,7 +538,7 @@ test("W4/W5 workbooks preserve literal actual provenance under a prompt-derived 
       await processDocumentJob(job(buffer), store),
     );
     assert.equal(jobResult.status, "completed", jobResult.processing_error);
-    assert.equal(jobResult.parser_version, "document-parser/22");
+    assert.equal(jobResult.parser_version, "document-parser/23");
     // The literal actual row survives with its full period/cut-off provenance,
     // alongside the deterministic-first % Complete rows the pass now derives
     // from the Workplan sheet's percent-formatted numeric cells.
@@ -929,7 +929,7 @@ test("a generated XLSX keeps a literal cell while a sibling formula has no cache
     ),
   );
   assert.equal(result.status, "completed", result.processing_error);
-  assert.equal(result.parser_version, "document-parser/22");
+  assert.equal(result.parser_version, "document-parser/23");
   assert.equal(result.processing_status, "needs_review");
   assert.match(result.processing_error ?? "", /Formula results are unavailable/);
   assert.ok(groupCalls > 0);
@@ -3566,5 +3566,219 @@ test("a warm cache hit skips both decomposed task prompts", async () => {
   assert.deepEqual(
     warm.extraction.facts.map((fact) => fact.extracted_text),
     ["42%"],
+  );
+});
+
+// document-parser/23 renders layout-drift rows without column-role labels and
+// flags their references. The contract: the row's values stay citable as
+// unattributed evidence, while every claim that needs a proven column role is
+// refused by the standing validator gates - no new gate, no relaxed gate.
+test("layout-drift rows stay citable as unattributed evidence while column-role claims are refused", async () => {
+  const driftCells = [
+    {
+      sheetName: "Costs", row: 5, column: "A", cell: "A5", label: null,
+      value: "Kamera Pengawasan", rawValue: "Kamera Pengawasan", dateIso: null,
+    },
+    {
+      sheetName: "Costs", row: 5, column: "B", cell: "B5", label: null,
+      value: "2357276.0", rawValue: "2357276.0", dateIso: null,
+    },
+  ];
+  const driftRowText = "A: Kamera Pengawasan | B: 2357276.0";
+  const rowReference = {
+    sourceId: "row-5",
+    chunkIndex: 0,
+    text: driftRowText,
+    modelText: driftRowText,
+    sourceLocation: {
+      kind: "xlsx",
+      sheetName: "Costs",
+      tableNumber: 0,
+      rowStart: 5,
+      rowEnd: 5,
+      cellRangeStart: "A5",
+      cellRangeEnd: "B5",
+    },
+    rowCells: driftCells,
+    layoutDrift: true,
+  };
+  const chunks = [{
+    chunkIndex: 0,
+    chunkText: driftRowText,
+    sectionLabel: "Costs",
+    sourceReferences: [rowReference],
+  }];
+
+  await withLocalOllama(async (_url, init) => {
+    const prompt = JSON.parse(init.body).messages[1].content;
+    if (isExecutiveSummaryPrompt(prompt)) {
+      const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+      return modelResponse(executiveSummaryOutput(input));
+    }
+    const references = documentContextFromPrompt(prompt);
+    if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+    const output = baseGroupOutput(references);
+    output.facts = [{
+      fact_type: "issue",
+      extracted_text: "The camera line item carries 2357276.0 outside its declared columns.",
+      original_value: "2357276.0",
+      confidence: 0.9,
+      source_id: "row-5",
+    }];
+    output.cost_observations = [{
+      measure: "actual_to_date",
+      source_value: "2357276.0",
+      scope_level: "wbs",
+      scope_label: "Kamera Pengawasan",
+      scope_source_id: null,
+      wbs_code: null,
+      wbs_parent_code: null,
+      wbs_name: null,
+      scope_description: null,
+      period_label: null,
+      as_of_date: "2026-10-16",
+      status_label: null,
+      source_id: "row-5",
+    }];
+    return modelResponse(output);
+  }, async () => {
+    const result = await extractDocumentGroups(
+      job("layout-drift-cells.txt", { fileName: "layout-drift.xlsx" }),
+      chunks,
+      { parserVersion: "document-parser/23" },
+      memoryGroupStore(),
+    );
+    assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+    assert.ok(
+      result.extraction.facts.some((fact) => fact.original_value === "2357276.0"),
+      "the drift row's value stays citable as unattributed evidence",
+    );
+    const warnings = result.extraction.quality_warnings.join(" ");
+    assert.match(
+      warnings,
+      /cost_observations\[0\]\.scope_label/,
+      "a scope claim on a drift row is refused by the standing scope gate",
+    );
+    assert.match(
+      warnings,
+      /cost_observations\[0\]\.as_of_date cannot be attributed to a cut-off or period column/,
+      "a record-date claim on a drift row is refused by the standing date gate",
+    );
+    assert.equal(
+      result.extraction.cost_observations.length,
+      0,
+      "no cost observation survives role claims on a drift row",
+    );
+  });
+});
+
+// A drift row that, if it still carried its header labels, would be a textbook
+// deterministic progress row must derive nothing deterministically: the labels
+// are gone, so the pass has nothing proven to anchor on.
+test("layout-drift rows yield no deterministic progress derivations", async () => {
+  const progressRow = (labelled) => {
+    const labels = labelled ? ["Item", "WBS", "Actual %", "Cut-off Date"] : [null, null, null, null];
+    const cells = [
+      {
+        sheetName: WEEKLY, row: 5, column: "A", cell: "A5", label: labels[0],
+        value: "Progress", rawValue: "Progress", dateIso: null,
+      },
+      {
+        sheetName: WEEKLY, row: 5, column: "B", cell: "B5", label: labels[1],
+        value: "Alarm", rawValue: "Alarm", dateIso: null,
+      },
+      {
+        sheetName: WEEKLY, row: 5, column: "C", cell: "C5", label: labels[2],
+        value: "45%", rawValue: "45%", dateIso: null,
+      },
+      {
+        sheetName: WEEKLY, row: 5, column: "D", cell: "D5", label: labels[3],
+        value: "2026-10-16", rawValue: "2026-10-16", dateIso: "2026-10-16",
+      },
+    ];
+    const rowText = cells
+      .map((cell) => `${cell.label ? `${cell.label}: ` : `${cell.column}: `}${cell.value}`)
+      .join(" | ");
+    return {
+      cells,
+      reference: {
+        sourceId: labelled ? "row-labelled" : "row-drift",
+        chunkIndex: 0,
+        text: rowText,
+        modelText: rowText,
+        sourceLocation: {
+          kind: "xlsx",
+          sheetName: WEEKLY,
+          tableNumber: 0,
+          rowStart: 5,
+          rowEnd: 5,
+          cellRangeStart: "A5",
+          cellRangeEnd: "D5",
+        },
+        rowCells: cells,
+        ...(labelled ? {} : { layoutDrift: true }),
+      },
+    };
+  };
+
+  const run = async (labelled) => {
+    const { cells, reference } = progressRow(labelled);
+    // The parser always emits per-cell references beside the row reference;
+    // the validator's cited_row_column scope proof resolves through them.
+    const cellReferences = cells.map((cell) => ({
+      sourceId: `${labelled ? "cell-labelled" : "cell-drift"}-${cell.cell}`,
+      chunkIndex: 0,
+      text: `${cell.label ? `${cell.label}: ` : `${cell.column}: `}${cell.value}`,
+      modelText: `${cell.label ? `${cell.label}: ` : `${cell.column}: `}${cell.value}`,
+      sourceLocation: {
+        kind: "xlsx",
+        sheetName: WEEKLY,
+        tableNumber: 0,
+        rowStart: 5,
+        rowEnd: 5,
+        cellRangeStart: cell.cell,
+        cellRangeEnd: cell.cell,
+      },
+      cell,
+      rowCells: cells,
+      ...(labelled ? {} : { layoutDrift: true }),
+    }));
+    const chunks = [{
+      chunkIndex: 0,
+      chunkText: reference.text,
+      sectionLabel: WEEKLY,
+      sourceReferences: [reference, ...cellReferences],
+    }];
+    return await withLocalOllama(async (_url, init) => {
+      const prompt = JSON.parse(init.body).messages[1].content;
+      if (isExecutiveSummaryPrompt(prompt)) {
+        const input = JSON.parse(prompt.match(/^EXECUTIVE_SUMMARY_INPUT_JSON=(.+)$/m)[1]);
+        return modelResponse(executiveSummaryOutput(input));
+      }
+      const references = documentContextFromPrompt(prompt);
+      if (isClassificationPrompt(prompt)) return modelResponse(classificationOutput(references));
+      return modelResponse(baseGroupOutput(references));
+    }, async () =>
+      await extractDocumentGroups(
+        job(labelled ? "progress-labelled.txt" : "progress-drift.txt", { fileName: "progress.xlsx" }),
+        chunks,
+        { parserVersion: "document-parser/23" },
+        memoryGroupStore(),
+      ));
+  };
+
+  const control = await run(true);
+  assert.equal(control.ok, true, control.ok ? undefined : control.errorMessage);
+  assert.equal(
+    control.extraction.assurance_observations.progress.length,
+    1,
+    "the control row with proven labels derives deterministically",
+  );
+  const drift = await run(false);
+  assert.equal(drift.ok, true, drift.ok ? undefined : drift.errorMessage);
+  assert.equal(
+    drift.extraction.assurance_observations.progress.length,
+    0,
+    "the same row without labels derives nothing deterministically",
   );
 });

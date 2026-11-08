@@ -106,7 +106,7 @@ test("TXT extraction keeps headings and source-linked bounded chunks across long
   for (let index = 1; index <= 24; index += 1) {
     assert.ok(result.chunks.some((chunk) => chunk.chunkText.includes(`PARAGRAPH-${index} `)));
   }
-  assert.equal(result.parserMetadata.parserVersion, "document-parser/22");
+  assert.equal(result.parserMetadata.parserVersion, "document-parser/23");
 });
 test("a single long paragraph is bounded without losing its boundary markers", async () => {
   const paragraph =
@@ -361,7 +361,7 @@ test("XLSX cell references locate literals exactly and never claim an unresolved
 
   assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
   if (!result.ok) return;
-  assert.equal(result.parserMetadata.parserVersion, "document-parser/22");
+  assert.equal(result.parserMetadata.parserVersion, "document-parser/23");
 
   const chunk = result.chunks[0];
   const references = chunk.sourceReferences ?? [];
@@ -734,6 +734,9 @@ function xlsxPackage(sheetName, rowsXml, { styles = "", workbookExtra = "" } = {
 const inlineCell = (reference, value) =>
   `<c r="${reference}" t="inlineStr"><is><t>${value}</t></is></c>`;
 
+const numberCell = (reference, value) =>
+  `<c r="${reference}"><v>${value}</v></c>`;
+
 function columnLettersForTest(column) {
   let value = column;
   let letters = "";
@@ -856,6 +859,160 @@ test("duplicate XLSX headers are diagnosed fail-closed while merged repeats are 
       "one merged header range is an intentional repeat",
     );
   }
+});
+
+const driftHeader = `<row r="1">${inlineCell("A1", "Kode Komponen")}${inlineCell("B1", "Nama Komponen")}${inlineCell("C1", "Qty")}${inlineCell("D1", "Satuan")}</row>`;
+const driftConformingRow = (row, code = `SB0${row - 1}`) =>
+  `<row r="${row}">${inlineCell(`A${row}`, code)}${inlineCell(`B${row}`, "Alarm Kebencanaan")}${numberCell(`C${row}`, row)}${inlineCell(`D${row}`, "Unit")}</row>`;
+
+test("layout drift rows render without column-role labels beside a layout_drift warning", async () => {
+  const driftedRow = (row) =>
+    `<row r="${row}">${inlineCell(`A${row}`, `SB0${row - 1}`)}${numberCell(`B${row}`, "2357276.0")}${inlineCell(`C${row}`, "pcs")}${inlineCell(`D${row}`, "Unit")}</row>`;
+  const result = await parseDocumentBuffer(
+    "layout-drift.xlsx",
+    await xlsxPackage(
+      "Master Hardware",
+      driftHeader + [2, 3, 4].map(driftConformingRow).join("") + [5, 6, 7].map(driftedRow).join(""),
+    ),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  if (!result.ok) return;
+
+  assert.ok(
+    result.parserMetadata.warnings.some((warning) =>
+      warning.includes("layout_drift") && warning.includes("table rows 5-7"),
+    ),
+    result.parserMetadata.warnings.join("\n"),
+  );
+
+  const references = result.chunks.flatMap((chunk) => chunk.sourceReferences ?? []);
+  const rowReference = (row) =>
+    references.find(
+      (source) => !source.cell && source.sourceLocation?.rowStart === row && source.sourceLocation?.rowEnd === row,
+    );
+  assert.equal(rowReference(5)?.layoutDrift, true, "the drifted row reference is flagged");
+  assert.equal(rowReference(2)?.layoutDrift ?? false, false, "the conforming row reference is not flagged");
+  const cellReference = (cell) => references.find((source) => source.cell?.cell === cell);
+  assert.equal(cellReference("B5")?.cell.label, null, "a drifted cell carries no column-role label");
+  assert.equal(cellReference("B5")?.layoutDrift, true, "the drifted cell reference is flagged");
+  assert.equal(cellReference("B2")?.cell.label, "Nama Komponen", "conforming cells keep their header label");
+
+  const text = result.chunks.map((chunk) => chunk.chunkText).join("\n");
+  assert.ok(text.includes("B: 2357276.0"), "a drifted cell renders with the column-letter prefix instead of a header label");
+  assert.ok(text.includes("C: pcs"));
+  assert.ok(text.includes("Nama Komponen: Alarm Kebencanaan"), "conforming rows keep their labels");
+  assert.ok(text.includes("A: Kode Komponen"), "the declared header block is unchanged");
+});
+
+test("layout drift detection stays off for uniform tables, single-conflict rows, and inconsistent anchors", async () => {
+  const parseRows = async (fileName, rows) =>
+    await parseDocumentBuffer(fileName, await xlsxPackage("Uniform", rows));
+
+  const uniform = await parseRows("uniform.xlsx", driftHeader + [2, 3, 4, 5].map(driftConformingRow).join(""));
+  assert.equal(uniform.ok, true);
+  if (uniform.ok) {
+    assert.equal(
+      uniform.parserMetadata.warnings.some((warning) => warning.includes("layout_drift")),
+      false,
+      uniform.parserMetadata.warnings.join("\n"),
+    );
+  }
+
+  // One type conflict alone is row variety, not layout drift: the row keeps
+  // its labels and no warning fires.
+  const singleConflict = `<row r="5">${inlineCell("A5", "SB04")}${numberCell("B5", 100)}${numberCell("C5", 5)}${inlineCell("D5", "Unit")}</row>`;
+  const single = await parseRows(
+    "single-conflict.xlsx",
+    driftHeader + [2, 3, 4].map(driftConformingRow).join("") + singleConflict,
+  );
+  assert.equal(single.ok, true);
+  if (single.ok) {
+    assert.equal(
+      single.parserMetadata.warnings.some((warning) => warning.includes("layout_drift")),
+      false,
+      single.parserMetadata.warnings.join("\n"),
+    );
+    const b5 = single.chunks.flatMap((chunk) => chunk.sourceReferences ?? []).find((source) => source.cell?.cell === "B5");
+    assert.equal(b5?.cell.label, "Nama Komponen", "a single-conflict row keeps its column roles");
+  }
+
+  // An anchor row that conflicts with its own anchor profile means the
+  // header-adjacent rows share no layout; detection stays off for the table.
+  const wildAnchor = `<row r="4">${inlineCell("A4", "SB03")}${numberCell("B4", 9)}${inlineCell("C4", "pcs")}${inlineCell("D4", "Unit")}</row>`;
+  const drifted = `<row r="5">${inlineCell("A5", "SB04")}${numberCell("B5", 8)}${inlineCell("C5", "pcs")}${inlineCell("D5", "Unit")}</row>`;
+  const anchor = await parseRows(
+    "anchor-inconsistent.xlsx",
+    driftHeader + driftConformingRow(2) + driftConformingRow(3) + wildAnchor + drifted,
+  );
+  assert.equal(anchor.ok, true);
+  if (anchor.ok) {
+    assert.equal(
+      anchor.parserMetadata.warnings.some((warning) => warning.includes("layout_drift")),
+      false,
+      anchor.parserMetadata.warnings.join("\n"),
+    );
+    const b5 = anchor.chunks.flatMap((chunk) => chunk.sourceReferences ?? []).find((source) => source.cell?.cell === "B5");
+    assert.equal(b5?.cell.label, "Nama Komponen", "no row loses its labels when the anchor is unreliable");
+  }
+});
+
+test("a currency-formatted number in a text column is layout drift on its own", async () => {
+  const priceRow = `<row r="5">${inlineCell("A5", "SB04")}${inlineCell("B5", "Kamera Pengawasan")}${numberCell("C5", 5)}<c r="D5" s="1"><v>2357276</v></c></row>`;
+  const result = await parseDocumentBuffer(
+    "drift-currency.xlsx",
+    await makeZip({
+      "xl/workbook.xml": `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><workbookPr date1904="0"/><sheets><sheet name="Costs" sheetId="1"/></sheets></workbook>`,
+      "xl/styles.xml": `<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="_-[$Rp-421]* #,##0.00_-"/></numFmts><cellXfs><xf/><xf numFmtId="164" applyNumberFormat="1"/></cellXfs></styleSheet>`,
+      "xl/worksheets/sheet1.xml": `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${driftHeader + [2, 3, 4].map(driftConformingRow).join("") + priceRow}</sheetData></worksheet>`,
+    }),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  if (!result.ok) return;
+
+  assert.ok(
+    result.parserMetadata.warnings.some((warning) =>
+      warning.includes("layout_drift") && warning.includes("table rows 5"),
+    ),
+    result.parserMetadata.warnings.join("\n"),
+  );
+  const references = result.chunks.flatMap((chunk) => chunk.sourceReferences ?? []);
+  const cellReference = (cell) => references.find((source) => source.cell?.cell === cell);
+  assert.equal(cellReference("D5")?.cell.label, null, "the price cell loses the Satuan label it cannot prove");
+  assert.equal(cellReference("B5")?.cell.label, null, "the whole drifted row renders unlabelled");
+});
+
+test("split parts of a drifted row keep the layoutDrift flag on every reference", async () => {
+  const hugeDrifted = `<row r="5">${inlineCell("A5", "SB04")}${numberCell("B5", "9".repeat(2600))}${inlineCell("C5", "y".repeat(2600))}${inlineCell("D5", "Unit")}</row>`;
+  const result = await parseDocumentBuffer(
+    "drift-split.xlsx",
+    await xlsxPackage(
+      "Split",
+      driftHeader + driftConformingRow(2) + driftConformingRow(3) + driftConformingRow(4) + hugeDrifted,
+    ),
+  );
+  assert.equal(result.ok, true, result.ok ? undefined : result.errorMessage);
+  if (!result.ok) return;
+
+  assert.ok(result.chunks.length >= 2, "the huge drifted row is split across chunks");
+  const driftReferences = result.chunks
+    .flatMap((chunk) => chunk.sourceReferences ?? [])
+    .filter((source) => source.sourceLocation?.rowStart === 5);
+  assert.ok(driftReferences.length >= 2, "the drifted row keeps row and cell references across parts");
+  assert.ok(
+    driftReferences.every((source) => source.layoutDrift === true),
+    "every reference of the drifted row carries the flag",
+  );
+  const qtyCell = driftReferences.find((source) => source.cell?.cell === "C5");
+  assert.ok(qtyCell, "the per-cell reference survives in its part");
+  assert.equal(qtyCell?.cell.label, null);
+  const conformingReferences = result.chunks
+    .flatMap((chunk) => chunk.sourceReferences ?? [])
+    .filter((source) => source.sourceLocation?.rowStart === 2);
+  assert.equal(
+    conformingReferences.some((source) => source.layoutDrift === true),
+    false,
+    "conforming rows stay unflagged",
+  );
 });
 
 test("a weekly Gantt week header above a WBS header is kept as a two-row header", async () => {

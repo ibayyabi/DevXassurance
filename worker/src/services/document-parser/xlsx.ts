@@ -381,11 +381,17 @@ export async function parseXlsxDocument(
         for (const diagnostic of diagnoseTableAmbiguity(sheet.name, tableRows, headerCount, merges, headerLabels)) {
           warnings.push(diagnostic);
         }
+        const { driftRows, warning: driftWarning } = detectLayoutDriftRows(sheet.name, tableRows, headerCount, headers);
+        if (driftWarning) warnings.push(driftWarning);
 
         for (const row of tableRows.slice(headerCount)) {
+          const driftedRow = driftRows.has(row.number);
           const cells = row.cells.map((cell) => {
             const column = columnNumber(cell.reference);
-            const label = headers.get(column);
+            // A drifted row's column role is unprovable: the cell renders with
+            // the column-letter prefix instead of the header label so the model
+            // sees raw evidence, never an attribution the worker cannot prove.
+            const label = driftedRow ? undefined : headers.get(column);
             const labelText = label ? `${label}: ` : `${columnLetters(column) || "Cell"}: `;
             // A date number format makes a cell a date serial only when it holds
             // a number (or nothing). Text in a date-formatted cell - an ISO date
@@ -467,6 +473,7 @@ export async function parseXlsxDocument(
             : undefined;
           const subjectValue = subjectCell?.value.trim();
           if (
+            !driftedRow &&
             keyCell?.textual &&
             !keyCell.formula &&
             SUBJECT_KEY_CUE.test(keyCell.value) &&
@@ -516,6 +523,7 @@ export async function parseXlsxDocument(
             })),
             groupKey: `sheet:${sheet.name}:table:${tableIndex}`,
             sectionLabel: sheet.name,
+            ...(driftedRow ? { layoutDrift: true } : {}),
           });
         }
       }
@@ -821,4 +829,158 @@ function diagnoseTableAmbiguity(
   const triggers = [...reasons].filter((reason) => AMBIGUITY_TRIGGER_REASONS[reason] === true);
   if (!triggers.length) return [];
   return [`Sheet "${sheetName}" table rows ${rowStart}-${rowEnd} (${cellRangeStart}-${cellRangeEnd}) has candidate ambiguity indicators: ${triggers.join(", ")}; row/column mapping is kept as raw evidence and may need a candidate interpretation review.`];
+}
+
+// Layout drift: a table can declare one header and then stop following it. A
+// real procurement workbook drifted mid-table, so prices landed in text
+// columns (Satuan, Spesifikasi) while the header kept claiming those columns
+// were units and specifications. A drifted row's column role is unprovable:
+// rendering it with header labels would feed the model an attribution the
+// worker cannot prove, and every extraction group on that table fails closed.
+// Instead, drifted rows are detected per row and rendered without column-role
+// labels - their values stay visible as raw, unattributed evidence and a
+// layout_drift warning surfaces the table for review. Detection is
+// conservative: the column-class profile is anchored on the data rows closest
+// to the header (the rows the header was written for), a labelled column whose
+// anchor cells hold no non-empty value is a wildcard, unresolved formula
+// caches are skipped the way ambiguity diagnostics skip them, and an anchor
+// that cannot agree with its own profile disables detection for the table.
+const LAYOUT_DRIFT_ANCHOR_ROWS = 3;
+const LAYOUT_DRIFT_MIN_DATA_ROWS = 3;
+const LAYOUT_DRIFT_MIN_PROFILED_COLUMNS = 2;
+const LAYOUT_DRIFT_MIN_CONFLICTS = 2;
+// A currency/percent/thousands-formatted number inside a text-profiled column
+// is the strongest drift signature (a price in a unit or specification column).
+const CURRENCY_LIKE_NUMBER_FORMAT = /(?:rp|idr|usd|eur|sgd|myr|[$€£%])|#,##/i;
+
+type LayoutDriftCellClass = "empty" | "text" | "number" | "date";
+
+function layoutDriftCellClass(cell: WorkbookCell): LayoutDriftCellClass {
+  if (
+    cell.formulaCacheStatus === "cached_error" ||
+    cell.formulaCacheType === "error" ||
+    ["missing_cache", "cached_empty", "unknown"].includes(cell.formulaCacheStatus)
+  ) return "empty";
+  if (cell.dateFormat) return "date";
+  if (cell.formulaCacheStatus === "cached_value") {
+    if (cell.formulaCacheType === "number") return "number";
+    return cell.formulaCacheType === "string" || cell.formulaCacheType === "boolean" ? "text" : "empty";
+  }
+  if (!cell.value.trim()) return "empty";
+  return cell.textual ? "text" : "number";
+}
+
+function layoutDriftConflictScore(
+  cells: WorkbookCell[],
+  profile: Map<number, LayoutDriftCellClass>,
+): number {
+  let score = 0;
+  for (const cell of cells) {
+    const column = columnNumber(cell.reference);
+    if (!column) continue;
+    const expected = profile.get(column);
+    if (!expected) continue;
+    const actual = layoutDriftCellClass(cell);
+    if (actual === "empty" || actual === expected) continue;
+    // Calendar structure is not column-role evidence: week/Gantt columns
+    // legitimately mix dates, notes, and empty cells, and a wrong date claim
+    // is already refused fail-closed by the record-date gates. Date-profiled
+    // columns are wildcards and date-valued cells never conflict.
+    if (actual === "date" || expected === "date") continue;
+    score += actual === "number" &&
+      expected === "text" &&
+      CURRENCY_LIKE_NUMBER_FORMAT.test(cell.numberFormat ?? "")
+      ? 2
+      : 1;
+  }
+  return score;
+}
+
+function detectLayoutDriftRows(
+  sheetName: string,
+  tableRows: { number: number; cells: WorkbookCell[] }[],
+  headerCount: number,
+  headers: Map<number, string>,
+): { driftRows: Set<number>; warning: string | null } {
+  const driftRows = new Set<number>();
+  if (headers.size < LAYOUT_DRIFT_MIN_PROFILED_COLUMNS) return { driftRows, warning: null };
+  // A title banner repeated across every column declares no per-column roles
+  // (a real Gantt title row labels A1:DI1 with one project title), so no row
+  // can drift against it - ordinary grid variety would be flagged instead.
+  // Ambiguity diagnostics already surface such headers for review.
+  if (new Set(headers.values()).size < 2) return { driftRows, warning: null };
+  const dataRows = tableRows.slice(headerCount);
+  if (dataRows.length < LAYOUT_DRIFT_MIN_DATA_ROWS) return { driftRows, warning: null };
+
+  // Profile: per labelled column, the modal cell class across the anchor rows;
+  // ties resolve toward the class encountered first, i.e. the row closest to
+  // the header. Only labelled columns are profiled - the declared layout is
+  // exactly what the header claims, and cells in unlabelled columns carry no
+  // column role to protect in the first place.
+  const anchorRows = dataRows.slice(0, Math.min(LAYOUT_DRIFT_ANCHOR_ROWS, dataRows.length));
+  const classVotes = new Map<number, Map<LayoutDriftCellClass, number>>();
+  for (const row of anchorRows) {
+    for (const cell of row.cells) {
+      const column = columnNumber(cell.reference);
+      if (!column || !headers.has(column)) continue;
+      const value = layoutDriftCellClass(cell);
+      if (value === "empty") continue;
+      const votes = classVotes.get(column) ?? new Map<LayoutDriftCellClass, number>();
+      votes.set(value, (votes.get(value) ?? 0) + 1);
+      classVotes.set(column, votes);
+    }
+  }
+  const profile = new Map<number, LayoutDriftCellClass>();
+  for (const [column, votes] of classVotes) {
+    let best: LayoutDriftCellClass | undefined;
+    let bestCount = 0;
+    for (const [value, count] of votes) {
+      if (count > bestCount) {
+        best = value;
+        bestCount = count;
+      }
+    }
+    if (best) profile.set(column, best);
+  }
+  if (profile.size < LAYOUT_DRIFT_MIN_PROFILED_COLUMNS) return { driftRows, warning: null };
+
+  // Anchor rows that disagree with their own profile mean the header-adjacent
+  // rows do not share one layout; detection stays off for this table.
+  for (const row of anchorRows) {
+    if (layoutDriftConflictScore(row.cells, profile) >= LAYOUT_DRIFT_MIN_CONFLICTS) {
+      return { driftRows, warning: null };
+    }
+  }
+
+  for (const row of dataRows) {
+    if (layoutDriftConflictScore(row.cells, profile) >= LAYOUT_DRIFT_MIN_CONFLICTS) {
+      driftRows.add(row.number);
+    }
+  }
+  if (!driftRows.size) return { driftRows, warning: null };
+
+  const driftedRowNumbers = [...driftRows].sort((left, right) => left - right);
+  const rowRanges: string[] = [];
+  let runStart = driftedRowNumbers[0];
+  let previous = runStart;
+  for (const rowNumber of driftedRowNumbers.slice(1)) {
+    if (rowNumber === previous + 1) {
+      previous = rowNumber;
+      continue;
+    }
+    rowRanges.push(runStart === previous ? `${runStart}` : `${runStart}-${previous}`);
+    runStart = rowNumber;
+    previous = rowNumber;
+  }
+  rowRanges.push(runStart === previous ? `${runStart}` : `${runStart}-${previous}`);
+  const driftedRowByNumber = new Map(dataRows.map((row) => [row.number, row]));
+  const firstDrifted = driftedRowByNumber.get(driftedRowNumbers[0])!;
+  const lastDrifted = driftedRowByNumber.get(driftedRowNumbers[driftedRowNumbers.length - 1])!;
+  const cellRangeStart = firstDrifted.cells[0]?.reference ?? "";
+  const cellRangeEnd = lastDrifted.cells[lastDrifted.cells.length - 1]?.reference ?? "";
+  return {
+    driftRows,
+    warning:
+      `Sheet "${sheetName}" table rows ${rowRanges.join(", ")} (${cellRangeStart}-${cellRangeEnd}) has layout drift indicators (layout_drift): ${driftRows.size} ${driftRows.size === 1 ? "row no longer matches" : "rows no longer match"} the declared header columns; their values are kept as raw unattributed evidence without column-role labels and may need a review.`,
+  };
 }
