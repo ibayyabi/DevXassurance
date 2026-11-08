@@ -643,7 +643,10 @@ function costMeasureMatchesCitation(
 }
 const COST_SCOPE_LEVELS = ["project", "wbs"] as const;
 const MAX_MODEL_STRING_LENGTH = 5000;
-const MAX_DOCUMENT_GROUPS = 32;
+// Deployment-tunable: dense real-world workbooks (many sheets/tables) yield
+// more groups at smaller group sizes; the ceiling must scale with the group
+// size or large-but-legitimate documents are refused outright.
+const MAX_DOCUMENT_GROUPS = Number(process.env.XASS_EXTRACTION_MAX_GROUPS ?? "32");
 const MAX_DOCUMENT_CHUNKS = MAX_DOCUMENT_GROUPS * MAX_GROUP_CHUNKS;
 const MAX_CLASSIFICATION_SOURCES = 12;
 const MAX_CLASSIFICATION_SOURCE_CHARACTERS = 700;
@@ -762,7 +765,7 @@ export async function extractDocumentGroups(
   if (chunks.length > MAX_DOCUMENT_CHUNKS) {
     return failure(
       "document_extraction_limit_exceeded",
-      "The document exceeds the 32-group extraction limit (about 320,000 source characters). The original file is retained; split it into smaller evidence files and retry.",
+      `The document exceeds the ${MAX_DOCUMENT_GROUPS}-group extraction limit. The original file is retained; split it into smaller evidence files or raise XASS_EXTRACTION_MAX_GROUPS, and retry.`,
     );
   }
   const contentHash = hashContent(job.fileBuffer);
@@ -770,7 +773,7 @@ export async function extractDocumentGroups(
   if (groups.length > MAX_DOCUMENT_GROUPS) {
     return failure(
       "document_extraction_limit_exceeded",
-      "The document exceeds the 32-group extraction limit (about 320,000 source characters). The original file is retained; split it into smaller evidence files and retry.",
+      `The document exceeds the ${MAX_DOCUMENT_GROUPS}-group extraction limit. The original file is retained; split it into smaller evidence files or raise XASS_EXTRACTION_MAX_GROUPS, and retry.`,
     );
   }
   let provider: ModelProvider;
