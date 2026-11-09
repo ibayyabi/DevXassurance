@@ -97,11 +97,12 @@ queue coordination.
 
 ### Local n8n with Docker
 
-From this folder:
+From this folder, create `.env` if needed, populate its n8n/Supabase values, then validate and start Compose with the root app environment included. This makes the app's `XASS_ASSESSMENT_SECRET` available without duplicating the secret in this folder's `.env`.
 
 ```bash
-cp .env.example .env
-docker compose up -d
+[ -f .env ] || cp .env.example .env
+docker compose --env-file .env --env-file ../../.env.local config --quiet
+docker compose --env-file .env --env-file ../../.env.local up -d
 ```
 
 Then open:
@@ -130,11 +131,11 @@ is active. Only one polling workflow may be published.
 
 Set these in the n8n runtime, not in the public Next.js app:
 
-```bash
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 XASS_DOCUMENT_WORKER_URL=http://host.docker.internal:3000/api/workers/parse-document
-```
+XASS_APP_URL=http://host.docker.internal:3000
+XASS_ASSESSMENT_SECRET=same-value-as-root-app
 
 Optional:
 

@@ -417,11 +417,9 @@ export async function parseXlsxDocument(
                       ? ` (stored cached result: ${cell.value}; freshness not established)`
                       : "";
             const displayValue = percentFormattedDisplayValue(cell, isoDate) ?? cell.value;
-            // The raw value, number format, and cache disclaimer stay in an
-            // annotation appended after the readable text. The readable cell text
-            // the model is shown (modelText) is therefore always a contiguous
-            // substring of the canonical cell/row text a citation must match, so
-            // a model can cite exactly what it was given.
+            // Keep raw values and format/cache annotations attached to their cell
+            // in canonical row text below. Model-visible text stays compact, and
+            // each full cell citation remains a verbatim substring of its chunk.
             const annotation = cell.numberFormat || isFormula
               ? ` [raw value: ${cell.value}; number format: ${cell.numberFormat ?? "none"}${isoDate ? `; ISO date: ${isoDate}` : invalidDate ? `; Needs Review: invalid Excel serial ${cell.value}` : dateSerialCell ? "; Needs Review: no cached date value" : ""}${formulaCacheTag}]`
               : "";
@@ -455,9 +453,9 @@ export async function parseXlsxDocument(
             };
           });
           const modelText = cells.map((cell) => cell.modelText).join(" | ");
-          // The row keeps every annotation after its readable text so the row
-          // reference stays citable against exactly what the model was shown.
-          const text = `${modelText}${cells.map((cell) => cell.annotation).filter(Boolean).join("")}`;
+          // Keep each complete cell reference contiguous in the canonical row
+          // text so the publication boundary can verify every cited value.
+          const text = cells.map((cell) => cell.text).join(" | ");
           const rowCells = cells.map((cell) => cell.sourceCell);
           // A key-value row declares a workbook subject only when its cue and
           // exactly one literal value share the row; multiple candidates or a

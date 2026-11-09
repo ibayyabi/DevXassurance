@@ -153,7 +153,8 @@ export async function POST(
       .select("id")
       .single();
     if (insertError || !inserted) {
-      return NextResponse.json({ message: "Could not save this evidence file. Try again." }, { status: 500 });
+      console.error("DIAG-INSERT-ERROR:", JSON.stringify(insertError));
+    return NextResponse.json({ message: "Could not save this evidence file. Try again.", debugCode: insertError.code ?? null }, { status: 500 });
     }
     documentId = inserted.id;
   }
