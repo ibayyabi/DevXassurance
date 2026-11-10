@@ -94,6 +94,44 @@ export async function parseXlsxDocument(
         }
         tables[tables.length - 1].push(row);
       }
+      // A merged banner (one text cell merged across columns) directly above the
+      // real header would otherwise label every column it spans with the sheet
+      // title and push the true header into the data. Split the banner block
+      // (title, subtitle, period band) from the table that starts at the first
+      // row of distinct field labels.
+      const isFieldLabel = (cell: WorkbookCell) =>
+        cell.textual && !cell.formula && Boolean(cell.value.trim()) &&
+        cell.value.trim().length <= DATA_LIKE_LABEL_MAX_LENGTH && !DATA_LIKE_LABEL.test(cell.value.trim());
+      for (let t = 0; t < tables.length; t += 1) {
+        const block = tables[t];
+        const banner = block[0];
+        if (block.length < 6 || banner.cells.length !== 1 || !banner.cells[0].textual) continue;
+        const bannerMerged = merges.some((merge) => {
+          const [start, end] = merge.split(":");
+          return start === banner.cells[0].reference &&
+            (columnNumber(end ?? "") ?? 0) > (columnNumber(start) ?? 0);
+        });
+        if (!bannerMerged) continue;
+        // The header is the candidate row with the most distinct field labels; a
+        // period band (month names) above it has fewer labels and stays banner.
+        let headerAt = -1;
+        let bestLabels = 0;
+        block.forEach((row, index) => {
+          if (index < 1 || index > 5 || index >= block.length - 1) return;
+          const labels = row.cells.filter(isFieldLabel);
+          const others = row.cells.filter((cell) =>
+            !isFieldLabel(cell) && !(cell.dateFormat && excelSerialToIsoDate(cell.value, date1904)));
+          if (
+            labels.length >= 4 && others.every((cell) => cell.textual && !cell.formula) && labels.length > bestLabels &&
+            new Set(labels.map((cell) => cell.value.trim().toLocaleLowerCase())).size === labels.length
+          ) {
+            headerAt = index;
+            bestLabels = labels.length;
+          }
+        });
+        if (headerAt < 1) continue;
+        tables.splice(t, 1, block.slice(0, headerAt), block.slice(headerAt));
+      }
       for (const [tableIndex, tableRows] of tables.entries()) {
         let headerCount = 1;
         // A weekly Gantt may put a week/date header row above the WBS header

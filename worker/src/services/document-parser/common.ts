@@ -14,7 +14,7 @@ const MAX_OFFICE_PACKAGE_EXPANDED_BYTES = 100 * 1024 * 1024;
 // groups are keyed by this version, so older rows are never reused.
 // /23: layout-drift rows render without column-role labels and carry a
 // layoutDrift flag plus a layout_drift parser warning.
-export const PARSER_VERSION = "document-parser/24";
+export const PARSER_VERSION = "document-parser/25";
 
 export class OfficePackageError extends Error {
   constructor(

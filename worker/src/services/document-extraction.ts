@@ -97,6 +97,8 @@ export type SourceCitation = {
   source_id?: string;
   evidence_chunk_index: number;
   excerpt: string;
+  /** Compact text the model was shown; a quote of it is accepted and published as the canonical `excerpt`. */
+  model_excerpt?: string;
   source_location?: ParsedSourceReference["sourceLocation"];
 };
 
@@ -1637,7 +1639,11 @@ function allowedSourceCitations(group: ChunkGroup) {
         {
           source_id: source.sourceId,
           evidence_chunk_index: source.chunkIndex,
-          excerpt: source.text,
+          // Persisted chunk text is trimmed; an untrimmed excerpt from a cell at
+          // a chunk edge (trailing space) is not a substring of it and the
+          // publication boundary would reject the whole document.
+          excerpt: source.text.trim(),
+          model_excerpt: source.modelText.trim(),
           source_location: source.sourceLocation,
         },
       ] as const),
@@ -3056,26 +3062,44 @@ async function requestModel(
           options: { temperature: 0 },
         };
 
-  beforeFetch?.();
-  let response: Response;
-  try {
-    response = await fetch(provider.url, {
-      method: "POST",
-      signal: ownershipSignal
-        ? AbortSignal.any([AbortSignal.timeout(llmTimeoutMs()), ownershipSignal])
-        : AbortSignal.timeout(llmTimeoutMs()),
-      headers: provider.headers,
-      body: JSON.stringify(body),
-    });
-  } catch {
-    throw new TransientProviderError("The configured AI provider request failed or timed out.");
-  }
-  if (!response.ok) {
-    if (response.status === 408 || response.status === 429 || response.status >= 500) {
-      throw new TransientProviderError(`The configured AI provider returned HTTP ${response.status}.`);
+  // One dropped connection or a 429/5xx must not fail a whole document: retry
+  // briefly with backoff. Timeouts are not retried (they already cost the full
+  // timeout and would exhaust the job lease); quota (429) and ownership loss are never retried.
+  const maxTransientRetries = Number(process.env.XASS_LLM_TRANSIENT_RETRIES ?? "2");
+  const retryBaseMs = Number(process.env.XASS_LLM_RETRY_BASE_MS ?? "2000");
+  let response: Response | undefined;
+  for (let retry = 0; ; retry += 1) {
+    beforeFetch?.();
+    let transientMessage: string | null = null;
+    let retryable = true;
+    try {
+      response = await fetch(provider.url, {
+        method: "POST",
+        signal: ownershipSignal
+          ? AbortSignal.any([AbortSignal.timeout(llmTimeoutMs()), ownershipSignal])
+          : AbortSignal.timeout(llmTimeoutMs()),
+        headers: provider.headers,
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      retryable = !(error instanceof Error && error.name === "TimeoutError") && !ownershipSignal?.aborted;
+      transientMessage = "The configured AI provider request failed or timed out.";
     }
-    throw new Error(`The configured AI provider returned HTTP ${response.status}.`);
+    if (response && !response.ok) {
+      if (response.status === 408 || response.status === 429 || response.status >= 500) {
+        transientMessage = `The configured AI provider returned HTTP ${response.status}.`;
+        // Quota (429) defers the group at once instead of spending more requests.
+        retryable = response.status !== 429;
+        await response.body?.cancel();
+      } else {
+        throw new Error(`The configured AI provider returned HTTP ${response.status}.`);
+      }
+    }
+    if (!transientMessage) break;
+    if (!retryable || retry >= maxTransientRetries) throw new TransientProviderError(transientMessage);
+    await new Promise((resolve) => setTimeout(resolve, retryBaseMs * 3 ** retry));
   }
+  if (!response) throw new TransientProviderError("The configured AI provider request failed or timed out.");
 
   let envelope: unknown;
   try {
@@ -3245,7 +3269,8 @@ function deterministicCitationForCell(group: ChunkGroup, cell: ParsedSourceCell)
     citation: {
       source_id: reference.sourceId,
       evidence_chunk_index: reference.chunkIndex,
-      excerpt: reference.modelText,
+      excerpt: reference.text,
+      model_excerpt: reference.modelText,
       source_location: reference.sourceLocation,
     } satisfies SourceCitation,
     rowCells: reference.rowCells ?? [],
@@ -3327,7 +3352,8 @@ function deterministicCellClaims(group: ChunkGroup): {
         ? {
           source_id: rowReference.sourceId,
           evidence_chunk_index: rowReference.chunkIndex,
-          excerpt: rowReference.modelText,
+          excerpt: rowReference.text,
+      model_excerpt: rowReference.modelText,
           source_location: rowReference.sourceLocation,
         }
         : citation;
@@ -3395,7 +3421,8 @@ function deterministicCellClaims(group: ChunkGroup): {
     const citation = {
       source_id: rowReference.sourceId,
       evidence_chunk_index: rowReference.chunkIndex,
-      excerpt: rowReference.modelText,
+      excerpt: rowReference.text,
+      model_excerpt: rowReference.modelText,
       source_location: rowReference.sourceLocation,
     };
     for (const asOfDate of asOfDates) {
@@ -4151,7 +4178,7 @@ function validateGroupExtraction(
         source_id: rowColumnReference.sourceId,
         sheet_name: rowColumn.sheetName,
         cell_reference: rowColumn.cell,
-        excerpt: rowColumnReference.modelText,
+        excerpt: rowColumnReference.text,
       }];
     }
     const subject = scopeSourceId
@@ -4760,9 +4787,11 @@ function validateGroupExtraction(
     path: string,
     rowErrors: string[],
   ) => {
-    const excerpt = boundedString(item.excerpt, `${path}.excerpt`, rowErrors, 1200);
+    let excerpt = boundedString(item.excerpt, `${path}.excerpt`, rowErrors, 1200);
     if (citation && excerpt && !citation.excerpt.includes(excerpt)) {
-      rowErrors.push(`${path}.excerpt is not present in the cited source`);
+      // The model quotes the compact text it saw; publish the canonical text.
+      if (citation.model_excerpt?.includes(excerpt)) excerpt = citation.excerpt;
+      else rowErrors.push(`${path}.excerpt is not present in the cited source`);
     }
     if (citation && excerpt && citationHasUnavailableFormula(group, citation)) {
       rowErrors.push(`${path}.source cites formula_result_unavailable`);
