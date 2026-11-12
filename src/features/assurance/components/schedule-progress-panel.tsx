@@ -32,6 +32,8 @@ type MilestoneObservation = {
 
 type MilestoneComparison = {
   canonicalLabel: string;
+  scopeLevel: "project" | "wbs" | "unknown";
+  scopeLabel: string | null;
   condition: Condition;
   delayDays: number | null;
   baseline: MilestoneObservation | null;
@@ -182,10 +184,17 @@ export function ScheduleProgressPanel({
         </p>
       ) : (
         <ul className="mt-2 space-y-3">
-          {comparisons.map((comparison) => (
-            <li key={comparison.canonicalLabel} className="rounded-xl border border-ui-border p-4">
+          {comparisons.map((comparison, index) => (
+            <li
+              key={`${comparison.scopeLevel}-${comparison.scopeLabel ?? "project"}-${comparison.canonicalLabel}-${index}`}
+              className="rounded-xl border border-ui-border p-4"
+            >
               <div className="flex flex-wrap items-start justify-between gap-2">
-                <p className="font-semibold text-ink">{comparison.canonicalLabel}</p>
+                <p className="font-semibold text-ink">
+                  {comparison.scopeLevel === "wbs" && comparison.scopeLabel
+                    ? `${comparison.canonicalLabel} (WBS ${comparison.scopeLabel})`
+                    : comparison.canonicalLabel}
+                </p>
                 <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${conditionTone(comparison.condition)}`}>
                   {conditionLabel(comparison.condition)}
                 </span>
@@ -227,9 +236,9 @@ export function ScheduleProgressPanel({
         </p>
       ) : (
         <ul className="mt-2 space-y-2">
-          {progress.map((scope) => (
+          {progress.map((scope, index) => (
             <li
-              key={`${scope.scopeLevel}-${scope.scopeLabel ?? "project"}-${scope.measureKind}`}
+              key={`${scope.scopeLevel}-${scope.scopeLabel ?? "project"}-${scope.measureKind ?? "unspecified"}-${index}`}
               className="rounded-xl border border-ui-border p-4 text-sm"
             >
               <p className="font-semibold text-ink">
@@ -284,7 +293,7 @@ export function ScheduleProgressPanel({
                 </p>
               )}
               <ProgressSources current={scope.current} prior={scope.prior} baseline={scope.baseline} />
-              <ProgressGaps gaps={scope.gaps} />
+              <ProgressGaps gaps={scope.gaps ?? []} />
             </li>
           ))}
         </ul>
@@ -511,8 +520,11 @@ function ProgressSources({
   );
 }
 
-function ProgressGaps({ gaps }: { gaps: ProgressComparisonGap[] }) {
-  if (gaps.length === 0) return null;
+// `gaps` is absent on reviews whose analysis_metadata predates the current
+// ProgressScopeResult shape, and the panel reads that JSON through a cast, so
+// the type cannot be trusted at runtime.
+function ProgressGaps({ gaps }: { gaps?: ProgressComparisonGap[] }) {
+  if (!gaps || gaps.length === 0) return null;
   return (
     <ul className="mt-2 space-y-1 rounded-md bg-plan-track p-2 text-xs text-ink-muted">
       {gaps.map((gap, index) => (
