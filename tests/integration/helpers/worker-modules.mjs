@@ -56,7 +56,9 @@ function compileGraph(entryPath, compiled) {
       if (!depPath) return full; // bare or non-TS import: leave untouched
       const dep = compileGraph(depPath, compiled);
       deps.push(dep.target);
-      return `${prefix}${quote}${dep.target}${quote}`;
+      // A rewritten specifier must be a file URL, not a path: on Windows a
+      // raw drive path ("C:\\...") is rejected as an unsupported URL scheme.
+      return `${prefix}${quote}${pathToFileURL(dep.target).href}${quote}`;
     },
   );
   writeFileSync(target, rewritten);
